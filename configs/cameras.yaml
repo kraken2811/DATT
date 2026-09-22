@@ -8,12 +8,12 @@ cameras:
     description: "Primary Tokyo live pedestrian crosswalk stream"
 
   camera_02:
-    name: "YouTube Live - Alternate View"
+    name: "YouTube Live - Wildlife Waterhole"
     type: youtube
-    url: "https://youtu.be/H-4Zio23vUQ"
+    url: "https://www.youtube.com/watch?v=ydYDqZQpim8"
     width: 1280
     height: 720
-    description: "Secondary alternate live stream for switching tests"
+    description: "Namibia Namib Desert 24/7 wildlife live stream"
 
   camera_03:
     name: "RTSP Camera Example"
