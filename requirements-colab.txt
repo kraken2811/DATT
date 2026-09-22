@@ -11,4 +11,4 @@ numpy<2.0.0
 yt-dlp
 imageio-ffmpeg
 psutil
-streamlit>=1.30.0
+streamlit>=1.40.0

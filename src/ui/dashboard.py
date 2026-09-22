@@ -3,7 +3,7 @@
 Phase 4 Version 3: Camera Management & Event Logging.
 Provides a modern camera management & observability dashboard:
 - Camera Control: Multi-camera selector and dynamic switching
-- Video Monitor: Smooth 25-30 FPS native MJPEG video stream
+- Video Monitor: Server-side MJPEG relay with a 30 Hz display target
 - Realtime Telemetry: Live metrics refreshed at 5-10 Hz
 - Event Viewer: Realtime occupancy change event log with snapshot thumbnails
 
@@ -12,6 +12,8 @@ Usage:
 """
 
 import json
+from pathlib import Path
+import sys
 import time
 from typing import Any
 import urllib.error
@@ -19,6 +21,10 @@ import urllib.parse
 import urllib.request
 
 import streamlit as st
+
+# Support both `streamlit run src/ui/dashboard.py` and module/test imports.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.ui.mjpeg_client import MJPEGReader
 
 # Configure page layout
 st.set_page_config(
@@ -121,6 +127,37 @@ def trigger_camera_switch(server_url: str, camera_id: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
+@st.cache_data(ttl=60, max_entries=24, show_spinner=False)
+def fetch_snapshot(url: str) -> bytes:
+    """Send snapshot bytes through Streamlit, never a browser-local URL."""
+    with urllib.request.urlopen(url, timeout=2.0) as response:
+        return response.read()
+
+
+@st.fragment(run_every=1.0 / 30)
+def render_video(endpoint: str) -> None:
+    reader = st.session_state.get("video_reader")
+    if reader is None or reader.endpoint != endpoint:
+        if reader is not None:
+            reader.close()
+        reader = MJPEGReader(endpoint)
+        st.session_state.video_reader = reader
+    image, status, error = reader.poll()
+    if error:
+        st.error("VIDEO STREAM ERROR")
+        st.code(f"Endpoint: {endpoint}\nHTTP status: {status if status is not None else 'unavailable'}\nException: {error}")
+        st.caption("Reconnecting automatically...")
+    elif image:
+        # Inline bytes travel over Streamlit's existing WebSocket through the
+        # Colab proxy. No browser request to port 8000 or media URL is needed.
+        st.markdown(
+            f'<div class="video-container"><img src="{image}" '
+            'alt="Realtime AI Video Feed"></div>', unsafe_allow_html=True,
+        )
+    else:
+        st.info(f"Connecting to video stream: {endpoint}")
+
+
 def main() -> None:
     # Sidebar: Connection & Camera Management
     with st.sidebar:
@@ -187,18 +224,10 @@ def main() -> None:
     col_video, col_metrics = st.columns([13, 7], gap="medium")
 
     with col_video:
-        st.markdown("##### 📹 Live Camera Stream (25-30 FPS MJPEG)")
+        st.markdown("##### 📹 Live Camera Stream (server-relayed MJPEG)")
         video_feed_url = f"{server_url.rstrip('/')}/video_feed"
-        # Render native MJPEG stream via HTML <img>. Never calls st.image in a loop!
-        st.markdown(
-            f"""
-            <div class="video-container">
-                <img src="{video_feed_url}" alt="Realtime AI Video Feed">
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.caption("Zero-queue native MJPEG stream with dynamic camera switching.")
+        render_video(video_feed_url)
+        st.caption("Server-side MJPEG relay; latest-frame display, target 30 FPS.")
 
     with col_metrics:
         st.markdown("##### 📊 Realtime AI Telemetry")
@@ -212,7 +241,8 @@ def main() -> None:
     # 4. Independent Telemetry Refresh Loop (5-10 Hz)
     sleep_sec = 1.0 / refresh_interval_ms
 
-    while True:
+    @st.fragment(run_every=sleep_sec)
+    def refresh_telemetry_and_events():
         telem = fetch_json(f"{server_url.rstrip('/')}/telemetry")
         if telem is None:
             telem = {
@@ -316,11 +346,14 @@ def main() -> None:
                         snap_path = ev.get("snapshot_path", "")
                         if snap_path:
                             snap_url = f"{server_url.rstrip('/')}/event_snapshot?path={urllib.parse.quote(snap_path)}"
-                            st.image(snap_url, caption=f"Snapshot @ {ev['timestamp']}", use_container_width=True)
+                            try:
+                                st.image(fetch_snapshot(snap_url), caption=f"Snapshot @ {ev['timestamp']}", use_container_width=True)
+                            except Exception as exc:
+                                st.warning(f"Snapshot unavailable: {exc}")
             else:
                 st.info("No occupancy change events logged yet today.")
 
-        time.sleep(sleep_sec)
+    refresh_telemetry_and_events()
 
 
 if __name__ == "__main__":
