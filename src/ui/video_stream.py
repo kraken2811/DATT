@@ -18,6 +18,7 @@ import threading
 import time
 from typing import Any
 import urllib.parse
+import socket
 
 import cv2
 import numpy as np
@@ -34,6 +35,19 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
     # References to SharedRuntimeState and CameraManager (set on server class)
     state: SharedRuntimeState = shared_state
     camera_manager: CameraManager | None = None
+
+    def setup(self) -> None:
+        super().setup()
+        # A stalled Colab proxy must not leave this worker in CLOSE_WAIT.
+        self.connection.settimeout(15.0)
+        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        self._video_session = None
+
+    def finish(self) -> None:
+        try:
+            super().finish()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, socket.timeout):
+            pass
 
     def log_message(self, format: str, *args: Any) -> None:
         """Suppress standard HTTP server access logs to keep terminal clean."""
@@ -91,6 +105,12 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
 
     def handle_video_feed(self) -> None:
         """Stream MJPEG multipart video feed using latest-frame semantics."""
+        self._video_session = self.server.owner.claim_video_client(self)
+        if self._video_session is None:
+            self.send_response(503)
+            self.send_header("Retry-After", "1")
+            self.end_headers()
+            return
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Age", "0")
@@ -142,9 +162,21 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
 
                 self._write_frame(encoded_jpg.tobytes())
 
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            # Client closed browser tab or refreshed; clean disconnect
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, socket.timeout, EOFError):
+            # Client closed browser tab or proxy stopped reading.
             pass
+        finally:
+            self.server.owner.release_video_client(self, self._video_session)
+            self._video_session = None
+            self.close_connection = True
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except (OSError, AttributeError):
+                pass
+            try:
+                self.connection.close()
+            except OSError:
+                pass
 
     def _write_frame(self, frame_bytes: bytes) -> None:
         """Write a single boundary JPEG frame to client socket."""
@@ -400,6 +432,31 @@ class MJPEGServer:
         self.camera_manager = camera_manager
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self._client_lock = threading.Lock()
+        self._active_video_client: tuple[StreamRequestHandler, int] | None = None
+        self._client_generation = 0
+
+    def claim_video_client(self, handler: StreamRequestHandler) -> int:
+        """Keep at most one stream; a reconnect evicts the previous socket."""
+        with self._client_lock:
+            old = self._active_video_client
+            if old is not None:
+                old_handler, _ = old
+                try:
+                    old_handler.close_connection = True
+                    old_handler.connection.shutdown(socket.SHUT_RDWR)
+                    old_handler.connection.close()
+                except (OSError, AttributeError):
+                    pass
+            self._client_generation += 1
+            token = self._client_generation
+            self._active_video_client = (handler, token)
+            return token
+
+    def release_video_client(self, handler: StreamRequestHandler, token: int | None) -> None:
+        with self._client_lock:
+            if self._active_video_client == (handler, token):
+                self._active_video_client = None
 
     def start(self) -> None:
         """Start the MJPEG HTTP server in a daemon thread."""
@@ -408,6 +465,9 @@ class MJPEGServer:
 
         # Use ThreadingHTTPServer so each stream connection runs concurrently
         self._server = ThreadingHTTPServer((self.host, self.port), StreamRequestHandler)
+        self._server.owner = self
+        self._server.daemon_threads = True
+        self._server.allow_reuse_address = True
         setattr(self._server, "running", True)
 
         self._thread = threading.Thread(
@@ -439,4 +499,3 @@ def start_stream_server(
     server = MJPEGServer(host=host, port=port, state=state, camera_manager=camera_manager)
     server.start()
     return server
-
