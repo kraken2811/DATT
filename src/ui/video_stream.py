@@ -13,21 +13,27 @@ old frames are automatically dropped without unbounded queue buffering.
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+from pathlib import Path
 import threading
 import time
 from typing import Any
+import urllib.parse
 
 import cv2
 import numpy as np
 
+from src.config.camera_config import list_cameras
+from src.events.event_storage import event_storage
 from src.runtime.shared_state import SharedRuntimeState, shared_state
+from src.stream.camera_manager import CameraManager
 
 
 class StreamRequestHandler(BaseHTTPRequestHandler):
-    """HTTP request handler for MJPEG video streaming and JSON telemetry."""
+    """HTTP request handler for MJPEG video streaming, telemetry, and camera control."""
 
-    # Reference to SharedRuntimeState (set on server class)
+    # References to SharedRuntimeState and CameraManager (set on server class)
     state: SharedRuntimeState = shared_state
+    camera_manager: CameraManager | None = None
 
     def log_message(self, format: str, *args: Any) -> None:
         """Suppress standard HTTP server access logs to keep terminal clean."""
@@ -37,13 +43,15 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         """Handle CORS pre-flight requests."""
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "*")
         self.end_headers()
 
     def do_GET(self) -> None:
-        """Route GET requests to video feed, telemetry, or status."""
-        path = self.path.split("?")[0]
+        """Route GET requests to video feed, telemetry, camera control, or events."""
+        parsed_url = urllib.parse.urlparse(self.path)
+        path = parsed_url.path
+        query = urllib.parse.parse_qs(parsed_url.query)
 
         if path == "/video_feed":
             self.handle_video_feed()
@@ -51,8 +59,32 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self.handle_telemetry()
         elif path == "/status":
             self.handle_status()
+        elif path == "/cameras":
+            self.handle_cameras()
+        elif path == "/switch_camera":
+            self.handle_switch_camera(query)
+        elif path == "/events":
+            self.handle_events(query)
+        elif path == "/event_snapshot":
+            self.handle_event_snapshot(query)
         elif path == "/":
             self.handle_root()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self) -> None:
+        """Route POST requests (e.g. switch_camera)."""
+        path = self.path.split("?")[0]
+        if path == "/switch_camera":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len).decode("utf-8") if content_len > 0 else "{}"
+            try:
+                data = json.loads(body)
+            except Exception:
+                data = {}
+            cam_id = data.get("camera_id") or data.get("id")
+            self._execute_camera_switch(cam_id)
         else:
             self.send_response(404)
             self.end_headers()
@@ -143,9 +175,123 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             "status": telemetry.status,
             "error_message": telemetry.error_message,
             "frame_id": telemetry.frame_id,
+            "camera_id": telemetry.camera_id,
+            "camera_name": telemetry.camera_name,
+            "last_event": telemetry.last_event,
+            "event_count_today": telemetry.event_count_today,
         }).encode("utf-8")
 
         self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def handle_cameras(self) -> None:
+        """Return list of configured cameras."""
+        try:
+            cameras = [c.to_dict() for c in list_cameras()]
+            active_cam = self.camera_manager.get_active_camera() if self.camera_manager else None
+            data = {
+                "status": "ok",
+                "active_camera_id": active_cam.id if active_cam else "camera_01",
+                "cameras": cameras,
+            }
+        except Exception as exc:
+            data = {"status": "error", "message": str(exc), "cameras": []}
+
+        body = json.dumps(data).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def handle_switch_camera(self, query: dict[str, list[str]]) -> None:
+        """Handle camera switch request via GET query param (e.g. /switch_camera?id=camera_02)."""
+        cam_id = query.get("id", [""])[0] or query.get("camera_id", [""])[0]
+        self._execute_camera_switch(cam_id)
+
+    def _execute_camera_switch(self, camera_id: str | None) -> None:
+        """Execute dynamic camera switch on CameraManager."""
+        if not camera_id:
+            self._send_json_response({"status": "error", "message": "Missing camera_id"}, code=400)
+            return
+
+        if self.camera_manager is None:
+            self._send_json_response(
+                {"status": "error", "message": "CameraManager not connected to server"}, code=503
+            )
+            return
+
+        try:
+            cam_info = self.camera_manager.switch_camera(camera_id)
+            self.state.set_camera(cam_info.id, cam_info.name)
+            self._send_json_response(
+                {
+                    "status": "ok",
+                    "camera_id": cam_info.id,
+                    "camera_name": cam_info.name,
+                    "message": f"Switched to camera {cam_info.name}",
+                }
+            )
+        except Exception as exc:
+            self.state.set_status("ERROR", f"Camera switch failed: {exc}")
+            self._send_json_response({"status": "error", "message": str(exc)}, code=500)
+
+    def handle_events(self, query: dict[str, list[str]]) -> None:
+        """Return recent occupancy events from SQLite."""
+        try:
+            limit = int(query.get("limit", ["20"])[0])
+        except ValueError:
+            limit = 20
+        cam_id = query.get("camera_id", [None])[0]
+
+        events = event_storage.get_recent_events(limit=limit, camera_id=cam_id)
+        today_count = event_storage.get_event_count_today()
+        self._send_json_response(
+            {"status": "ok", "events": events, "event_count_today": today_count}
+        )
+
+    def handle_event_snapshot(self, query: dict[str, list[str]]) -> None:
+        """Serve JPEG image snapshot from data/events/."""
+        rel_path = query.get("path", [""])[0]
+        if not rel_path:
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        project_root = Path(__file__).resolve().parent.parent.parent
+        target_file = (project_root / rel_path).resolve()
+        snapshot_dir = (project_root / "data" / "events").resolve()
+
+        # Prevent directory traversal attacks
+        if not str(target_file).startswith(str(snapshot_dir)) or not target_file.is_file():
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        try:
+            with open(target_file, "rb") as f:
+                img_data = f.read()
+
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(img_data)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(img_data)
+        except Exception:
+            self.send_response(500)
+            self.end_headers()
+
+    def _send_json_response(self, data: dict[str, Any], code: int = 200) -> None:
+        """Convenience helper to send JSON response."""
+        body = json.dumps(data).encode("utf-8")
+        self.send_response(code)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -246,16 +392,19 @@ class MJPEGServer:
         host: str = "0.0.0.0",
         port: int = 8000,
         state: SharedRuntimeState = shared_state,
+        camera_manager: CameraManager | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.state = state
+        self.camera_manager = camera_manager
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         """Start the MJPEG HTTP server in a daemon thread."""
         StreamRequestHandler.state = self.state
+        StreamRequestHandler.camera_manager = self.camera_manager
 
         # Use ThreadingHTTPServer so each stream connection runs concurrently
         self._server = ThreadingHTTPServer((self.host, self.port), StreamRequestHandler)
@@ -284,8 +433,10 @@ def start_stream_server(
     host: str = "0.0.0.0",
     port: int = 8000,
     state: SharedRuntimeState = shared_state,
+    camera_manager: CameraManager | None = None,
 ) -> MJPEGServer:
     """Convenience helper to instantiate and start MJPEG server."""
-    server = MJPEGServer(host=host, port=port, state=state)
+    server = MJPEGServer(host=host, port=port, state=state, camera_manager=camera_manager)
     server.start()
     return server
+
