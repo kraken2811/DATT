@@ -33,6 +33,10 @@ class TelemetrySnapshot:
     vram_mb: float = 0.0
     model_name: str = "YOLO11s"
     input_size: str = "640x640"
+    camera_id: str = "camera_01"
+    camera_name: str = ""
+    last_event: str = "None"
+    event_count_today: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Convert snapshot to standard Python dict."""
@@ -58,6 +62,12 @@ class SharedRuntimeState:
         # Status
         self._status: str = "STOPPED"  # "STOPPED", "RUNNING", "ERROR"
         self._error_message: str = ""
+
+        # Camera & Events
+        self._camera_id: str = "camera_01"
+        self._camera_name: str = ""
+        self._last_event: str = "None"
+        self._event_count_today: int = 0
 
         # Telemetry
         self._people_count: int = 0
@@ -91,6 +101,10 @@ class SharedRuntimeState:
         vram_mb: float = 0.0,
         model_name: str = "YOLO11s",
         input_size: str = "640x640",
+        camera_id: str | None = None,
+        camera_name: str | None = None,
+        last_event: str | None = None,
+        event_count_today: int | None = None,
     ) -> None:
         """Atomically update state with the newest frame and metrics.
 
@@ -117,8 +131,32 @@ class SharedRuntimeState:
             self._model_name = model_name
             self._input_size = input_size
 
+            if camera_id is not None:
+                self._camera_id = camera_id
+            if camera_name is not None:
+                self._camera_name = camera_name
+            if last_event is not None:
+                self._last_event = last_event
+            if event_count_today is not None:
+                self._event_count_today = event_count_today
+
             if self._status != "ERROR":
                 self._status = "RUNNING"
+
+    def set_camera(self, camera_id: str, camera_name: str) -> None:
+        """Update the active camera identifiers."""
+        with self._lock:
+            self._camera_id = camera_id
+            self._camera_name = camera_name
+
+    def record_event(self, event_desc: str, count_today: int | None = None) -> None:
+        """Record an event description and update today's event count."""
+        with self._lock:
+            self._last_event = event_desc
+            if count_today is not None:
+                self._event_count_today = count_today
+            else:
+                self._event_count_today += 1
 
     def set_status(self, status: str, error_message: str = "") -> None:
         """Update the operational status of the pipeline."""
@@ -160,6 +198,10 @@ class SharedRuntimeState:
                 vram_mb=self._vram_mb,
                 model_name=self._model_name,
                 input_size=self._input_size,
+                camera_id=self._camera_id,
+                camera_name=self._camera_name,
+                last_event=self._last_event,
+                event_count_today=self._event_count_today,
             )
 
     def reset(self) -> None:
@@ -173,6 +215,7 @@ class SharedRuntimeState:
             self._people_count = 0
             self._detection_count = 0
             self._track_count = 0
+
 
 
 # Global shared singleton instance

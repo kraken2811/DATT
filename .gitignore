@@ -39,6 +39,9 @@ logs/*
 !logs/.gitkeep
 *.log
 *.bak
+data/*.db
+data/events/*
+!data/events/.gitkeep
 
 # OS generated
 Thumbs.db
