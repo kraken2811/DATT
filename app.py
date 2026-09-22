@@ -15,8 +15,11 @@ import time
 import config
 from src.counter.zone_counter import ZoneCounter
 from src.detector.yolo_detector import YOLODetector
+from src.runtime.shared_state import shared_state
 from src.stream.youtube_stream import CameraReader
 from src.tracker.bytetrack_tracker import PersonTracker
+from src.ui.frame_renderer import render_frame
+from src.ui.video_stream import start_stream_server
 from src.utils.fps import FPSMeter
 from src.utils.logger import logger
 
@@ -61,10 +64,20 @@ def log_realtime_hud(
     )
 
 
-def run_pipeline(max_frames: int | None = None) -> dict:
-    """Execute the end-to-end people counter pipeline without cv2.imshow."""
+def run_pipeline(
+    max_frames: int | None = None,
+    ui_mode: bool = False,
+    host: str = "0.0.0.0",
+    port: int = 8000,
+) -> dict:
+    """Execute the end-to-end people counter pipeline.
+
+    Supports Normal CLI mode (Phase 3.2) and UI mode (Phase 4 Level 2) with
+    MJPEG streaming & shared runtime state.
+    """
     logger.info("==================================================")
-    logger.info("Starting DATT - AI People Counter (Phase 3.2 Colab CUDA)")
+    mode_desc = "Phase 4 Level 2 Monitoring UI" if ui_mode else "Phase 3.2 Colab CUDA"
+    logger.info("Starting DATT - AI People Counter (%s)", mode_desc)
     logger.info("==================================================")
 
     # 1. Initialize Components
@@ -94,6 +107,16 @@ def run_pipeline(max_frames: int | None = None) -> dict:
     )
 
     fps_meter = FPSMeter(window_seconds=1.0)
+
+    # Start MJPEG Video Stream Server if in UI mode
+    server = None
+    if ui_mode:
+        logger.info("Starting MJPEG Stream Server at http://%s:%d...", host, port)
+        server = start_stream_server(host=host, port=port, state=shared_state)
+        shared_state.set_status("RUNNING")
+        logger.info("MJPEG video stream:  http://%s:%d/video_feed", host, port)
+        logger.info("Realtime telemetry:  http://%s:%d/telemetry", host, port)
+        logger.info("To launch dashboard: streamlit run src/ui/dashboard.py")
 
     logger.info("Starting camera stream...")
     camera.start()
@@ -143,7 +166,32 @@ def run_pipeline(max_frames: int | None = None) -> dict:
             last_track_count = len(tracks)
             last_people_in_view = people_in_view
 
-            # 5. Measure Processing FPS & Output Realtime HUD Log
+            # 5. UI Observation Layer (Non-blocking latest-frame update)
+            if ui_mode:
+                annotated_frame = render_frame(
+                    frame=frame,
+                    tracks=tracks,
+                    people_count=last_people_in_view,
+                    zone_polygon=config.ZONE_POLYGON,
+                )
+                shared_state.update(
+                    latest_frame=frame,
+                    annotated_frame=annotated_frame,
+                    people_count=last_people_in_view,
+                    detection_count=last_det_count,
+                    track_count=last_track_count,
+                    stream_fps=camera.stream_fps,
+                    processing_fps=fps_meter.fps,
+                    yolo_latency_ms=last_yolo_ms,
+                    pipeline_latency_ms=last_pipeline_ms,
+                    device=detector.device_type,
+                    gpu_name=detector.device_name,
+                    vram_mb=detector.vram_allocated_mb,
+                    model_name="YOLO11s",
+                    input_size=f"{config.IMG_SIZE}x{config.IMG_SIZE}",
+                )
+
+            # 6. Measure Processing FPS & Output Realtime HUD Log
             fps_updated = fps_meter.tick()
             if fps_updated or total_frames == 1:
                 log_realtime_hud(
@@ -165,9 +213,19 @@ def run_pipeline(max_frames: int | None = None) -> dict:
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user (Ctrl+C).")
+    except Exception as exc:
+        logger.error("Error in AI pipeline: %s", exc, exc_info=True)
+        if ui_mode:
+            shared_state.set_status("ERROR", str(exc))
+        raise
     finally:
         logger.info("Stopping camera reader and releasing resources...")
         camera.stop()
+        if server is not None:
+            logger.info("Stopping MJPEG stream server...")
+            server.stop()
+        if ui_mode:
+            shared_state.set_status("STOPPED")
         logger.info("Pipeline stopped cleanly.")
 
     # Calculate final benchmark summary
@@ -186,7 +244,24 @@ def run_pipeline(max_frames: int | None = None) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="DATT - AI People Counter (Phase 3.2)")
+    parser = argparse.ArgumentParser(description="DATT - AI People Counter (Phase 4)")
+    parser.add_argument(
+        "--ui",
+        action="store_true",
+        help="Enable UI mode (starts MJPEG video stream server on port 8000)",
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Host for MJPEG stream server (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for MJPEG stream server (default: 8000)",
+    )
     parser.add_argument(
         "--max-frames",
         type=int,
@@ -194,8 +269,14 @@ def main() -> None:
         help="Maximum frames to process (default: run indefinitely)",
     )
     args = parser.parse_args()
-    run_pipeline(max_frames=args.max_frames)
+    run_pipeline(
+        max_frames=args.max_frames,
+        ui_mode=args.ui,
+        host=args.host,
+        port=args.port,
+    )
 
 
 if __name__ == "__main__":
     main()
+
