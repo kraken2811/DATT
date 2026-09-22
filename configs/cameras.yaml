@@ -1,0 +1,24 @@
+cameras:
+  camera_01:
+    name: "YouTube Live - Tokyo Street"
+    type: youtube
+    url: "https://youtu.be/Cp4RRAEgpeU"
+    width: 1280
+    height: 720
+    description: "Primary Tokyo live pedestrian crosswalk stream"
+
+  camera_02:
+    name: "YouTube Live - Alternate View"
+    type: youtube
+    url: "https://youtu.be/H-4Zio23vUQ"
+    width: 1280
+    height: 720
+    description: "Secondary alternate live stream for switching tests"
+
+  camera_03:
+    name: "RTSP Camera Example"
+    type: rtsp
+    url: "rtsp://127.0.0.1:8554/live"
+    width: 1280
+    height: 720
+    description: "Simulated RTSP surveillance stream"
