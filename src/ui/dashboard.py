@@ -200,8 +200,8 @@ def main() -> None:
         refresh_interval_ms = st.slider(
             "Telemetry Refresh Rate (Hz)",
             min_value=2,
-            max_value=12,
-            value=6,
+            max_value=5,
+            value=2,
             help="Frequency of telemetry metrics refresh (default: 6 Hz).",
         )
         st.markdown(
@@ -318,13 +318,19 @@ def main() -> None:
                 f"**Hardware:** {telem.get('device', 'N/A')} ({telem.get('gpu_name', 'N/A')}) | "
                 f"**VRAM:** {telem.get('vram_mb', 0.0):.1f} MB  \n"
                 f"**Model:** {telem.get('model_name', 'YOLO11s')} ({telem.get('input_size', '640x640')})  \n"
-                f"**Last Event:** `{telem.get('last_event', 'None')}` | "
-                f"**Events Today:** `{telem.get('event_count_today', 0)}`"
+                f"**Last Event:** `{telem.get('last_event_time', telem.get('last_event', 'None'))}` | "
+                f"**Events Today:** `{telem.get('event_count_today', 0)}`  | "
+                f"**Filtered Fluctuations:** `{telem.get('filtered_event_count', 0)}`  | "
+                f"**Last Saved Count:** `{telem.get('last_saved_people_count', 0)}`"
             )
 
         # Render Recent Events in Bottom Section
-        events_resp = fetch_json(f"{server_url.rstrip('/')}/events?limit=6") or {}
-        recent_events = events_resp.get("events", [])
+        now = time.monotonic()
+        if now - st.session_state.get("last_event_fetch", 0.0) >= 10.0:
+            events_resp = fetch_json(f"{server_url.rstrip('/')}/events?limit=5") or {}
+            st.session_state.recent_events = events_resp.get("events", [])
+            st.session_state.last_event_fetch = now
+        recent_events = st.session_state.get("recent_events", [])
         with events_placeholder.container():
             if recent_events:
                 ev_cols = st.columns(min(len(recent_events), 4))
