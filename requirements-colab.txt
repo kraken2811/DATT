@@ -1,0 +1,13 @@
+# ==============================================================================
+# DATT - AI People Counter Requirements for Google Colab (CUDA GPU)
+# Phase 3: YOLO11s PyTorch CUDA Runtime
+# ==============================================================================
+ultralytics>=8.2.0
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python-headless>=4.8.0
+supervision>=0.22.0
+numpy<2.0.0
+yt-dlp
+imageio-ffmpeg
+psutil

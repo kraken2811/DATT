@@ -223,6 +223,8 @@ def detect_tiled(frame: np.ndarray, session: ort.InferenceSession, input_name: s
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).transpose(2, 0, 1)
         tensor = np.ascontiguousarray(img.astype(np.float32) / 255.0)[None, ...]
         output = session.run(None, {input_name: tensor})[0]
+        if not isinstance(output, np.ndarray):
+            raise TypeError(f"YOLO output must be a NumPy array, got {type(output).__name__}")
         xyxy, conf = decode_person_boxes(
             output, scale, dx, dy, tx1, ty1, frame_w, frame_h
         )

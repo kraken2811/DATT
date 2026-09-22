@@ -18,10 +18,13 @@ HEIGHT: int = 720
 # 2. MODEL & INFERENCE RUNTIME
 # ==============================================================================
 PROJECT_ROOT: Path = Path(__file__).resolve().parent
-MODEL_PATH: str = str(PROJECT_ROOT / "models" / "yolo11s_640.onnx")
+MODEL_PATH: str = str(PROJECT_ROOT / "models" / "yolo11s.pt")
 IMG_SIZE: int = 640
 
-# Execution providers for ONNX Runtime (DirectML prioritized on Windows, CPU fallback)
+# Target device: "cuda:0" on Google Colab GPU runtime, fallback to "cpu" if CUDA unavailable
+DEVICE: str = "cuda:0"
+
+# Execution providers for ONNX Runtime compatibility
 PROVIDERS: list[Any] = [
     ("DmlExecutionProvider", {"device_id": 0}),
     "CPUExecutionProvider",

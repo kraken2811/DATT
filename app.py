@@ -33,12 +33,17 @@ def draw_hud(
     frame_age_ms: float,
     capture_latency_ms: float,
     people_in_view: int,
+    device_type: str = "CUDA",
+    gpu_name: str = "GPU",
+    vram_mb: float = 0.0,
 ) -> None:
     """Render performance and tracking telemetry HUD overlay on frame."""
     debug_lines = [
+        f"Device: {device_type}",
+        f"GPU: {gpu_name}",
+        f"VRAM: {vram_mb:.1f} MB" if vram_mb > 0 else f"VRAM: N/A ({device_type})",
         f"Model: {model_name}",
         f"Input: {img_size}",
-        f"Tiles: {tile_count}",
         "",
         f"Detections: {num_detections}",
         f"Tracks: {num_tracks}",
@@ -193,12 +198,15 @@ def main() -> None:
                 frame_age_ms=camera.last_frame_age_ms,
                 capture_latency_ms=camera.last_capture_latency_ms,
                 people_in_view=people_in_view,
+                device_type=getattr(detector, "device_type", "CUDA"),
+                gpu_name=getattr(detector, "device_name", "GPU"),
+                vram_mb=getattr(detector, "vram_allocated_mb", 0.0),
             )
 
             # 7. GUI Display with Headless Fallback
             if gui_available:
                 try:
-                    cv2.imshow("DATT - AI People Counter (Phase 2)", frame)
+                    cv2.imshow("DATT - AI People Counter (Phase 3)", frame)
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord("q"):
                         logger.info("User requested quit ('q').")
