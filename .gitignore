@@ -1,0 +1,48 @@
+# Python & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+venv/
+env/
+ENV/
+.venv/
+
+# VS Code & IDEs
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# Data & Models (Do not commit large binaries)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/test_samples/*
+!data/test_samples/.gitkeep
+models/**/*.pt
+models/**/*.onnx
+models/**/*.bin
+models/**/*.xml
+!models/**/.gitkeep
+
+# Results & Logs
+results/*
+!results/.gitkeep
+logs/*
+!logs/.gitkeep
+*.log
+*.bak
+
+# OS generated
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
