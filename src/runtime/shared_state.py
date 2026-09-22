@@ -37,6 +37,9 @@ class TelemetrySnapshot:
     camera_name: str = ""
     last_event: str = "None"
     event_count_today: int = 0
+    filtered_event_count: int = 0
+    last_event_time: str = "None"
+    last_saved_people_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Convert snapshot to standard Python dict."""
@@ -68,6 +71,9 @@ class SharedRuntimeState:
         self._camera_name: str = ""
         self._last_event: str = "None"
         self._event_count_today: int = 0
+        self._filtered_event_count: int = 0
+        self._last_event_time: str = "None"
+        self._last_saved_people_count: int = 0
 
         # Telemetry
         self._people_count: int = 0
@@ -105,6 +111,7 @@ class SharedRuntimeState:
         camera_name: str | None = None,
         last_event: str | None = None,
         event_count_today: int | None = None,
+        last_saved_people_count: int | None = None,
     ) -> None:
         """Atomically update state with the newest frame and metrics.
 
@@ -139,6 +146,8 @@ class SharedRuntimeState:
                 self._last_event = last_event
             if event_count_today is not None:
                 self._event_count_today = event_count_today
+            if last_saved_people_count is not None:
+                self._last_saved_people_count = last_saved_people_count
 
             if self._status != "ERROR":
                 self._status = "RUNNING"
@@ -157,6 +166,17 @@ class SharedRuntimeState:
                 self._event_count_today = count_today
             else:
                 self._event_count_today += 1
+
+    def record_filtered_event(self) -> None:
+        with self._lock:
+            self._filtered_event_count += 1
+
+    def record_saved_event(self, event_desc: str, timestamp: str, people_count: int, count_today: int) -> None:
+        with self._lock:
+            self._last_event = event_desc
+            self._last_event_time = timestamp
+            self._last_saved_people_count = people_count
+            self._event_count_today = count_today
 
     def set_status(self, status: str, error_message: str = "") -> None:
         """Update the operational status of the pipeline."""
@@ -202,6 +222,9 @@ class SharedRuntimeState:
                 camera_name=self._camera_name,
                 last_event=self._last_event,
                 event_count_today=self._event_count_today,
+                filtered_event_count=self._filtered_event_count,
+                last_event_time=self._last_event_time,
+                last_saved_people_count=self._last_saved_people_count,
             )
 
     def reset(self) -> None:

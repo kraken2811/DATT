@@ -17,6 +17,11 @@ from src.events.event_storage import EventStorage, event_storage
 from src.runtime.shared_state import SharedRuntimeState, shared_state
 from src.utils.logger import logger
 
+EVENT_REPORT_INTERVAL = 300.0
+SIGNIFICANT_CHANGE = 5
+STABLE_TIME_SECONDS = 5.0
+SNAPSHOT_INTERVAL_SECONDS = 60.0
+
 
 class EventManager:
     """Detects and asynchronously persists people counting events."""
@@ -25,15 +30,21 @@ class EventManager:
         self,
         storage: EventStorage = event_storage,
         state: SharedRuntimeState = shared_state,
-        min_snapshot_interval_sec: float = 0.5,
+        min_snapshot_interval_sec: float = SNAPSHOT_INTERVAL_SECONDS,
+        event_report_interval: float = EVENT_REPORT_INTERVAL,
     ) -> None:
         self.storage = storage
         self.state = state
         self.min_snapshot_interval_sec = min_snapshot_interval_sec
+        self.event_report_interval = event_report_interval
 
         self._last_people_count: int | None = None
         self._last_camera_id: str | None = None
         self._last_event_time: float = 0.0
+        self._last_saved_count: int | None = None
+        self._candidate_count: int | None = None
+        self._candidate_since: float = 0.0
+        self._last_report_time: float = time.time()
 
         # Background worker for zero-overhead asynchronous disk writes
         self._task_queue: queue.Queue = queue.Queue(maxsize=100)
@@ -61,24 +72,40 @@ class EventManager:
         Returns:
             dict[str, Any] | None: Event details if an event was generated.
         """
-        # Initial frame initialization
+        now_ts = time.time()
+        # Initial frame initialization; realtime telemetry remains independent.
         if self._last_people_count is None or self._last_camera_id != camera_id:
             self._last_people_count = people_count
             self._last_camera_id = camera_id
+            self._last_saved_count = people_count
+            self._last_report_time = now_ts
+            self.state.update(last_saved_people_count=people_count)
             return None
 
-        # Check for count change
-        if people_count == self._last_people_count:
+        self._last_people_count = people_count
+        old_count = self._last_saved_count if self._last_saved_count is not None else people_count
+        significant = abs(people_count - old_count) >= SIGNIFICANT_CHANGE
+        periodic = now_ts - self._last_report_time >= self.event_report_interval
+        if not significant and not periodic:
+            if people_count != old_count:
+                self.state.record_filtered_event()
+                logger.info("[DATT EVENT FILTER] Ignored: %d -> %d; Reason: normal fluctuation", old_count, people_count)
+            self._candidate_count = None
             return None
 
-        old_count = self._last_people_count
+        if self._candidate_count != people_count:
+            self._candidate_count, self._candidate_since = people_count, now_ts
+            return None
+        if now_ts - self._candidate_since < STABLE_TIME_SECONDS:
+            return None
+
         new_count = people_count
-        self._last_people_count = new_count
-        self._last_camera_id = camera_id
+        self._last_saved_count = new_count
+        self._last_report_time = now_ts
+        self._candidate_count = None
 
         now = datetime.now()
         timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S")
-        now_ts = time.time()
 
         event_data = {
             "time": timestamp_str,
@@ -90,7 +117,7 @@ class EventManager:
 
         # Format human-readable event summary for dashboard / state
         event_summary = f"{camera_id}: {old_count} -> {new_count}"
-        self.state.record_event(event_summary)
+        # Snapshot and persistence are only reached for filtered, stable events.
 
         # Snapshot rate-limiting to avoid disk thrashing on rapid count fluctuation
         should_save_snapshot = (
@@ -111,7 +138,7 @@ class EventManager:
             logger.warning("EventManager: Persistence queue full, dropping event disk write.")
 
         logger.info(
-            "Event Triggered: [%s] Camera '%s' People Changed: %d -> %d",
+            "[DATT EVENT] Saved occupancy event: [%s] Camera '%s' People Changed: %d -> %d",
             timestamp_str,
             camera_id,
             old_count,
@@ -138,7 +165,7 @@ class EventManager:
                     annotated_frame=frame,
                 )
                 today_count = self.storage.get_event_count_today()
-                self.state.record_event(f"{cam_id}: {old_val} -> {new_val}", count_today=today_count)
+                self.state.record_saved_event(f"{cam_id}: {old_val} -> {new_val}", ts_str, new_val, today_count)
             except Exception as exc:
                 logger.error("EventManager Worker Error: %s", exc, exc_info=True)
             finally:
@@ -148,6 +175,8 @@ class EventManager:
         """Reset internal tracking count."""
         self._last_people_count = None
         self._last_camera_id = None
+        self._last_saved_count = None
+        self._candidate_count = None
 
     def stop(self) -> None:
         """Cleanly terminate background worker."""
