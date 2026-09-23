@@ -75,6 +75,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Maximum frames to process (useful for automated benchmarks/tests)",
     )
+    parser.add_argument(
+        "--img-size",
+        type=int,
+        default=960,
+        choices=[640, 768, 960],
+        help="YOLO inference image resolution (default: 960, supported: 640, 768, 960)",
+    )
     return parser.parse_args()
 
 
@@ -89,6 +96,7 @@ def main() -> None:
         ai_port=args.ai_port,
         ui_enabled=args.ui,
         max_frames=args.max_frames,
+        img_size=args.img_size,
     )
     manager.run()
 

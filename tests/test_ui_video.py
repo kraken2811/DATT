@@ -1,15 +1,11 @@
-﻿"""UI relay regression tests."""
-import importlib.util
 from pathlib import Path
-import types
 import sys
 
-_pkg = types.ModuleType("src.ui")
-_pkg.__path__ = []
-sys.modules.setdefault("src.ui", _pkg)
-_spec = importlib.util.spec_from_file_location("src.ui.mjpeg_client", Path(__file__).parents[1] / "src/ui/mjpeg_client.py")
-_client = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_client)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.ui import mjpeg_client as _client
 
 
 def test_mjpeg_parser_rejects_non_multipart():

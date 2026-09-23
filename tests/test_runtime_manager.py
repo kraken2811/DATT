@@ -26,13 +26,23 @@ class TestRuntimeManager(unittest.TestCase):
 
     def test_cli_argument_parsing(self) -> None:
         """Verify command line flags parse correctly in src/main.py."""
-        test_argv = ["src/main.py", "--camera", "camera_02", "--port", "8502", "--max-frames", "25"]
+        # Default flags test
+        with patch.object(sys, "argv", ["src/main.py"]):
+            args_def = parse_args()
+            self.assertEqual(args_def.img_size, 960)
+
+        # Custom flags test
+        test_argv = ["src/main.py", "--camera", "camera_02", "--port", "8502", "--max-frames", "25", "--img-size", "768"]
         with patch.object(sys, "argv", test_argv):
             args = parse_args()
             self.assertEqual(args.camera, "camera_02")
             self.assertEqual(args.port, 8502)
             self.assertEqual(args.max_frames, 25)
+            self.assertEqual(args.img_size, 768)
             self.assertTrue(args.ui)
+
+        mgr = RuntimeManager(img_size=768)
+        self.assertEqual(mgr.img_size, 768)
 
     def test_port_availability_detection(self) -> None:
         """Verify is_port_available accurately detects free and occupied ports."""

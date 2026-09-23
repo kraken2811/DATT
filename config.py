@@ -19,7 +19,7 @@ HEIGHT: int = 720
 # ==============================================================================
 PROJECT_ROOT: Path = Path(__file__).resolve().parent
 MODEL_PATH: str = str(PROJECT_ROOT / "models" / "yolo11s.pt")
-IMG_SIZE: int = 640
+IMG_SIZE: int = 960
 
 # Target device: "cuda:0" on Google Colab GPU runtime, fallback to "cpu" if CUDA unavailable
 DEVICE: str = "cuda:0"

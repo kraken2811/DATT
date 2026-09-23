@@ -107,39 +107,4 @@ def render_frame(
                 cv2.LINE_AA,
             )
 
-    # 3. Draw Top HUD Badge: People in View
-    hud_text = f"PEOPLE IN VIEW: {people_count}"
-    hud_font = cv2.FONT_HERSHEY_DUPLEX
-    hud_scale = 0.75
-    hud_thick = 2
-    (hud_w, hud_h), hud_base = cv2.getTextSize(hud_text, hud_font, hud_scale, hud_thick)
-
-    # Badge in top-left
-    pad = 10
-    bx1 = 15
-    by1 = 15
-    bx2 = bx1 + hud_w + (pad * 2)
-    by2 = by1 + hud_h + (pad * 2)
-
-    # Semi-transparent HUD background
-    sub_img = canvas[by1:by2, bx1:bx2]
-    rect = np.zeros(sub_img.shape, dtype=np.uint8)
-    rect[:] = (15, 15, 25)  # dark slate
-    cv2.addWeighted(sub_img, 0.25, rect, 0.75, 1.0, sub_img)
-
-    # HUD border: Neon Emerald (0, 230, 115)
-    cv2.rectangle(canvas, (bx1, by1), (bx2, by2), (0, 230, 115), 2, cv2.LINE_AA)
-
-    # HUD Text
-    cv2.putText(
-        canvas,
-        hud_text,
-        (bx1 + pad, by2 - pad - 2),
-        hud_font,
-        hud_scale,
-        (255, 255, 255),
-        hud_thick,
-        cv2.LINE_AA,
-    )
-
     return canvas

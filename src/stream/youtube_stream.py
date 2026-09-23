@@ -4,6 +4,7 @@ Continuously captures raw BGR24 frames in a dedicated thread,
 maintaining only the latest frame buffer with zero queue buildup.
 """
 
+from collections import deque
 from dataclasses import dataclass
 import logging
 from pathlib import Path
@@ -184,9 +185,14 @@ def build_ffmpeg_command(
 
 
 class CameraReader:
-    """Continuously reads FFmpeg output pipe and keeps only the newest frame.
+    """Continuously reads FFmpeg output pipe with auto-recovery and health monitoring.
 
-    Implements zero-queue buffer to ensure inference latency does not cause lag.
+    Implements:
+    - Zero-queue buffer to ensure inference latency does not cause lag.
+    - Lifecycle monitoring and automatic reconnect on FFmpeg exit / EOF (up to 5 retries).
+    - Zombie process prevention with proper pipe closure, wait(), and kill() fallback.
+    - Stale frame detection (RUNNING <= 5s, WARNING <= 15s, ERROR > 15s).
+    - Rolling 30-frame sliding window FPS measurement.
     """
 
     def __init__(self, url: str, width: int = 1280, height: int = 720):
@@ -196,7 +202,7 @@ class CameraReader:
         self.frame_size = width * height * 3
 
         self.process: subprocess.Popen | None = None
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.stop_event = threading.Event()
         self.latest: CapturedFrame | None = None
         self.last_read_sequence: int = -1
@@ -210,52 +216,100 @@ class CameraReader:
         self._stderr_thread: threading.Thread | None = None
         self.stderr_lines: list[str] = []
 
+        # Health & Stale Frame Tracking
+        self._last_frame_timestamp: float = 0.0
+        self._stream_alive: bool = False
+        self._stream_timestamps: deque[float] = deque(maxlen=30)
+
+        # Auto-Recovery Configuration
+        self.reconnect_attempts: int = 0
+        self.max_reconnect_retries: int = 5
+        self.reconnect_delays: list[int] = [3, 5, 10, 15, 30]
+
+    @property
+    def last_frame_time(self) -> float:
+        """Timestamp of newest captured frame."""
+        with self.lock:
+            return self._last_frame_timestamp
+
+    @property
+    def frame_age_seconds(self) -> float:
+        """Elapsed seconds since newest frame was captured."""
+        with self.lock:
+            if self._last_frame_timestamp <= 0.0:
+                return 999.0
+            return max(0.0, time.time() - self._last_frame_timestamp)
+
+    @property
+    def stream_alive(self) -> bool:
+        """Health flag indicating stream process is active and publishing recent frames."""
+        with self.lock:
+            age = 999.0 if self._last_frame_timestamp <= 0.0 else max(0.0, time.time() - self._last_frame_timestamp)
+            return self._stream_alive and age <= 15.0
+
+    @property
+    def status(self) -> str:
+        """Operational status based on frame age:
+        - RUNNING: frame_age <= 5s
+        - WARNING: 5s < frame_age <= 15s
+        - ERROR: frame_age > 15s or process stopped
+        """
+        if self.stop_event.is_set():
+            return "STOPPED"
+        with self.lock:
+            if self.finished and not self._stream_alive:
+                return "ERROR"
+            age = 999.0 if self._last_frame_timestamp <= 0.0 else max(0.0, time.time() - self._last_frame_timestamp)
+            if age <= 5.0 and self._stream_alive:
+                return "RUNNING"
+            elif age <= 15.0:
+                return "WARNING"
+            else:
+                return "ERROR"
+
+    def _spawn_ffmpeg(self, stream_url: str) -> None:
+        """Construct FFmpeg command, spawn subprocess, and start stderr drain thread."""
+        ffmpeg_path = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
+        ffmpeg_command = build_ffmpeg_command(
+            ffmpeg_path=ffmpeg_path,
+            stream_url=stream_url,
+            width=self.width,
+            height=self.height,
+        )
+        self.stderr_lines = []
+        self.process = subprocess.Popen(
+            ffmpeg_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if self.process.stderr is not None:
+            self._stderr_thread = threading.Thread(
+                target=self._drain_stderr,
+                args=(self.process.stderr,),
+                name="ffmpeg-stderr",
+                daemon=True,
+            )
+            self._stderr_thread.start()
+
+        time.sleep(0.5)
+        if self.process.poll() is not None:
+            err_msg = " ".join(self.stderr_lines[-5:]) if self.stderr_lines else "Process exited early"
+            raise RuntimeError(f"FFmpeg failed to open video stream: {err_msg}")
+
     def start(self) -> None:
         """Resolve stream URL, spawn FFmpeg process with retries, and start reader thread."""
-        ffmpeg_path = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
         max_retries = 3
         last_error: Exception | None = None
 
         for attempt in range(1, max_retries + 1):
             try:
-                # 1. Resolve direct stream URL
                 stream_url = get_stream_url(self.url)
+                self._spawn_ffmpeg(stream_url)
 
-                # 2. Build FFmpeg command with low latency and proper probing
-                ffmpeg_command = build_ffmpeg_command(
-                    ffmpeg_path=ffmpeg_path,
-                    stream_url=stream_url,
-                    width=self.width,
-                    height=self.height,
-                )
-
-                # 3. Spawn FFmpeg process
-                self.stderr_lines = []
-                self.process = subprocess.Popen(
-                    ffmpeg_command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-
-                # 4. Drain stderr continuously in a daemon thread to prevent pipe blocking
-                if self.process.stderr is not None:
-                    self._stderr_thread = threading.Thread(
-                        target=self._drain_stderr,
-                        args=(self.process.stderr,),
-                        name="ffmpeg-stderr",
-                        daemon=True,
-                    )
-                    self._stderr_thread.start()
-
-                # 5. Verify process did not immediately exit with error
-                time.sleep(0.5)
-                if self.process.poll() is not None:
-                    err_msg = " ".join(self.stderr_lines[-5:]) if self.stderr_lines else "Process exited early"
-                    raise RuntimeError(f"FFmpeg failed to open YouTube video stream: {err_msg}")
-
-                # Success: launch frame reader thread
                 self.stop_event.clear()
                 self.finished = False
+                self._last_frame_timestamp = time.time()
+                self._stream_alive = True
                 self._thread = threading.Thread(
                     target=self._read_loop, name="ffmpeg-capture", daemon=True
                 )
@@ -296,70 +350,145 @@ class CameraReader:
                 pass
 
     def _cleanup_process(self) -> None:
-        """Terminate and clean up FFmpeg process."""
-        if self.process is not None:
-            if self.process.poll() is None:
-                self.process.terminate()
-            try:
-                self.process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=3)
-            if self.process.stdout is not None:
+        """Safely terminate FFmpeg process, closing pipes and avoiding zombie processes."""
+        proc = self.process
+        self.process = None
+
+        if proc is not None:
+            # 1. Close stdout to unblock reading threads
+            if proc.stdout is not None:
                 try:
-                    self.process.stdout.close()
+                    proc.stdout.close()
                 except Exception:
                     pass
-            self.process = None
+
+            # 2. Terminate or kill
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+            try:
+                proc.wait(timeout=2.0)
+            except (subprocess.TimeoutExpired, Exception):
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2.0)
+                except Exception:
+                    pass
+
+            # 3. Close stderr
+            if proc.stderr is not None:
+                try:
+                    proc.stderr.close()
+                except Exception:
+                    pass
+
+    def _reconnect(self) -> bool:
+        """Execute auto-reconnect backoff sequence when FFmpeg exits unexpectedly."""
+        while not self.stop_event.is_set() and self.reconnect_attempts < self.max_reconnect_retries:
+            self.reconnect_attempts += 1
+            delay_idx = min(self.reconnect_attempts - 1, len(self.reconnect_delays) - 1)
+            delay = self.reconnect_delays[delay_idx]
+            logger.warning(
+                "[DATT-STREAM] Reconnect attempt %d/%d (waiting %ds)...",
+                self.reconnect_attempts,
+                self.max_reconnect_retries,
+                delay,
+            )
+            # Sleep with stop_event check
+            if self.stop_event.wait(delay):
+                return False
+
+            try:
+                # Generate new YouTube stream URL
+                new_url = get_stream_url(self.url)
+                self._spawn_ffmpeg(new_url)
+                return True
+            except Exception as exc:
+                logger.warning(
+                    "[DATT-STREAM] Reconnect attempt %d/%d failed: %s",
+                    self.reconnect_attempts,
+                    self.max_reconnect_retries,
+                    exc,
+                )
+                self._cleanup_process()
+
+        logger.error(
+            "[DATT-STREAM] Reconnect limit reached (%d/%d). Camera stream terminated.",
+            self.reconnect_attempts,
+            self.max_reconnect_retries,
+        )
+        return False
 
     def _read_loop(self) -> None:
-        count = 0
-        window_start = time.perf_counter()
+        """Read frame bytes from FFmpeg pipe continuously with auto-reconnection."""
         sequence = 0
+        self.reconnect_attempts = 0
 
-        try:
+        while not self.stop_event.is_set():
             if self.process is None or self.process.stdout is None:
-                raise RuntimeError("FFmpeg stdout is unavailable")
-
-            while not self.stop_event.is_set():
-                read_start = time.perf_counter()
-                raw = read_frame_bytes(self.process.stdout, self.frame_size)
-                read_end = time.perf_counter()
-
-                if len(raw) != self.frame_size:
-                    err_summary = " ".join(self.stderr_lines[-5:]) if self.stderr_lines else ""
-                    if err_summary:
-                        logger.error("FFmpeg error stream: %s", err_summary)
+                if not self._reconnect():
                     break
+                continue
 
+            read_start = time.perf_counter()
+            try:
+                raw = read_frame_bytes(self.process.stdout, self.frame_size)
+            except Exception:
+                raw = b""
+            read_end = time.perf_counter()
+
+            if len(raw) == self.frame_size:
+                now_wall = time.time()
+                now_perf = time.perf_counter()
                 frame = np.frombuffer(raw, np.uint8).reshape(
                     self.height, self.width, 3
                 ).copy()
                 sequence += 1
-                count += 1
-                now = time.perf_counter()
 
                 with self.lock:
                     self.latest = CapturedFrame(
                         sequence=sequence,
-                        captured_at=now,
+                        captured_at=now_perf,
                         capture_latency_ms=(read_end - read_start) * 1000,
                         frame=frame,
                     )
+                    self._last_frame_timestamp = now_wall
+                    self._stream_alive = True
 
-                elapsed = now - window_start
-                if elapsed >= 1.0:
-                    with self.lock:
-                        self.stream_fps = count / elapsed
-                    count = 0
-                    window_start = now
+                # Sliding window FPS (last 30 timestamps)
+                self._stream_timestamps.append(now_perf)
+                if len(self._stream_timestamps) >= 2:
+                    dt = self._stream_timestamps[-1] - self._stream_timestamps[0]
+                    if dt > 0:
+                        with self.lock:
+                            self.stream_fps = (len(self._stream_timestamps) - 1) / dt
 
-        except Exception as exc:
+                if self.reconnect_attempts > 0:
+                    logger.info("[DATT-STREAM] Stream recovered successfully")
+                    self.reconnect_attempts = 0
+
+                continue
+
+            # EOF or broken pipe encountered
+            if self.stop_event.is_set():
+                break
+
+            logger.warning("[DATT-STREAM] FFmpeg exited unexpectedly")
             with self.lock:
-                self.error = exc
-        finally:
-            with self.lock:
-                self.finished = True
+                self._stream_alive = False
+
+            self._cleanup_process()
+
+            if not self._reconnect():
+                break
+
+        with self.lock:
+            self._stream_alive = False
+            self.finished = True
+        self._cleanup_process()
 
     def read(self, timeout: float = 1.0) -> np.ndarray | None:
         """Read the newest available frame.
@@ -367,6 +496,11 @@ class CameraReader:
         Blocks up to timeout seconds until a new frame arrives.
         Returns None if stream has terminated or timed out.
         """
+        # If stream has stalled > 15s while process is alive, terminate stalled FFmpeg to unblock auto-recovery
+        if self.process is not None and self.frame_age_seconds > 15.0:
+            logger.warning("[DATT-STREAM] Stale frame detected (>15s). Terminating unresponsive FFmpeg process.")
+            self._cleanup_process()
+
         deadline = time.perf_counter() + timeout
         while time.perf_counter() < deadline:
             with self.lock:
@@ -379,7 +513,7 @@ class CameraReader:
                     self.last_frame_age_ms = (time.perf_counter() - self.latest.captured_at) * 1000
                     return self.latest.frame.copy()
 
-                if self.finished:
+                if self.finished and not self._stream_alive and self.process is None:
                     return None
 
             time.sleep(0.001)

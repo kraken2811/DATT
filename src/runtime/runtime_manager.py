@@ -62,6 +62,7 @@ class RuntimeManager:
         ai_port: int = 8000,
         ui_enabled: bool = True,
         max_frames: int | None = None,
+        img_size: int = 960,
     ) -> None:
         self.camera_id = camera_id
         self.web_host = web_host
@@ -70,6 +71,7 @@ class RuntimeManager:
         self.ai_port = ai_port
         self.ui_enabled = ui_enabled
         self.max_frames = max_frames
+        self.img_size = img_size
 
         # Lifecycle threads & flags
         self._stop_event = threading.Event()
@@ -102,7 +104,7 @@ class RuntimeManager:
         def _ai_worker() -> None:
             try:
                 from app import run_pipeline
-                # Pass stop_event to run_pipeline for coordinated cancellation
+                # Pass stop_event and img_size to run_pipeline
                 run_pipeline(
                     max_frames=self.max_frames,
                     ui_mode=self.ui_enabled,
@@ -110,9 +112,9 @@ class RuntimeManager:
                     port=self.ai_port,
                     camera_id=self.camera_id,
                     stop_event=self._stop_event,
+                    img_size=self.img_size,
                 )
             except TypeError:
-                # Fallback if run_pipeline doesn't yet take stop_event
                 from app import run_pipeline
                 run_pipeline(
                     max_frames=self.max_frames,
@@ -120,6 +122,7 @@ class RuntimeManager:
                     host=self.ai_host,
                     port=self.ai_port,
                     camera_id=self.camera_id,
+                    img_size=self.img_size,
                 )
             except Exception as exc:
                 if not self._stop_event.is_set():

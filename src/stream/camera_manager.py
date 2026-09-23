@@ -38,6 +38,10 @@ class CameraManager:
     def status(self) -> str:
         """Current operational status of the camera."""
         with self._lock:
+            if self._reader is not None and self._status == "RUNNING":
+                reader_status = self._reader.status
+                if reader_status != "RUNNING":
+                    return reader_status
             return self._status
 
     @property
@@ -51,6 +55,24 @@ class CameraManager:
         """Ingestion FPS from the active camera reader."""
         with self._lock:
             return self._reader.stream_fps if self._reader else 0.0
+
+    @property
+    def stream_alive(self) -> bool:
+        """Whether the active stream is alive and publishing frames."""
+        with self._lock:
+            return self._reader.stream_alive if self._reader else False
+
+    @property
+    def last_frame_time(self) -> float:
+        """Timestamp of newest frame from active camera reader."""
+        with self._lock:
+            return self._reader.last_frame_time if self._reader else 0.0
+
+    @property
+    def frame_age_seconds(self) -> float:
+        """Seconds since newest frame was captured."""
+        with self._lock:
+            return self._reader.frame_age_seconds if self._reader else 999.0
 
     @property
     def finished(self) -> bool:
@@ -163,11 +185,18 @@ class CameraManager:
                         self._error_reason = ""
                 return frame
 
-            if reader.finished:
-                with self._lock:
-                    if self._status == "RUNNING":
+            with self._lock:
+                reader_status = reader.status
+                if reader_status in ("ERROR", "WARNING"):
+                    self._status = reader_status
+                    if reader_status == "WARNING":
+                        self._error_reason = "Stream delay detected: no new frame for >5s"
+                    elif reader.finished:
                         self._status = "ERROR"
                         self._error_reason = "Stream ended or camera disconnected unexpectedly."
+                    else:
+                        self._status = "ERROR"
+                        self._error_reason = "Stream timeout: no frame received for >15s"
             return None
         except Exception as exc:
             with self._lock:

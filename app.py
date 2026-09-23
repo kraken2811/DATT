@@ -38,12 +38,16 @@ def log_realtime_hud(
     track_count: int,
     people_in_view: int,
     camera_name: str = "",
+    input_res: str = "1280x720",
+    inference_res: str = "960x960",
 ) -> None:
     """Log realtime HUD telemetry replacing OpenCV GUI display."""
     cam_str = f" [{camera_name}]" if camera_name else ""
     logger.info(
         "\n"
         "==================== [REALTIME HUD%s] ====================\n"
+        "Input:            %s\n"
+        "Inference:        %s\n"
         "Device:           %s\n"
         "GPU:              %s\n"
         "VRAM:             %.1f MB\n"
@@ -56,6 +60,8 @@ def log_realtime_hud(
         "People in view:   %d\n"
         "========================================================",
         cam_str,
+        input_res,
+        inference_res,
         device,
         gpu,
         vram_mb,
@@ -76,15 +82,20 @@ def run_pipeline(
     port: int = 8000,
     camera_id: str | None = None,
     stop_event: threading.Event | None = None,
+    img_size: int | None = None,
 ) -> dict:
     """Execute the end-to-end people counter pipeline.
 
     Supports Normal CLI mode (Phase 3.2) and UI mode (Phase 4 Version 3) with
     CameraManager, EventManager, MJPEG streaming & shared runtime state.
     """
+    if img_size is not None:
+        config.IMG_SIZE = img_size
+
     logger.info("==================================================")
     mode_desc = "Phase 4 Version 3 Camera & Event System" if ui_mode else "Phase 3.2 Colab CUDA"
     logger.info("Starting DATT - AI People Counter (%s)", mode_desc)
+    logger.info("Inference resolution: %dx%d", config.IMG_SIZE, config.IMG_SIZE)
     logger.info("==================================================")
 
     # 1. Initialize Components
@@ -239,6 +250,8 @@ def run_pipeline(
                     track_count=last_track_count,
                     people_in_view=last_people_in_view,
                     camera_name=active_cam.name,
+                    input_res=f"{active_cam.width}x{active_cam.height}",
+                    inference_res=f"{config.IMG_SIZE}x{config.IMG_SIZE}",
                 )
 
             if max_frames is not None and total_frames >= max_frames:

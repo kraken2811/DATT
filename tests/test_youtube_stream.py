@@ -136,24 +136,83 @@ class TestYouTubeStream(unittest.TestCase):
         self.assertIn("-reconnect", cmd)
         self.assertEqual(cmd[-1], "-")
 
-    def test_retry_behavior_retries_three_times(self) -> None:
-        """Verify CameraReader retries failed startups up to 3 times before raising RuntimeError."""
-        reader = CameraReader("https://youtu.be/fail_test", width=640, height=480)
-        attempts = 0
+    def test_sliding_window_fps_meter(self) -> None:
+        """Verify FPSMeter accurately calculates sliding-window FPS using (frames - 1) / dt."""
+        from src.utils.fps import FPSMeter
 
-        def mock_get_stream_url(url: str) -> str:
-            nonlocal attempts
-            attempts += 1
-            raise RuntimeError(f"Connection failure on attempt {attempts}")
+        meter = FPSMeter(window_size=30)
+        # Simulate 10 frames at 30 FPS (delta = 1/30 = ~0.0333s)
+        base_time = 100.0
+        with patch("time.perf_counter") as mock_time:
+            for i in range(10):
+                mock_time.return_value = base_time + (i * (1.0 / 30.0))
+                meter.tick()
 
-        with patch("src.stream.youtube_stream.get_stream_url", side_effect=mock_get_stream_url):
-            with patch("time.sleep", return_value=None) as mock_sleep:
-                with self.assertRaises(RuntimeError) as ctx:
-                    reader.start()
+            self.assertEqual(len(meter.timestamps), 10)
+            self.assertAlmostEqual(meter.fps, 30.0, places=2)
 
-                self.assertEqual(attempts, 3)
-                self.assertIn("after 3 attempts", str(ctx.exception))
-                self.assertGreaterEqual(mock_sleep.call_count, 2)
+    def test_camera_reader_stale_frame_status(self) -> None:
+        """Verify stale frame status rules: RUNNING (<=5s), WARNING (5-15s), ERROR (>15s)."""
+        import time
+
+        reader = CameraReader("https://youtu.be/mock", width=640, height=480)
+        # Fresh frame (0.5s ago) -> RUNNING
+        now = time.time()
+        reader._last_frame_timestamp = now - 0.5
+        reader._stream_alive = True
+        self.assertEqual(reader.status, "RUNNING")
+        self.assertTrue(reader.stream_alive)
+
+        # Warning threshold (8s ago) -> WARNING
+        reader._last_frame_timestamp = now - 8.0
+        self.assertEqual(reader.status, "WARNING")
+        self.assertTrue(reader.stream_alive)
+
+        # Error threshold (18s ago) -> ERROR
+        reader._last_frame_timestamp = now - 18.0
+        self.assertEqual(reader.status, "ERROR")
+        self.assertFalse(reader.stream_alive)
+
+    def test_camera_reader_auto_recovery_reconnect(self) -> None:
+        """Verify CameraReader auto-reconnect iterates up to 5 times with backoff delays."""
+        reader = CameraReader("https://youtu.be/mock", width=640, height=480)
+        reconnect_attempts = 0
+
+        def mock_spawn(url: str) -> None:
+            nonlocal reconnect_attempts
+            reconnect_attempts += 1
+            if reconnect_attempts < 3:
+                raise RuntimeError("Temporary network timeout")
+            # Succeeds on 3rd attempt
+            reader.process = MagicMock()
+
+        reader._spawn_ffmpeg = mock_spawn
+        with patch("src.stream.youtube_stream.get_stream_url", return_value="https://manifest/live.m3u8"):
+            with patch.object(reader.stop_event, "wait", return_value=False) as mock_event_wait:
+                success = reader._reconnect()
+                self.assertTrue(success)
+                self.assertEqual(reconnect_attempts, 3)
+                self.assertEqual(reader.reconnect_attempts, 3)
+                self.assertEqual(mock_event_wait.call_count, 3)
+
+    def test_camera_reader_zombie_prevention(self) -> None:
+        """Verify _cleanup_process closes stdout/stderr and waits/terminates process cleanly."""
+        reader = CameraReader("https://youtu.be/mock", width=640, height=480)
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_stdout = MagicMock()
+        mock_stderr = MagicMock()
+        mock_proc.stdout = mock_stdout
+        mock_proc.stderr = mock_stderr
+        reader.process = mock_proc
+
+        reader._cleanup_process()
+
+        mock_stdout.close.assert_called_once()
+        mock_stderr.close.assert_called_once()
+        mock_proc.terminate.assert_called_once()
+        mock_proc.wait.assert_called_once()
+        self.assertIsNone(reader.process)
 
 
 def run_tests():
