@@ -52,8 +52,17 @@ def get_stream_url(url: str) -> str:
     "js_runtimes": {
         "node": {}
     },
-}
 
+    "extractor_args": {
+        "youtube": {
+            "player_client": [
+                "android"
+            ]
+        }
+    },
+
+    "nocheckcertificate": True,
+}
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
             info = ydl.extract_info(url, download=False)
