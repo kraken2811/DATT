@@ -45,10 +45,14 @@ def get_stream_url(url: str) -> str:
         return url
 
     ydl_opts: dict[str, Any] = {
-        "format": "bestvideo[height<=720]/best[height<=720]/bestvideo/best",
-        "quiet": True,
-        "noplaylist": True,
-    }
+    "format": "bestvideo[height<=720]/best[height<=720]/bestvideo/best",
+    "quiet": True,
+    "noplaylist": True,
+
+    "js_runtimes": {
+        "node": {}
+    },
+}
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
