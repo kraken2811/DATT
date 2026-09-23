@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DATT — AI People Counter & Camera Monitor</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        <!-- Sidebar: Camera Management & Controls -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h2>🎥 Camera Management</h2>
+            </div>
+
+            <div class="sidebar-section">
+                <label for="backendUrlInput" class="input-label">AI Backend URL</label>
+                <input type="text" id="backendUrlInput" class="text-input" value="http://localhost:8000" placeholder="http://localhost:8000" title="Base URL of AI streaming server">
+                <span class="input-help">FastAPI proxy auto-relays if Colab tunnel or local.</span>
+            </div>
+
+            <div class="sidebar-section">
+                <label for="cameraSelect" class="input-label">Select Camera Stream</label>
+                <select id="cameraSelect" class="select-input">
+                    <option value="" disabled selected>Loading cameras...</option>
+                </select>
+                <button type="button" id="switchCameraBtn" class="primary-btn">
+                    <span class="btn-icon">🔄</span>
+                    <span class="btn-text">Switch Camera</span>
+                </button>
+                <div id="cameraSwitchFeedback" class="feedback-msg"></div>
+            </div>
+
+            <div class="sidebar-divider"></div>
+
+            <div class="sidebar-section diagnostics">
+                <div class="diag-row">
+                    <span class="diag-label">Connection:</span>
+                    <span id="sidebarConnStatus" class="badge badge-disconnected">DISCONNECTED</span>
+                </div>
+                <div class="diag-row">
+                    <span class="diag-label">Ping Latency:</span>
+                    <span id="pingLatency" class="diag-value">-- ms</span>
+                </div>
+                <div class="diag-row">
+                    <span class="diag-label">Telemetry Poll:</span>
+                    <span class="diag-value">1000 ms</span>
+                </div>
+                <div class="diag-row">
+                    <span class="diag-label">Events Poll:</span>
+                    <span class="diag-value">10000 ms</span>
+                </div>
+            </div>
+
+            <div class="sidebar-divider"></div>
+
+            <div class="sidebar-footer">
+                <div class="footer-title">DATT — AI People Counter</div>
+                <div class="footer-sub">Phase 4.4 Stable Web Monitor</div>
+                <div class="footer-desc">Level 2 Realtime Monitoring & Camera Control</div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content" id="mainContent">
+            <!-- Header Bar -->
+            <header class="main-header">
+                <div class="header-left">
+                    <h1 class="header-title">👥 DATT AI Vision Monitor & Camera Manager</h1>
+                </div>
+                <div class="header-right">
+                    <div id="statusBadge" class="status-badge status-disconnected">STATUS: DISCONNECTED</div>
+                </div>
+            </header>
+
+            <!-- Alert / Notification Banner -->
+            <div id="alertBanner" class="alert-banner alert-warning">
+                📡 Connecting to AI pipeline... Ensure <code>python app.py --ui</code> is running.
+            </div>
+
+            <!-- Two-Column Main Dashboard Grid -->
+            <div class="dashboard-grid">
+                <!-- Left Column (65%): Live Camera Stream -->
+                <section class="video-section card">
+                    <div class="section-header">
+                        <div class="section-title">
+                            <span class="title-icon">📹</span>
+                            <h3>Live Camera Stream (server-relayed MJPEG)</h3>
+                        </div>
+                        <div class="stream-meta">
+                            <span class="meta-pill" id="streamCamName">Camera: Loading...</span>
+                            <span class="meta-pill" id="streamResolution">640x640</span>
+                            <span class="meta-pill target-fps" id="streamTargetFps">Target 30 FPS</span>
+                        </div>
+                    </div>
+
+                    <div class="video-wrapper">
+                        <img id="videoFeed" class="video-stream-img" src="/video_feed" alt="Realtime AI Video Feed">
+                        <div id="videoErrorOverlay" class="video-overlay" style="display: none;">
+                            <div class="overlay-spinner"></div>
+                            <div class="overlay-title">Video Stream Disconnected</div>
+                            <div class="overlay-sub">Reconnecting automatically in 3 seconds...</div>
+                        </div>
+                    </div>
+                    <div class="video-caption">Server-side MJPEG relay; latest-frame display, target 30 FPS.</div>
+                </section>
+
+                <!-- Right Column (35%): Realtime AI Telemetry -->
+                <section class="telemetry-section card">
+                    <div class="section-header">
+                        <div class="section-title">
+                            <span class="title-icon">📊</span>
+                            <h3>Realtime AI Telemetry</h3>
+                        </div>
+                        <div class="active-cam-indicator">
+                            Active: <strong id="telemActiveCam">Connecting...</strong>
+                        </div>
+                    </div>
+
+                    <!-- Hero Metric: People in View -->
+                    <div class="hero-metric-card">
+                        <div class="hero-metric-label">PEOPLE IN VIEW</div>
+                        <div class="hero-metric-value" id="metricPeopleCount">0</div>
+                    </div>
+
+                    <!-- Secondary Metrics Grid -->
+                    <div class="metrics-grid">
+                        <div class="metric-card">
+                            <div class="metric-label">Detections</div>
+                            <div class="metric-value" id="metricDetections">0</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Active Tracks</div>
+                            <div class="metric-value" id="metricTracks">0</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Processing FPS</div>
+                            <div class="metric-value" id="metricProcessingFps">0.0</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Stream FPS</div>
+                            <div class="metric-value" id="metricStreamFps">0.0</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">YOLO Latency</div>
+                            <div class="metric-value latency" id="metricYoloLatency">0.0 ms</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Pipeline Latency</div>
+                            <div class="metric-value latency" id="metricPipelineLatency">0.0 ms</div>
+                        </div>
+                    </div>
+
+                    <div class="card-divider"></div>
+
+                    <!-- Hardware & Model Info -->
+                    <div class="info-block">
+                        <div class="info-title">HARDWARE & MODEL</div>
+                        <div class="info-row">
+                            <span class="info-label">Device:</span>
+                            <span class="info-value" id="infoDevice">CPU</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">GPU:</span>
+                            <span class="info-value" id="infoGpu">N/A</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">VRAM:</span>
+                            <span class="info-value" id="infoVram">0.0 MB</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Model:</span>
+                            <span class="info-value" id="infoModel">YOLO11s (640x640)</span>
+                        </div>
+                    </div>
+
+                    <div class="card-divider"></div>
+
+                    <!-- Event Statistics -->
+                    <div class="info-block">
+                        <div class="info-title">OCCUPANCY EVENT STATS</div>
+                        <div class="info-row">
+                            <span class="info-label">Events Today:</span>
+                            <span class="info-value highlight" id="infoEventsToday">0</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Filtered Fluctuations:</span>
+                            <span class="info-value" id="infoFilteredEvents">0</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Last Saved Count:</span>
+                            <span class="info-value" id="infoLastSavedCount">0</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Last Event Time:</span>
+                            <span class="info-value" id="infoLastEvent">None</span>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Bottom Section: Recent Occupancy Events -->
+            <section class="events-section card">
+                <div class="section-header">
+                    <div class="section-title">
+                        <span class="title-icon">📋</span>
+                        <h3>Recent Occupancy Events & Snapshots</h3>
+                    </div>
+                    <div class="events-sub">Latest 5 events logged in database</div>
+                </div>
+
+                <div id="eventsContainer" class="events-grid">
+                    <div class="events-empty">No occupancy change events logged yet today.</div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Main JavaScript Application -->
+    <script src="/static/app.js"></script>
+</body>
+</html>
