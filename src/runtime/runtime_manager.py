@@ -137,7 +137,7 @@ class RuntimeManager:
         while time.time() - t0 < 8.0:
             if self._stop_event.is_set():
                 return
-            if shared_state.status in ("RUNNING", "ERROR"):
+            if shared_state.get_telemetry().status in ("RUNNING", "ERROR"):
                 break
             time.sleep(0.1)
 
@@ -184,6 +184,21 @@ class RuntimeManager:
         display_host = "localhost" if self.web_host in ("0.0.0.0", "127.0.0.1", "") else self.web_host
         logger.info("[DATT-WEB] Dashboard available: http://%s:%d", display_host, self.web_port)
 
+    def _setup_signal_handlers(self) -> None:
+        """Register signal handlers for clean OS termination."""
+        try:
+            import signal
+            signal.signal(signal.SIGINT, self._handle_signal)
+            signal.signal(signal.SIGTERM, self._handle_signal)
+        except (ValueError, AttributeError):
+            # Non-main thread or unsupported environment
+            pass
+
+    def _handle_signal(self, signum: int, frame: Any) -> None:
+        """Handle incoming termination signal."""
+        logger.info("[DATT-RUNTIME] Signal %d received. Triggering graceful shutdown...", signum)
+        self.shutdown()
+
     def start(self) -> None:
         """Start both the AI pipeline and the web server."""
         self.validate_ports()
@@ -192,6 +207,7 @@ class RuntimeManager:
 
     def run(self) -> None:
         """Run runtime manager synchronously, blocking until interrupted."""
+        self._setup_signal_handlers()
         self.start()
         try:
             while not self._stop_event.is_set():

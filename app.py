@@ -10,6 +10,7 @@ Pipeline:
 import argparse
 from pathlib import Path
 import sys
+import threading
 import time
 
 import config
@@ -74,6 +75,7 @@ def run_pipeline(
     host: str = "0.0.0.0",
     port: int = 8000,
     camera_id: str | None = None,
+    stop_event: threading.Event | None = None,
 ) -> dict:
     """Execute the end-to-end people counter pipeline.
 
@@ -136,6 +138,10 @@ def run_pipeline(
 
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                logger.info("Stop event signaled. Halting AI pipeline loop.")
+                break
+
             # Check if camera was switched externally (via Dashboard / HTTP endpoint)
             current_cam = camera_mgr.get_active_camera()
             if current_cam is not None and current_cam.id != active_cam.id:
