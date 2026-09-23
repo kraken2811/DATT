@@ -273,47 +273,16 @@ def run_pipeline(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="DATT - AI People Counter (Phase 4 Version 3)")
-    parser.add_argument(
-        "--ui",
-        action="store_true",
-        help="Enable UI mode (starts MJPEG video stream server on port 8000)",
-    )
-    parser.add_argument(
-        "--camera",
-        type=str,
-        default=None,
-        help="Initial camera ID from configs/cameras.yaml (default: primary camera)",
-    )
-    parser.add_argument(
-        "--host",
-        type=str,
-        default="0.0.0.0",
-        help="Host for MJPEG stream server (default: 0.0.0.0)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8000,
-        help="Port for MJPEG stream server (default: 8000)",
-    )
-    parser.add_argument(
-        "--max-frames",
-        type=int,
-        default=None,
-        help="Maximum frames to process (default: run indefinitely)",
-    )
-    args = parser.parse_args()
-    run_pipeline(
-        max_frames=args.max_frames,
-        ui_mode=args.ui,
-        host=args.host,
-        port=args.port,
-        camera_id=args.camera,
-    )
+    """Main CLI entry point (retained for backward compatibility).
+
+    Delegates execution to the unified runtime in src/main.py.
+    """
+    from src.main import main as run_unified_main
+    run_unified_main()
 
 
 if __name__ == "__main__":
     main()
+
 
 
