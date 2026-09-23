@@ -226,6 +226,9 @@ class CameraReader:
         self._last_pipe_warning: str = ""
         self._health_thread: threading.Thread | None = None
         self._last_status: str = "STOPPED"
+        self._last_ffmpeg_pid: int | None = None
+        self._last_ffmpeg_exit_code: int | None = None
+        self._last_ffmpeg_stderr: str = ""
 
         # Health & Stale Frame Tracking
         self._last_frame_timestamp: float = 0.0
@@ -293,8 +296,12 @@ class CameraReader:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        self._last_ffmpeg_pid = self.process.pid
+        self._last_ffmpeg_exit_code = None
+        self._last_ffmpeg_stderr = ""
         self._process_started_at = time.time()
         logger.info("[DATT-FFMPEG] started pid=%s", self.process.pid)
+        logger.info("[DATT-STREAM START] pid=%s frame_size=%s url=%s", self.process.pid, self.frame_size, stream_url)
         if self.process.stderr is not None:
             self._stderr_thread = threading.Thread(
                 target=self._drain_stderr,
@@ -370,6 +377,9 @@ class CameraReader:
         self.process = None
 
         if proc is not None:
+            # Snapshot lifecycle data before releasing the process object.
+            self._last_ffmpeg_exit_code = proc.poll()
+            self._last_ffmpeg_stderr = "\n".join(self.stderr_lines)[-2000:]
             # 1. Close stdout to unblock reading threads
             if proc.stdout is not None:
                 try:
@@ -399,6 +409,9 @@ class CameraReader:
                     proc.stderr.close()
                 except Exception:
                     pass
+            logger.info("[DATT-STREAM FFmpeg EXIT] pid=%s exit_code=%s stderr=%s",
+                        self._last_ffmpeg_pid, self._last_ffmpeg_exit_code,
+                        self._last_ffmpeg_stderr or "<empty>")
 
     def _reconnect(self) -> bool:
         """Execute auto-reconnect backoff sequence when FFmpeg exits unexpectedly."""
@@ -438,6 +451,17 @@ class CameraReader:
         return False
 
     def _read_loop(self) -> None:
+        """Reader thread boundary that preserves an unexpected traceback."""
+        try:
+            self._read_loop_impl()
+        except Exception as exc:
+            self._log_thread_error("ffmpeg-capture", exc)
+            logger.error("[DATT-READER EXIT] unexpected_exception=%s", exc)
+            with self.lock:
+                self._stream_alive = False
+                self.finished = True
+
+    def _read_loop_impl(self) -> None:
         """Read frame bytes from FFmpeg pipe continuously with auto-reconnection."""
         sequence = 0
         self.reconnect_attempts = 0
@@ -460,6 +484,8 @@ class CameraReader:
             if (read_end - read_start) > 2.0 or len(raw) != self.frame_size:
                 logger.warning("[DATT-PIPE WARNING] read_duration_ms=%.1f expected_bytes=%d received_bytes=%d",
                                (read_end - read_start) * 1000, self.frame_size, len(raw))
+                logger.warning("[DATT-STREAM FRAME EOF] expected_bytes=%d received_bytes=%d ffmpeg_poll=%s",
+                               self.frame_size, len(raw), self.process.poll() if self.process else None)
 
             if len(raw) == self.frame_size:
                 now_wall = time.time()
@@ -498,7 +524,11 @@ class CameraReader:
             if self.stop_event.is_set():
                 break
 
-            logger.warning("[DATT-STREAM] FFmpeg exited unexpectedly")
+            proc = self.process
+            exit_code = proc.poll() if proc is not None else None
+            logger.warning("[DATT-STREAM FFmpeg EXIT] exit_code=%s stderr=%s",
+                           exit_code, "\n".join(self.stderr_lines)[-2000:])
+            logger.warning("[DATT-STREAM STDERR] %s", "\n".join(self.stderr_lines)[-2000:] or "<empty>")
             with self.lock:
                 self._stream_alive = False
 
@@ -510,6 +540,9 @@ class CameraReader:
         with self.lock:
             self._stream_alive = False
             self.finished = True
+        logger.info("[DATT-READER EXIT] frames_received=%s ffmpeg_poll=%s stderr=%s",
+                    self._frames_received, self.process.poll() if self.process else None,
+                    "\n".join(self.stderr_lines)[-2000:] or "<empty>")
         self._cleanup_process()
 
     def _log_thread_error(self, name: str, exc: Exception) -> None:
@@ -526,14 +559,16 @@ class CameraReader:
             code = None if proc is None else proc.poll()
             runtime = max(0.0, time.time() - self._process_started_at) if self._process_started_at else 0.0
             logger.info("[DATT-FFMPEG HEALTH]\npid=%s\nalive=%s\nreturn_code=%s\nruntime=%ss",
-                        proc.pid if proc else None, alive, code, int(runtime))
+                        proc.pid if proc else self._last_ffmpeg_pid, alive,
+                        code if proc is not None else self._last_ffmpeg_exit_code, int(runtime))
             age = self.frame_age_seconds
             logger.info("[DATT-CAMERA READER HEALTH]\nthread_alive=%s\nframes_received=%s\nlast_frame_time=%s\nframe_age_seconds=%.1f\nstream_fps=%.2f\nread_errors=%s",
                         self._thread.is_alive() if self._thread else False, self._frames_received,
                         self.last_frame_time, age, self.stream_fps, self._read_errors)
-            if proc is not None and code is not None:
+            if (proc is not None and code is not None) or self._last_ffmpeg_exit_code is not None:
                 logger.error("[DATT-FFMPEG EXIT]\nexit_code=%s\nruntime=%ss\nlast_stderr=%s",
-                             code, int(runtime), "\n".join(self.stderr_lines)[-2000:])
+                             code if proc is not None else self._last_ffmpeg_exit_code,
+                             int(runtime), self._last_ffmpeg_stderr or "\n".join(self.stderr_lines)[-2000:])
             status = self.status
             if status != self._last_status:
                 logger.warning("[DATT-STREAM STATE CHANGE]\nold_status=%s\nnew_status=%s\nreason=%s\nlast_frame_age=%.1f\nffmpeg_alive=%s\nreader_alive=%s",
@@ -554,8 +589,9 @@ class CameraReader:
         return {"ffmpeg_alive": proc is not None and proc.poll() is None,
                 "reader_alive": self._thread.is_alive() if self._thread else False,
                 "last_frame_age": self.frame_age_seconds, "frames_received": self._frames_received,
-                "ffmpeg_exit_code": proc.poll() if proc else None,
-                "last_error": str(self.error or "") or ("\n".join(self.stderr_lines)[-2000:] if self.stderr_lines else "")}
+                "ffmpeg_pid": proc.pid if proc else self._last_ffmpeg_pid,
+                "ffmpeg_exit_code": proc.poll() if proc else self._last_ffmpeg_exit_code,
+                "last_error": str(self.error or "") or self._last_ffmpeg_stderr or ("\n".join(self.stderr_lines)[-2000:] if self.stderr_lines else "")}
 
     def read(self, timeout: float = 1.0) -> np.ndarray | None:
         """Read the newest available frame.
