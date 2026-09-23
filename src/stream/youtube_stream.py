@@ -168,9 +168,10 @@ def build_ffmpeg_command(
         "-rw_timeout", "15000000",
     ]
 
-    # Add network protocol reconnection options for HTTP/HTTPS/HLS
+    # Add User-Agent and network reconnection options for HTTP/HTTPS/HLS inputs.
     if stream_url.startswith("http://") or stream_url.startswith("https://"):
         cmd.extend([
+            "-user_agent", "Mozilla/5.0",
             "-reconnect", "1",
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
