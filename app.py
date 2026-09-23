@@ -231,6 +231,10 @@ def run_pipeline(
                     vram_mb=detector.vram_allocated_mb,
                     model_name="YOLO11s",
                     input_size=f"{config.IMG_SIZE}x{config.IMG_SIZE}",
+                    capture_fps=camera_mgr.capture_fps,
+                    inference_fps=fps_meter.fps,
+                    dropped_frames=camera_mgr.dropped_frames,
+                    buffer_age_ms=camera_mgr.buffer_age_ms,
                     camera_id=active_cam.id,
                     camera_name=active_cam.name,
                 )
@@ -302,6 +306,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
 

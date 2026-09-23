@@ -44,6 +44,11 @@ class TelemetrySnapshot:
     last_event_time: str = "None"
     last_saved_people_count: int = 0
     stream_health: dict[str, Any] | None = None
+    capture_fps: float = 0.0
+    inference_fps: float = 0.0
+    display_fps: float = 0.0
+    dropped_frames: int = 0
+    buffer_age_ms: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         """Convert snapshot to standard Python dict."""
@@ -98,6 +103,11 @@ class SharedRuntimeState:
         self._model_name: str = "YOLO11s"
         self._input_size: str = "640x640"
         self._stream_health: dict[str, Any] = {}
+        self._capture_fps = 0.0
+        self._inference_fps = 0.0
+        self._display_fps = 0.0
+        self._dropped_frames = 0
+        self._buffer_age_ms = 0.0
 
     def update(
         self,
@@ -115,6 +125,11 @@ class SharedRuntimeState:
         vram_mb: float = 0.0,
         model_name: str = "YOLO11s",
         input_size: str = "640x640",
+        capture_fps: float | None = None,
+        inference_fps: float | None = None,
+        display_fps: float | None = None,
+        dropped_frames: int | None = None,
+        buffer_age_ms: float | None = None,
         camera_id: str | None = None,
         camera_name: str | None = None,
         last_event: str | None = None,
@@ -145,6 +160,11 @@ class SharedRuntimeState:
             self._vram_mb = vram_mb
             self._model_name = model_name
             self._input_size = input_size
+            if capture_fps is not None: self._capture_fps = capture_fps
+            if inference_fps is not None: self._inference_fps = inference_fps
+            if display_fps is not None: self._display_fps = display_fps
+            if dropped_frames is not None: self._dropped_frames = dropped_frames
+            if buffer_age_ms is not None: self._buffer_age_ms = buffer_age_ms
 
             if camera_id is not None:
                 self._camera_id = camera_id
@@ -273,6 +293,9 @@ class SharedRuntimeState:
                 last_event_time=self._last_event_time,
                 last_saved_people_count=self._last_saved_people_count,
                 stream_health=dict(self._stream_health),
+                capture_fps=self._capture_fps, inference_fps=self._inference_fps,
+                display_fps=self._display_fps, dropped_frames=self._dropped_frames,
+                buffer_age_ms=self._buffer_age_ms,
             )
 
     def reset(self) -> None:

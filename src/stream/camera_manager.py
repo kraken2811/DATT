@@ -57,6 +57,20 @@ class CameraManager:
             return self._reader.stream_fps if self._reader else 0.0
 
     @property
+    def capture_fps(self) -> float:
+        return self.stream_fps
+
+    @property
+    def dropped_frames(self) -> int:
+        with self._lock:
+            return self._reader.dropped_frames if self._reader else 0
+
+    @property
+    def buffer_age_ms(self) -> float:
+        with self._lock:
+            return self._reader.buffer_age_ms if self._reader else 0.0
+
+    @property
     def stream_alive(self) -> bool:
         """Whether the active stream is alive and publishing frames."""
         with self._lock:
