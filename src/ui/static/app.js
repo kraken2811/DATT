@@ -317,18 +317,22 @@
             transition.textContent = `Count: ${oldCount} ➔ ${newCount} people`;
             body.appendChild(transition);
 
-            if (ev.snapshot_path || ev.id) {
+            if (ev.snapshot_path || ev.id || ev.snapshot_id) {
                 const thumbWrapper = document.createElement("div");
                 thumbWrapper.className = "event-thumb-wrapper";
 
                 const img = document.createElement("img");
                 img.className = "event-thumb";
+                // Attribute loading="lazy" assigned before src to guarantee lazy network fetch
+                img.setAttribute("loading", "lazy");
                 img.loading = "lazy";
                 img.alt = `Snapshot @ ${ev.timestamp}`;
 
-                const snapParam = ev.snapshot_path
-                    ? `path=${encodeURIComponent(ev.snapshot_path)}`
-                    : `id=${encodeURIComponent(ev.id)}`;
+                // Use id query parameter for efficient lazy snapshot retrieval
+                const snapId = ev.snapshot_id || ev.id;
+                const snapParam = snapId
+                    ? `id=${encodeURIComponent(snapId)}`
+                    : `path=${encodeURIComponent(ev.snapshot_path)}`;
                 img.src = `/event_snapshot?${snapParam}`;
 
                 img.onerror = () => {
@@ -357,6 +361,7 @@
         DOM.videoErrorOverlay.style.display = "flex";
         if (state.videoReconnectTimer) return;
 
+        // Auto-reconnect after 3 seconds with timestamp bust
         state.videoReconnectTimer = setTimeout(() => {
             state.videoReconnectTimer = null;
             triggerVideoRefresh();

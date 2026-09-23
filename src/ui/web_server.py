@@ -225,6 +225,10 @@ async def switch_camera(request: Request) -> JSONResponse:
         )
 
 
+# Cache mapping event_id -> snapshot_path for fast lookup
+event_snapshot_cache: dict[str, str] = {}
+
+
 # -----------------------------------------------------------------------------
 # Event API (10-second polling)
 # -----------------------------------------------------------------------------
@@ -248,16 +252,21 @@ async def get_events(request: Request) -> JSONResponse:
                 raw_events = data.get("events", [])[:5]
                 normalized = []
                 for ev in raw_events:
+                    ev_id = ev.get("id")
+                    snap_path = ev.get("snapshot_path", "")
+                    if ev_id is not None and snap_path:
+                        event_snapshot_cache[str(ev_id)] = snap_path
+
                     normalized.append({
-                        "id": ev.get("id"),
-                        "snapshot_id": ev.get("id"),
+                        "id": ev_id,
+                        "snapshot_id": ev_id,
                         "timestamp": ev.get("timestamp"),
                         "camera_id": ev.get("camera_id"),
                         "old_count": ev.get("old_value", 0),
                         "new_count": ev.get("new_value", 0),
                         "old_value": ev.get("old_value", 0),
                         "new_value": ev.get("new_value", 0),
-                        "snapshot_path": ev.get("snapshot_path", ""),
+                        "snapshot_path": snap_path,
                     })
                 return JSONResponse(
                     content={
@@ -277,16 +286,21 @@ async def get_events(request: Request) -> JSONResponse:
         today_count = event_storage.get_event_count_today()
         normalized = []
         for ev in events[:5]:
+            ev_id = ev.get("id")
+            snap_path = ev.get("snapshot_path", "")
+            if ev_id is not None and snap_path:
+                event_snapshot_cache[str(ev_id)] = snap_path
+
             normalized.append({
-                "id": ev.get("id"),
-                "snapshot_id": ev.get("id"),
+                "id": ev_id,
+                "snapshot_id": ev_id,
                 "timestamp": ev.get("timestamp"),
                 "camera_id": ev.get("camera_id"),
                 "old_count": ev.get("old_value", 0),
                 "new_count": ev.get("new_value", 0),
                 "old_value": ev.get("old_value", 0),
                 "new_value": ev.get("new_value", 0),
-                "snapshot_path": ev.get("snapshot_path", ""),
+                "snapshot_path": snap_path,
             })
         return JSONResponse(
             content={
@@ -315,22 +329,27 @@ async def get_event_snapshot(request: Request) -> Response:
     rel_path = request.query_params.get("path", "")
     event_id = request.query_params.get("id", "")
 
-    # Resolve path from id if path not directly supplied
+    # Resolve path from memory cache or SQLite if id provided
     if not rel_path and event_id:
-        try:
-            from src.events.event_storage import event_storage
-            import sqlite3
-            with event_storage._lock:
-                with sqlite3.connect(event_storage.db_path) as conn:
-                    cur = conn.cursor()
-                    cur.execute("SELECT snapshot_path FROM events WHERE id = ?", (event_id,))
-                    row = cur.fetchone()
-                    if row and row[0]:
-                        rel_path = row[0]
-        except Exception as exc:
-            logger.debug("Failed resolving snapshot path from id %s: %s", event_id, exc)
+        cached_path = event_snapshot_cache.get(str(event_id))
+        if cached_path:
+            rel_path = cached_path
+        else:
+            try:
+                from src.events.event_storage import event_storage
+                import sqlite3
+                with event_storage._lock:
+                    with sqlite3.connect(event_storage.db_path) as conn:
+                        cur = conn.cursor()
+                        cur.execute("SELECT snapshot_path FROM events WHERE id = ?", (event_id,))
+                        row = cur.fetchone()
+                        if row and row[0]:
+                            rel_path = row[0]
+                            event_snapshot_cache[str(event_id)] = rel_path
+            except Exception as exc:
+                logger.debug("Failed resolving snapshot path from id %s: %s", event_id, exc)
 
-    if not rel_path:
+    if not rel_path and not event_id:
         raise HTTPException(status_code=400, detail="Missing snapshot path or id")
 
     # Security check: resolve strictly within data/events/
