@@ -149,19 +149,26 @@ class CameraManager:
             np.ndarray | None: Latest BGR frame, or None if unavailable.
         """
         with self._lock:
-            if self._reader is None or self._status != "RUNNING":
+            if self._reader is None or self._status == "STOPPED":
                 return None
             reader = self._reader
 
         # Release lock during read() to allow switch_camera to execute concurrently
         try:
             frame = reader.read(timeout=timeout)
-            if frame is None and reader.finished:
+            if frame is not None:
+                with self._lock:
+                    if self._status != "RUNNING":
+                        self._status = "RUNNING"
+                        self._error_reason = ""
+                return frame
+
+            if reader.finished:
                 with self._lock:
                     if self._status == "RUNNING":
                         self._status = "ERROR"
                         self._error_reason = "Stream ended or camera disconnected unexpectedly."
-            return frame
+            return None
         except Exception as exc:
             with self._lock:
                 self._status = "ERROR"

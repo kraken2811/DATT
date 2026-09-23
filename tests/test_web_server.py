@@ -60,6 +60,19 @@ class TestWebServer(unittest.TestCase):
         self.assertIn("pollEvents", js_resp.text)
         self.assertIn("setupVideoStream", js_resp.text)
 
+    def test_favicon_ico(self) -> None:
+        """GET /favicon.ico must return HTTP 200 or 204."""
+        response = self.client.get("/favicon.ico")
+        self.assertIn(response.status_code, [200, 204])
+        if response.status_code == 200:
+            self.assertIn("image/x-icon", response.headers.get("content-type", ""))
+
+    def test_static_favicon_ico(self) -> None:
+        """GET /static/favicon.ico must return HTTP 200."""
+        response = self.client.get("/static/favicon.ico")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("image/x-icon", response.headers.get("content-type", ""))
+
     # -------------------------------------------------------------------------
     # 2. Telemetry Endpoint (Backend Online / Offline Handling)
     # -------------------------------------------------------------------------
@@ -117,9 +130,63 @@ class TestWebServer(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             data = response.json()
             self.assertEqual(data.get("status"), "RUNNING")
+            self.assertEqual(data.get("camera_status"), "RUNNING")
+            self.assertTrue(data.get("stream_alive"))
             self.assertEqual(data.get("people_count"), 5)
             self.assertEqual(data.get("camera_name"), "Tokyo Street Live")
             self.assertAlmostEqual(data.get("processing_fps"), 28.5)
+
+    def test_shared_state_camera_status_lifecycle(self) -> None:
+        """Test status transitions: RUNNING -> WARNING (>5s) -> ERROR (>15s) -> RUNNING (recovered)."""
+        import time
+        from src.runtime.shared_state import SharedRuntimeState
+
+        state = SharedRuntimeState()
+        # 1. Update with a frame -> RUNNING
+        state.update(people_count=2)
+        telem = state.get_telemetry()
+        self.assertEqual(telem.camera_status, "RUNNING")
+        self.assertTrue(telem.stream_alive)
+        self.assertIsNone(telem.to_dict()["error_message"])
+
+        # 2. Simulate frame delay (>5s) -> WARNING
+        state._timestamp = time.time() - 6.0
+        telem_warn = state.get_telemetry()
+        self.assertEqual(telem_warn.camera_status, "WARNING")
+        self.assertTrue(telem_warn.stream_alive)
+
+        # 3. Simulate camera timeout (>15s) -> ERROR
+        state._timestamp = time.time() - 16.0
+        telem_err = state.get_telemetry()
+        self.assertEqual(telem_err.camera_status, "ERROR")
+        self.assertFalse(telem_err.stream_alive)
+
+        # 4. Camera recovered: new frame arrives -> RUNNING again
+        state.update(people_count=1)
+        telem_rec = state.get_telemetry()
+        self.assertEqual(telem_rec.camera_status, "RUNNING")
+        self.assertTrue(telem_rec.stream_alive)
+        self.assertIsNone(telem_rec.to_dict()["error_message"])
+
+    def test_shared_state_explicit_error_and_recovery(self) -> None:
+        """Test that explicit ERROR recovers automatically when frames resume."""
+        from src.runtime.shared_state import SharedRuntimeState
+
+        state = SharedRuntimeState()
+        state.update(people_count=4)
+        self.assertEqual(state.get_telemetry().camera_status, "RUNNING")
+
+        # Set error
+        state.set_status("ERROR", "Stream ended or camera disconnected unexpectedly.")
+        self.assertEqual(state.get_telemetry().camera_status, "ERROR")
+        self.assertFalse(state.get_telemetry().stream_alive)
+
+        # Frame arrives -> recovers to RUNNING
+        state.update(people_count=4)
+        telem = state.get_telemetry()
+        self.assertEqual(telem.camera_status, "RUNNING")
+        self.assertTrue(telem.stream_alive)
+        self.assertIsNone(telem.to_dict()["error_message"])
 
     # -------------------------------------------------------------------------
     # 3. Events Endpoint

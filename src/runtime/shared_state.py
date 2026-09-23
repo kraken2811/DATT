@@ -20,6 +20,9 @@ class TelemetrySnapshot:
     frame_id: int = 0
     timestamp: float = 0.0
     status: str = "STOPPED"
+    camera_status: str = "STOPPED"
+    stream_alive: bool = False
+    last_frame_time: float = 0.0
     error_message: str = ""
     people_count: int = 0
     detection_count: int = 0
@@ -43,7 +46,10 @@ class TelemetrySnapshot:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert snapshot to standard Python dict."""
-        return asdict(self)
+        d = asdict(self)
+        if not d.get("error_message"):
+            d["error_message"] = None
+        return d
 
 
 class SharedRuntimeState:
@@ -149,8 +155,8 @@ class SharedRuntimeState:
             if last_saved_people_count is not None:
                 self._last_saved_people_count = last_saved_people_count
 
-            if self._status != "ERROR":
-                self._status = "RUNNING"
+            self._status = "RUNNING"
+            self._error_message = ""
 
     def set_camera(self, camera_id: str, camera_name: str) -> None:
         """Update the active camera identifiers."""
@@ -199,13 +205,47 @@ class SharedRuntimeState:
             return self._frame_id, self._latest_frame
 
     def get_telemetry(self) -> TelemetrySnapshot:
-        """Fetch an immutable point-in-time telemetry snapshot."""
+        """Fetch an immutable point-in-time telemetry snapshot with dynamic camera status."""
         with self._lock:
+            now = time.time()
+            last_frame_time = self._timestamp
+
+            # Dynamic status evaluation
+            if self._status == "STOPPED":
+                camera_status = "STOPPED"
+                stream_alive = False
+                err = self._error_message
+            elif self._status == "ERROR":
+                camera_status = "ERROR"
+                stream_alive = False
+                err = self._error_message or "Camera stream stopped or reader crashed"
+            elif self._frame_id > 0:
+                frame_age = now - last_frame_time
+                if frame_age > 15.0:
+                    camera_status = "ERROR"
+                    stream_alive = False
+                    err = self._error_message or "Stream timeout: no frame received for >15s"
+                elif frame_age > 5.0:
+                    camera_status = "WARNING"
+                    stream_alive = True
+                    err = self._error_message or "Stream delay: no new frame for >5s"
+                else:
+                    camera_status = "RUNNING"
+                    stream_alive = True
+                    err = ""
+            else:
+                camera_status = self._status
+                stream_alive = (camera_status == "RUNNING")
+                err = self._error_message
+
             return TelemetrySnapshot(
                 frame_id=self._frame_id,
                 timestamp=self._timestamp,
-                status=self._status,
-                error_message=self._error_message,
+                status=camera_status,
+                camera_status=camera_status,
+                stream_alive=stream_alive,
+                last_frame_time=last_frame_time,
+                error_message=err,
                 people_count=self._people_count,
                 detection_count=self._detection_count,
                 track_count=self._track_count,

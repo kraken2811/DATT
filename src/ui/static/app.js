@@ -96,19 +96,24 @@
         DOM.sidebarConnStatus.className = `badge badge-${cleanStatus.toLowerCase()}`;
 
         // Alert Banner
-        if (cleanStatus === "ERROR" && errorMessage) {
+        if (cleanStatus === "ERROR") {
             DOM.alertBanner.style.display = "block";
             DOM.alertBanner.className = "alert-banner alert-error";
-            DOM.alertBanner.innerHTML = `⚠️ <strong>Camera Status: ERROR</strong> — ${errorMessage}`;
+            DOM.alertBanner.innerHTML = `⚠️ <strong>Camera Status: ERROR</strong> — ${errorMessage || "Stream ended or camera disconnected unexpectedly."}`;
+        } else if (cleanStatus === "WARNING") {
+            DOM.alertBanner.style.display = "block";
+            DOM.alertBanner.className = "alert-banner alert-warning";
+            DOM.alertBanner.innerHTML = `⚠️ <strong>Camera Warning:</strong> ${errorMessage || "Frame delay detected (>5s)..."}`;
         } else if (cleanStatus === "DISCONNECTED") {
             DOM.alertBanner.style.display = "block";
             DOM.alertBanner.className = "alert-banner alert-warning";
-            DOM.alertBanner.innerHTML = `📡 Connecting to AI pipeline... Ensure <code>python app.py --ui</code> is running.`;
+            DOM.alertBanner.innerHTML = `📡 <strong>Connecting to AI pipeline...</strong> Ensure <code>python src/main.py</code> is running.`;
         } else if (cleanStatus === "SWITCHING") {
             DOM.alertBanner.style.display = "block";
             DOM.alertBanner.className = "alert-banner alert-warning";
             DOM.alertBanner.innerHTML = `🔄 <strong>Switching camera stream...</strong> Please wait.`;
         } else {
+            // RUNNING: clear any alert banner cleanly
             DOM.alertBanner.style.display = "none";
         }
     }
@@ -141,7 +146,8 @@
      * Apply telemetry metrics cleanly into existing DOM elements.
      */
     function applyTelemetry(data) {
-        const status = state.isSwitchingCamera ? "SWITCHING" : (data.status || "DISCONNECTED");
+        // Prioritize camera_status from backend, falling back to status
+        const status = state.isSwitchingCamera ? "SWITCHING" : (data.camera_status || data.status || "DISCONNECTED");
         updateStatus(status, data.error_message);
 
         // Active Camera Name
@@ -185,7 +191,8 @@
     function handleTelemetryError() {
         state.consecutiveErrors++;
         DOM.pingLatency.textContent = "-- ms";
-        if (state.consecutiveErrors > 2) {
+        // Do not trigger error/disconnect on transient network or Colab latency (require 3 consecutive failures)
+        if (state.consecutiveErrors >= 3) {
             updateStatus("DISCONNECTED", "AI Server connection lost");
         }
     }

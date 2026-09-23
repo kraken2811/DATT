@@ -86,6 +86,15 @@ def get_backend_url(request: Request) -> str:
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> Response:
+    """Serve favicon.ico or return 204 No Content."""
+    favicon_path = STATIC_DIR / "favicon.ico"
+    if favicon_path.is_file():
+        return FileResponse(str(favicon_path), media_type="image/x-icon")
+    return Response(status_code=204)
+
+
 @app.get("/", response_class=FileResponse)
 async def serve_index() -> Response:
     """Serve the single-page monitoring dashboard."""
@@ -118,7 +127,16 @@ async def get_telemetry(request: Request) -> JSONResponse:
         async with httpx.AsyncClient(timeout=1.5) as client:
             resp = await client.get(f"{b_url}/telemetry")
             if resp.status_code == 200:
-                return JSONResponse(content=resp.json(), status_code=200)
+                data = resp.json()
+                if "camera_status" not in data:
+                    data["camera_status"] = data.get("status", "RUNNING")
+                if "stream_alive" not in data:
+                    data["stream_alive"] = data["camera_status"] in ("RUNNING", "WARNING")
+                if "last_frame_time" not in data:
+                    data["last_frame_time"] = data.get("timestamp", 0.0)
+                if "error_message" not in data or not data["error_message"]:
+                    data["error_message"] = None
+                return JSONResponse(content=data, status_code=200)
     except Exception as exc:
         logger.debug("Backend telemetry unreachable (%s): %s", b_url, exc)
 
@@ -126,7 +144,10 @@ async def get_telemetry(request: Request) -> JSONResponse:
     return JSONResponse(
         content={
             "status": "DISCONNECTED",
-            "error_message": f"Connecting to AI pipeline at {b_url}... Ensure 'python app.py --ui' is active.",
+            "camera_status": "DISCONNECTED",
+            "stream_alive": False,
+            "last_frame_time": 0.0,
+            "error_message": f"Connecting to AI pipeline at {b_url}... Ensure 'python src/main.py' is active.",
             "people_count": 0,
             "detection_count": 0,
             "track_count": 0,

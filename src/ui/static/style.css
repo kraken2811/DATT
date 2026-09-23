@@ -21,6 +21,7 @@
     --accent-green: #34d399;
 
     --status-running: #059669;
+    --status-warning: #d97706;
     --status-disconnected: #d97706;
     --status-error: #dc2626;
     --status-switching: #d97706;
@@ -195,6 +196,7 @@ body {
 }
 
 .badge-running { background-color: var(--status-running); color: #ffffff; }
+.badge-warning { background-color: var(--status-warning); color: #ffffff; }
 .badge-disconnected { background-color: var(--status-disconnected); color: #ffffff; }
 .badge-error { background-color: var(--status-error); color: #ffffff; }
 .badge-switching { background-color: var(--status-switching); color: #ffffff; }
@@ -253,6 +255,7 @@ body {
 }
 
 .status-running { background-color: var(--status-running); color: #ffffff; }
+.status-warning { background-color: var(--status-warning); color: #ffffff; }
 .status-disconnected { background-color: var(--status-disconnected); color: #ffffff; }
 .status-error { background-color: var(--status-error); color: #ffffff; }
 .status-switching { background-color: var(--status-switching); color: #ffffff; }
