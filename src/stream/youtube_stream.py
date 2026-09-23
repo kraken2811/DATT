@@ -22,6 +22,11 @@ from yt_dlp.utils import DownloadError
 
 logger = logging.getLogger("datt.stream")
 
+try:
+    import psutil
+except ImportError:  # diagnostics remain available without optional psutil
+    psutil = None
+
 
 @dataclass(frozen=True)
 class CapturedFrame:
@@ -215,6 +220,12 @@ class CameraReader:
         self._thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self.stderr_lines: list[str] = []
+        self._process_started_at: float = 0.0
+        self._frames_received: int = 0
+        self._read_errors: int = 0
+        self._last_pipe_warning: str = ""
+        self._health_thread: threading.Thread | None = None
+        self._last_status: str = "STOPPED"
 
         # Health & Stale Frame Tracking
         self._last_frame_timestamp: float = 0.0
@@ -282,6 +293,8 @@ class CameraReader:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        self._process_started_at = time.time()
+        logger.info("[DATT-FFMPEG] started pid=%s", self.process.pid)
         if self.process.stderr is not None:
             self._stderr_thread = threading.Thread(
                 target=self._drain_stderr,
@@ -314,6 +327,8 @@ class CameraReader:
                     target=self._read_loop, name="ffmpeg-capture", daemon=True
                 )
                 self._thread.start()
+                self._health_thread = threading.Thread(target=self._health_loop, name="ffmpeg-health", daemon=True)
+                self._health_thread.start()
                 return
 
             except Exception as exc:
@@ -341,8 +356,8 @@ class CameraReader:
                     self.stderr_lines.append(decoded)
                     if len(self.stderr_lines) > 50:
                         self.stderr_lines.pop(0)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._log_thread_error("ffmpeg-stderr", exc)
         finally:
             try:
                 pipe.close()
@@ -436,9 +451,15 @@ class CameraReader:
             read_start = time.perf_counter()
             try:
                 raw = read_frame_bytes(self.process.stdout, self.frame_size)
-            except Exception:
+            except Exception as exc:
+                self._read_errors += 1
+                self._log_thread_error("ffmpeg-capture", exc)
                 raw = b""
             read_end = time.perf_counter()
+
+            if (read_end - read_start) > 2.0 or len(raw) != self.frame_size:
+                logger.warning("[DATT-PIPE WARNING] read_duration_ms=%.1f expected_bytes=%d received_bytes=%d",
+                               (read_end - read_start) * 1000, self.frame_size, len(raw))
 
             if len(raw) == self.frame_size:
                 now_wall = time.time()
@@ -457,6 +478,7 @@ class CameraReader:
                     )
                     self._last_frame_timestamp = now_wall
                     self._stream_alive = True
+                    self._frames_received = sequence
 
                 # Sliding window FPS (last 30 timestamps)
                 self._stream_timestamps.append(now_perf)
@@ -489,6 +511,51 @@ class CameraReader:
             self._stream_alive = False
             self.finished = True
         self._cleanup_process()
+
+    def _log_thread_error(self, name: str, exc: Exception) -> None:
+        import traceback
+        logger.error("[DATT-THREAD ERROR] thread_name=%s exception_type=%s exception_message=%s traceback=%s",
+                     name, type(exc).__name__, exc, traceback.format_exc())
+
+    def _health_loop(self) -> None:
+        """Periodic lifecycle/resource diagnostics; intentionally no recovery actions."""
+        last_resource = 0.0
+        while not self.stop_event.wait(10.0):
+            proc = self.process
+            alive = proc is not None and proc.poll() is None
+            code = None if proc is None else proc.poll()
+            runtime = max(0.0, time.time() - self._process_started_at) if self._process_started_at else 0.0
+            logger.info("[DATT-FFMPEG HEALTH]\npid=%s\nalive=%s\nreturn_code=%s\nruntime=%ss",
+                        proc.pid if proc else None, alive, code, int(runtime))
+            age = self.frame_age_seconds
+            logger.info("[DATT-CAMERA READER HEALTH]\nthread_alive=%s\nframes_received=%s\nlast_frame_time=%s\nframe_age_seconds=%.1f\nstream_fps=%.2f\nread_errors=%s",
+                        self._thread.is_alive() if self._thread else False, self._frames_received,
+                        self.last_frame_time, age, self.stream_fps, self._read_errors)
+            if proc is not None and code is not None:
+                logger.error("[DATT-FFMPEG EXIT]\nexit_code=%s\nruntime=%ss\nlast_stderr=%s",
+                             code, int(runtime), "\n".join(self.stderr_lines)[-2000:])
+            status = self.status
+            if status != self._last_status:
+                logger.warning("[DATT-STREAM STATE CHANGE]\nold_status=%s\nnew_status=%s\nreason=%s\nlast_frame_age=%.1f\nffmpeg_alive=%s\nreader_alive=%s",
+                               self._last_status, status, self.error or "", age, alive,
+                               self._thread.is_alive() if self._thread else False)
+                self._last_status = status
+            if psutil is not None and time.time() - last_resource >= 60:
+                try:
+                    p = psutil.Process()
+                    logger.info("[DATT-RESOURCE] RAM usage=%sMB GPU memory usage=unavailable number of threads=%s number of processes=%s",
+                                round(p.memory_info().rss / 1048576, 1), threading.active_count(), len(psutil.pids()))
+                except Exception as exc:
+                    self._log_thread_error("ffmpeg-health", exc)
+                last_resource = time.time()
+
+    def diagnostics(self) -> dict[str, Any]:
+        proc = self.process
+        return {"ffmpeg_alive": proc is not None and proc.poll() is None,
+                "reader_alive": self._thread.is_alive() if self._thread else False,
+                "last_frame_age": self.frame_age_seconds, "frames_received": self._frames_received,
+                "ffmpeg_exit_code": proc.poll() if proc else None,
+                "last_error": str(self.error or "") or ("\n".join(self.stderr_lines)[-2000:] if self.stderr_lines else "")}
 
     def read(self, timeout: float = 1.0) -> np.ndarray | None:
         """Read the newest available frame.

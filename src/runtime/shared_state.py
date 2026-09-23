@@ -43,6 +43,7 @@ class TelemetrySnapshot:
     filtered_event_count: int = 0
     last_event_time: str = "None"
     last_saved_people_count: int = 0
+    stream_health: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert snapshot to standard Python dict."""
@@ -96,6 +97,7 @@ class SharedRuntimeState:
         self._vram_mb: float = 0.0
         self._model_name: str = "YOLO11s"
         self._input_size: str = "640x640"
+        self._stream_health: dict[str, Any] = {}
 
     def update(
         self,
@@ -190,6 +192,11 @@ class SharedRuntimeState:
             self._status = status
             self._error_message = error_message
 
+    def set_stream_health(self, health: dict[str, Any]) -> None:
+        """Publish runtime stream diagnostics for the telemetry endpoint."""
+        with self._lock:
+            self._stream_health = dict(health)
+
     def get_annotated_frame(self) -> tuple[int, np.ndarray | None]:
         """Fetch the newest annotated frame and its frame ID.
 
@@ -265,6 +272,7 @@ class SharedRuntimeState:
                 filtered_event_count=self._filtered_event_count,
                 last_event_time=self._last_event_time,
                 last_saved_people_count=self._last_saved_people_count,
+                stream_health=dict(self._stream_health),
             )
 
     def reset(self) -> None:

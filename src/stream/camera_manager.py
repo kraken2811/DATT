@@ -80,6 +80,13 @@ class CameraManager:
         with self._lock:
             return self._reader.finished if self._reader else True
 
+    def stream_diagnostics(self) -> dict[str, Any]:
+        with self._lock:
+            return self._reader.diagnostics() if self._reader else {
+                "ffmpeg_alive": False, "reader_alive": False, "last_frame_age": 999.0,
+                "frames_received": 0, "ffmpeg_exit_code": None, "last_error": self._error_reason,
+            }
+
     def get_active_camera(self) -> CameraInfo | None:
         """Return the currently active CameraInfo metadata."""
         with self._lock:
@@ -180,12 +187,16 @@ class CameraManager:
             frame = reader.read(timeout=timeout)
             if frame is not None:
                 with self._lock:
+                    previous = self._status
                     if self._status != "RUNNING":
                         self._status = "RUNNING"
                         self._error_reason = ""
+                        logger.info("[DATT-STREAM STATE CHANGE] old_status=%s new_status=RUNNING reason=frame_received last_frame_age=%.1f ffmpeg_alive=%s reader_alive=%s",
+                                    previous, reader.frame_age_seconds, reader.diagnostics()["ffmpeg_alive"], reader.diagnostics()["reader_alive"])
                 return frame
 
             with self._lock:
+                previous = self._status
                 reader_status = reader.status
                 if reader_status in ("ERROR", "WARNING"):
                     self._status = reader_status
@@ -197,11 +208,18 @@ class CameraManager:
                     else:
                         self._status = "ERROR"
                         self._error_reason = "Stream timeout: no frame received for >15s"
+                if self._status != previous:
+                    logger.warning("[DATT-STREAM STATE CHANGE] old_status=%s new_status=%s reason=%s last_frame_age=%.1f ffmpeg_alive=%s reader_alive=%s",
+                                   previous, self._status, self._error_reason, reader.frame_age_seconds,
+                                   reader.diagnostics()["ffmpeg_alive"], reader.diagnostics()["reader_alive"])
             return None
         except Exception as exc:
             with self._lock:
+                previous = self._status
                 self._status = "ERROR"
                 self._error_reason = f"Read error on stream: {exc}"
+                logger.error("[DATT-THREAD ERROR] thread_name=camera-manager exception_type=%s exception_message=%s",
+                             type(exc).__name__, exc, exc_info=True)
             return None
 
     def _stop_reader_internal(self) -> None:
