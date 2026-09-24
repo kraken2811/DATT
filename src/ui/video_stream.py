@@ -318,7 +318,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        stype = data.get("type", "local")
+        stype = data.get("type") or data.get("source_type") or "local"
         src = data.get("source", "")
         loop = bool(data.get("loop", True))
         name = data.get("name")

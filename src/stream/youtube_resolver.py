@@ -66,9 +66,12 @@ class ResolverMetrics:
     cache_misses: int = 0
     direct_url_reconnects: int = 0
     http_429_count: int = 0
+    http_403_count: int = 0
     resolve_failures: int = 0
     stream_restarts: int = 0
     dedup_waits: int = 0
+    resolver_attempt_count: int = 0
+    resolver_success_count: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return {
@@ -77,10 +80,34 @@ class ResolverMetrics:
             "cache_misses": self.cache_misses,
             "direct_url_reconnects": self.direct_url_reconnects,
             "http_429_count": self.http_429_count,
+            "http_403_count": self.http_403_count,
             "resolve_failures": self.resolve_failures,
             "stream_restarts": self.stream_restarts,
             "dedup_waits": self.dedup_waits,
+            "resolver_attempt_count": self.resolver_attempt_count,
+            "resolver_success_count": self.resolver_success_count,
         }
+
+
+@dataclass
+class SharedRateLimitPolicy:
+    """Unified rate limit and circuit breaker policy for YouTube access."""
+    http_429_count: int = 0
+    http_403_count: int = 0
+    last_429_timestamp: float = 0.0
+    cooldown_until: float = 0.0
+    current_backoff_level: int = 0
+    base_cooldown: float = 10.0
+    max_cooldown: float = 120.0
+    jitter: float = 5.0
+
+    @property
+    def is_in_cooldown(self) -> bool:
+        return time.time() < self.cooldown_until
+
+    @property
+    def cooldown_remaining(self) -> float:
+        return max(0.0, self.cooldown_until - time.time())
 
 
 def extract_video_id(url: str) -> str:
@@ -201,6 +228,7 @@ class YouTubeStreamResolver:
         self._lock = threading.RLock()
         self._cache: dict[str, StreamCacheEntry] = {}
         self._metrics = ResolverMetrics()
+        self._policy = SharedRateLimitPolicy()
 
         # Single Flight deduplication data
         self._in_flight: dict[str, threading.Event] = {}
@@ -218,10 +246,85 @@ class YouTubeStreamResolver:
         with self._lock:
             return self._metrics
 
-    def get_metrics_dict(self) -> dict[str, int]:
+    @property
+    def policy(self) -> SharedRateLimitPolicy:
+        """Return shared 429 rate-limit policy."""
+        with self._lock:
+            return self._policy
+
+    def record_429(self, source: str = "general", retry_after: float | None = None) -> float:
+        """Record an HTTP 429 event from yt-dlp or FFmpeg and calculate shared cooldown."""
+        with self._lock:
+            self._metrics.http_429_count += 1
+            self._policy.http_429_count += 1
+            self._policy.last_429_timestamp = time.time()
+            self._policy.current_backoff_level += 1
+            level = self._policy.current_backoff_level
+
+            base = getattr(config, "YOUTUBE_BACKOFF_BASE", 10.0)
+            max_delay = getattr(config, "YOUTUBE_BACKOFF_MAX", 120.0)
+            jitter = getattr(config, "YOUTUBE_BACKOFF_JITTER", 5.0)
+
+            if retry_after is not None and retry_after > 0:
+                cooldown = max(retry_after, base)
+            else:
+                backoff = min(base * (2 ** min(level - 1, 5)) + random.uniform(0, jitter), max_delay)
+                cooldown = backoff
+
+            self._policy.cooldown_until = time.time() + cooldown
+            self._global_429_cooldown_until = self._policy.cooldown_until
+            logger.error(
+                "[YT-429] 429 recorded from source=%s. Entering global cooldown for %.1fs (level=%d, until=%.1f)",
+                source, cooldown, level, self._policy.cooldown_until,
+            )
+            return cooldown
+
+    def record_403(self, url_or_id: str = "", source: str = "general") -> None:
+        """Record an HTTP 403 Forbidden event (e.g. expired googlevideo token) and invalidate cache."""
+        with self._lock:
+            self._metrics.http_403_count += 1
+            self._policy.http_403_count += 1
+            logger.warning("[YT-403] 403 Forbidden detected from source=%s for %s. Invalidating cache.", source, url_or_id)
+            if url_or_id:
+                self.invalidate_cache(url_or_id, reason="http_403_forbidden")
+
+    def is_in_cooldown(self) -> bool:
+        """Check if global 429 cooldown is currently active."""
+        with self._lock:
+            return time.time() < self._policy.cooldown_until
+
+    def get_cooldown_remaining(self) -> float:
+        """Return remaining seconds of 429 cooldown, or 0.0 if not in cooldown."""
+        with self._lock:
+            return max(0.0, self._policy.cooldown_until - time.time())
+
+    def reset_backoff_level(self) -> None:
+        """Reset or decay backoff level after stable operation."""
+        with self._lock:
+            self._policy.current_backoff_level = 0
+
+    def reset_state(self) -> None:
+        """Reset internal cache, metrics, in-flight state, and shared rate-limit policy."""
+        with self._lock:
+            self._cache.clear()
+            self._in_flight.clear()
+            self._in_flight_results.clear()
+            self._metrics = ResolverMetrics()
+            self._policy = SharedRateLimitPolicy()
+            self._last_extraction_finished_at = 0.0
+            self._global_429_cooldown_until = 0.0
+
+    def reset_for_testing(self) -> None:
+        """Alias for reset_state() in test environments."""
+        self.reset_state()
+
+    def get_metrics_dict(self) -> dict[str, Any]:
         """Return metrics as a dictionary for telemetry APIs."""
         with self._lock:
-            return self._metrics.to_dict()
+            m = self._metrics.to_dict()
+            m["cooldown_remaining_seconds"] = round(self.get_cooldown_remaining(), 2)
+            m["current_backoff_level"] = self._policy.current_backoff_level
+            return m
 
     def get_cached_url(self, url_or_id: str) -> str | None:
         """Return active cached stream URL if valid, or None if expired/missing."""
@@ -375,8 +478,7 @@ class YouTubeStreamResolver:
 
         try:
             # 1. Enforce Global 429 Cooldown if active
-            with self._lock:
-                cooldown_remaining = self._global_429_cooldown_until - time.time()
+            cooldown_remaining = self.get_cooldown_remaining()
             if cooldown_remaining > 0:
                 logger.warning(
                     "[YT-429] Global cooldown active, sleeping %.1fs before resolve...",
@@ -419,6 +521,8 @@ class YouTubeStreamResolver:
 
             for attempt in range(1, max_retries + 1):
                 t_start = time.perf_counter()
+                with self._lock:
+                    self._metrics.resolver_attempt_count += 1
                 logger.info(
                     "[YT-RESOLVE] video_id=%s resolving... (attempt %d/%d, is_vod=%s)",
                     video_id, attempt, max_retries, is_vod,
@@ -445,6 +549,9 @@ class YouTubeStreamResolver:
                         err_label = "YouTube VOD extraction error: " if is_vod else ""
                         raise RuntimeError(f"{err_label}No valid video stream URL found from YouTube for {video_id}")
 
+                    with self._lock:
+                        self._metrics.resolver_success_count += 1
+
                     logger.info(
                         "[YT-RESOLVE] video_id=%s resolved in %.2fs (URL prefix=%s...)",
                         video_id, duration, selected_url[:60],
@@ -454,15 +561,15 @@ class YouTubeStreamResolver:
                 except DownloadError as exc:
                     err_str = str(exc)
                     is_429 = "429" in err_str or "Too Many Requests" in err_str
+                    is_403 = "403" in err_str or "Forbidden" in err_str
+                    if is_403:
+                        self.record_403(url_or_id=video_id, source="yt-dlp")
                     if is_429:
-                        self._metrics.http_429_count += 1
-                        backoff = min(base_delay * (2 ** (attempt - 1)) + random.uniform(0, jitter), max_delay)
+                        backoff = self.record_429(source="yt-dlp")
                         logger.error(
                             "[YT-429] HTTP 429 Too Many Requests detected for video_id=%s. Backing off for %.1fs (attempt %d/%d)",
                             video_id, backoff, attempt, max_retries,
                         )
-                        with self._lock:
-                            self._global_429_cooldown_until = time.time() + backoff
                         if attempt < max_retries:
                             time.sleep(backoff)
                             continue
@@ -476,16 +583,16 @@ class YouTubeStreamResolver:
                     last_exception = exc
                     err_str = str(exc)
                     is_429 = "429" in err_str or "Too Many Requests" in err_str
+                    is_403 = "403" in err_str or "Forbidden" in err_str
+                    if is_403:
+                        self.record_403(url_or_id=video_id, source="yt-dlp")
 
                     if is_429:
-                        self._metrics.http_429_count += 1
-                        backoff = min(base_delay * (2 ** (attempt - 1)) + random.uniform(0, jitter), max_delay)
+                        backoff = self.record_429(source="yt-dlp")
                         logger.error(
                             "[YT-429] HTTP 429 Too Many Requests detected for video_id=%s. Backing off for %.1fs (attempt %d/%d)",
                             video_id, backoff, attempt, max_retries,
                         )
-                        with self._lock:
-                            self._global_429_cooldown_until = time.time() + backoff
                         if attempt < max_retries:
                             time.sleep(backoff)
                             continue

@@ -264,7 +264,7 @@ async def set_video_source(request: Request) -> JSONResponse:
     except Exception:
         body = {}
 
-    stype = str(body.get("type", "local")).lower().strip()
+    stype = str(body.get("type") or body.get("source_type") or "local").lower().strip()
     source = str(body.get("source", "")).strip()
     loop = bool(body.get("loop", True))
     name = body.get("name")

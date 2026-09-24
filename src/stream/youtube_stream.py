@@ -182,6 +182,22 @@ class CameraReader:
         self.height = height
         self.frame_size = width * height * 3
 
+        self.source_type = "youtube"
+        self.process_generation: int = 0
+        self._process_started_at: float = 0.0
+        self._first_frame_received: bool = False
+        self._generation_frame_timestamp: float = 0.0
+        self._first_frame_timeout_count: int = 0
+        self._stale_frame_timeout_count: int = 0
+        self.reconnect_count: int = 0
+        self.ffmpeg_start_count: int = 0
+        self.abnormal_exit_count: int = 0
+        self.clean_eof_count: int = 0
+        self.last_error_type: str = ""
+        self.last_error_message: str = ""
+        self.first_frame_timeout_seconds: float = 15.0
+        self.stale_frame_timeout_seconds: float = 15.0
+
         self.process: subprocess.Popen | None = None
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
@@ -196,7 +212,6 @@ class CameraReader:
         self._thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self.stderr_lines: list[str] = []
-        self._process_started_at: float = 0.0
         self._frames_received: int = 0
         self.dropped_frames: int = 0
         self._read_errors: int = 0
@@ -219,14 +234,19 @@ class CameraReader:
 
         # Auto-Recovery Configuration
         self.reconnect_attempts: int = 0
-        # Keep trying at a bounded rate; a transient upstream limit must not
-        # permanently disable the camera.
         self.reconnect_delays: list[int] = [3, 5, 10, 20, 40, 60, 120, 300]
         self._force_url_refresh = False
         self._stale_termination_requested = False
         self._consecutive_frame_failures: int = 0
         self._direct_reconnect_attempts: int = 0
 
+    @property
+    def first_frame_timeout_count(self) -> int:
+        return self._first_frame_timeout_count
+
+    @property
+    def stale_frame_timeout_count(self) -> int:
+        return self._stale_frame_timeout_count
 
     @property
     def last_frame_time(self) -> float:
@@ -271,6 +291,16 @@ class CameraReader:
 
     def _spawn_ffmpeg(self, stream_url: str) -> None:
         """Construct FFmpeg command, spawn subprocess, and start stderr drain thread."""
+        if self.stop_event.is_set():
+            raise RuntimeError("Cannot spawn FFmpeg: reader is stopped")
+
+        self.process_generation += 1
+        self.ffmpeg_start_count += 1
+        self._first_frame_received = False
+        self._generation_frame_timestamp = 0.0
+        self._stale_termination_requested = False
+        self.stderr_lines = []
+
         ffmpeg_path = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
         ffmpeg_command = build_ffmpeg_command(
             ffmpeg_path=ffmpeg_path,
@@ -278,29 +308,46 @@ class CameraReader:
             width=self.width,
             height=self.height,
         )
-        self.stderr_lines = []
-        self.process = subprocess.Popen(
+        proc = subprocess.Popen(
             ffmpeg_command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        self._last_ffmpeg_pid = self.process.pid
-        self._last_ffmpeg_exit_code = None
-        self._last_ffmpeg_stderr = ""
-        self._process_started_at = time.time()
-        logger.info("[DATT-FFMPEG] started pid=%s", self.process.pid)
-        logger.info("[DATT-STREAM START] pid=%s frame_size=%s", self.process.pid, self.frame_size)
-        if self.process.stderr is not None:
+
+        if self.stop_event.is_set():
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            raise RuntimeError("Stopped immediately after spawn")
+
+        with self.lock:
+            self.process = proc
+            self._last_ffmpeg_pid = proc.pid
+            self._last_ffmpeg_exit_code = None
+            self._last_ffmpeg_stderr = ""
+            self._process_started_at = time.time()
+
+        logger.info("[DATT-FFMPEG] started pid=%s gen=%s", proc.pid, self.process_generation)
+        logger.info("[DATT-STREAM START] pid=%s frame_size=%s", proc.pid, self.frame_size)
+
+        if proc.stderr is not None:
             self._stderr_thread = threading.Thread(
                 target=self._drain_stderr,
-                args=(self.process.stderr,),
+                args=(proc.stderr,),
                 name="ffmpeg-stderr",
                 daemon=True,
             )
             self._stderr_thread.start()
 
-        time.sleep(0.5)
-        if self.process.poll() is not None:
+        if self.stop_event.wait(0.3):
+            return
+
+        if proc.poll() is not None:
             err_msg = " ".join(self.stderr_lines[-5:]) if self.stderr_lines else "Process exited early"
             raise RuntimeError(f"FFmpeg failed to open video stream: {err_msg}")
 
@@ -335,28 +382,28 @@ class CameraReader:
                 pass
 
     def _cleanup_process(self) -> None:
-        """Safely terminate FFmpeg process, closing pipes and avoiding zombie processes."""
-        proc = self.process
-        self.process = None
+        """Safely terminate FFmpeg process according to cancel-safe cleanup order:
+        1. mark stopping / prevent race
+        2. terminate FFmpeg first
+        3. allow blocked pipe reads to unblock
+        4. wait with deadline
+        5. kill if still alive
+        6. close stdout / stderr
+        7. verify process is gone
+        """
+        with self.lock:
+            proc = self.process
+            self.process = None
 
         if proc is not None:
-            # Snapshot lifecycle data before releasing the process object.
-            self._last_ffmpeg_exit_code = proc.poll()
-            self._last_ffmpeg_stderr = "\n".join(self.stderr_lines)[-2000:]
-            # 1. Close stdout to unblock reading threads
-            if proc.stdout is not None:
-                try:
-                    proc.stdout.close()
-                except Exception:
-                    pass
-
-            # 2. Terminate or kill
+            # 1. Terminate FFmpeg first
             if proc.poll() is None:
                 try:
                     proc.terminate()
                 except Exception:
                     pass
 
+            # 2. Wait with deadline, kill fallback
             try:
                 proc.wait(timeout=2.0)
             except (subprocess.TimeoutExpired, Exception):
@@ -366,15 +413,26 @@ class CameraReader:
                 except Exception:
                     pass
 
-            # 3. Close stderr
+            self._last_ffmpeg_exit_code = proc.poll()
+            self._last_ffmpeg_stderr = "\n".join(self.stderr_lines)[-2000:]
+
+            # 3. Close stdout and stderr pipes
+            if proc.stdout is not None:
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
             if proc.stderr is not None:
                 try:
                     proc.stderr.close()
                 except Exception:
                     pass
-            logger.info("[DATT-STREAM FFmpeg EXIT] pid=%s exit_code=%s stderr=%s",
-                        self._last_ffmpeg_pid, self._last_ffmpeg_exit_code,
-                        self._last_ffmpeg_stderr or "<empty>")
+
+            logger.info(
+                "[DATT-STREAM FFmpeg EXIT] pid=%s exit_code=%s stderr=%s",
+                self._last_ffmpeg_pid, self._last_ffmpeg_exit_code,
+                self._last_ffmpeg_stderr or "<empty>",
+            )
 
     def _reconnect(self) -> bool:
         """Retry indefinitely with bounded delays until stopped or recovered.
@@ -387,7 +445,15 @@ class CameraReader:
         direct_reconnect_limit = getattr(config, "STREAM_DIRECT_RECONNECT_RETRIES", 3)
 
         while not self.stop_event.is_set():
+            # Check shared rate-limit cooldown
+            cooldown_rem = stream_resolver.get_cooldown_remaining()
+            if cooldown_rem > 0:
+                logger.warning("[DATT-STREAM] In shared 429 cooldown (%.1fs remaining). Pausing reconnect...", cooldown_rem)
+                if self.stop_event.wait(cooldown_rem):
+                    return False
+
             self.reconnect_attempts += 1
+            self.reconnect_count = self.reconnect_attempts
             delay_idx = min(self.reconnect_attempts - 1, len(self.reconnect_delays) - 1)
             delay = 0 if self.reconnect_attempts == 1 and self._stream_url is None and not self._force_url_refresh else self.reconnect_delays[delay_idx]
 
@@ -417,6 +483,9 @@ class CameraReader:
             if self.stop_event.wait(delay):
                 return False
 
+            if self.stop_event.is_set():
+                return False
+
             try:
                 if use_cached:
                     self._direct_reconnect_attempts += 1
@@ -425,10 +494,17 @@ class CameraReader:
                 else:
                     strategy = "refresh_url"
                     stream_resolver.invalidate_cache(self.url, reason="direct_reconnect_exhausted")
+
+                    if self.stop_event.is_set():
+                        return False
+
                     target_url = self._get_stream_url_with_diagnostics("recovery")
                     self._direct_reconnect_attempts = 0
 
                 assert target_url is not None
+                if self.stop_event.is_set():
+                    return False
+
                 self.recovery_state = "URL_REFRESH_REQUIRED" if not use_cached else "FFmpeg_RESTART"
                 logger.info("[DATT-RECOVERY] attempt=%s strategy=%s", self.reconnect_attempts, strategy)
                 self._spawn_ffmpeg(target_url)
@@ -447,10 +523,30 @@ class CameraReader:
 
             except Exception as exc:
                 stream_resolver.record_failure(self.url)
-                if "429" in "\n".join(self.stderr_lines) or "429" in str(exc):
-                    self._force_url_refresh = True
+                stderr_tail = "\n".join(self.stderr_lines)
+                err_str = str(exc)
+
+                if "429" in stderr_tail or "429" in err_str:
+                    self.last_error_type = "HTTP_429"
+                    self.last_error_message = f"429 in reconnect: {stderr_tail[-200:] or err_str}"
+                    stream_resolver.record_429(source="camera_reconnect")
+                    # Suppress immediate yt-dlp refresh during cooldown
+                    self._force_url_refresh = False
                     self._stream_url = None
                     logger.error("[YT-429] 429 detected during camera reconnect on %s", self.url)
+                elif "403" in stderr_tail or "403" in err_str:
+                    self.last_error_type = "HTTP_403"
+                    self.last_error_message = f"403 in reconnect: {stderr_tail[-200:] or err_str}"
+                    stream_resolver.record_403(self.url, source="camera_reconnect")
+                    if self._direct_reconnect_attempts >= direct_reconnect_limit:
+                        self._force_url_refresh = True
+                        self._stream_url = None
+                    logger.warning("[YT-403] 403 detected during camera reconnect on %s", self.url)
+                else:
+                    self.last_error_type = "RECONNECT_FAILURE"
+                    self.last_error_message = err_str
+                    self.abnormal_exit_count += 1
+
                 logger.warning(
                     "[DATT-STREAM] Reconnect attempt %d failed: %s",
                     self.reconnect_attempts,
@@ -527,6 +623,8 @@ class CameraReader:
                         frame=frame,
                     )
                     self._last_frame_timestamp = now_wall
+                    self._generation_frame_timestamp = now_wall
+                    self._first_frame_received = True
                     self._stream_alive = True
                     self._frames_received = sequence
 
@@ -557,7 +655,6 @@ class CameraReader:
             proc_alive = proc is not None and proc.poll() is None
 
             # Distinguish temporary frame drop from true stream death:
-            # If FFmpeg is alive and failures are below threshold, pause briefly and retry reading
             if proc_alive and self._consecutive_frame_failures < max_frame_failures:
                 logger.debug(
                     "[DATT-PIPE WARNING] read_duration_ms=%.1f expected_bytes=%d received_bytes=%d (drop %d/%d)",
@@ -587,9 +684,26 @@ class CameraReader:
                 self.last_read_sequence = -1
 
             self._recovery_started_at = time.time()
-            if "429" in "\n".join(self.stderr_lines):
+            stderr_tail = "\n".join(self.stderr_lines)
+
+            if "429" in stderr_tail or "Too Many Requests" in stderr_tail:
+                self.last_error_type = "HTTP_429"
+                self.last_error_message = f"429 in FFmpeg: {stderr_tail[-200:]}"
+                stream_resolver.record_429(source="ffmpeg_live")
+                self._force_url_refresh = False
+                self._stream_url = None
+            elif "403" in stderr_tail or "Forbidden" in stderr_tail:
+                self.last_error_type = "HTTP_403"
+                self.last_error_message = f"403 in FFmpeg: {stderr_tail[-200:]}"
+                stream_resolver.record_403(self.url, source="ffmpeg_live")
                 self._force_url_refresh = True
                 self._stream_url = None
+            elif exit_code == 0:
+                self.clean_eof_count += 1
+                self.last_error_type = "CLEAN_EOF"
+            else:
+                self.abnormal_exit_count += 1
+                self.last_error_type = "FFMPEG_ABNORMAL_EXIT"
 
             self._cleanup_process()
             self._stale_termination_requested = False
@@ -641,18 +755,39 @@ class CameraReader:
                 last_resource = time.time()
 
     def diagnostics(self) -> dict[str, Any]:
-        proc = self.process
-        return {
-            "ffmpeg_alive": proc is not None and proc.poll() is None,
-            "reader_alive": self._thread.is_alive() if self._thread else False,
-            "last_frame_age": self.frame_age_seconds,
-            "frames_received": self._frames_received,
-            "ffmpeg_pid": proc.pid if proc else self._last_ffmpeg_pid,
-            "ffmpeg_exit_code": proc.poll() if proc else self._last_ffmpeg_exit_code,
-            "last_error": str(self.error or "") or self._last_ffmpeg_stderr or ("\n".join(self.stderr_lines)[-2000:] if self.stderr_lines else ""),
-            "resolver_metrics": stream_resolver.get_metrics_dict(),
-        }
-
+        with self.lock:
+            proc = self.process
+            proc_alive = proc is not None and proc.poll() is None
+            return {
+                "reader_type": "CameraReader",
+                "source_type": "youtube",
+                "reader_alive": self._thread.is_alive() if self._thread else False,
+                "ffmpeg_alive": proc_alive,
+                "ffmpeg_pid": proc.pid if proc else self._last_ffmpeg_pid,
+                "ffmpeg_exit_code": proc.poll() if proc else self._last_ffmpeg_exit_code,
+                "process_generation": self.process_generation,
+                "frames_received": self._frames_received,
+                "frame_age_seconds": self.frame_age_seconds,
+                "first_frame_received": self._first_frame_received,
+                "first_frame_timeout_count": self._first_frame_timeout_count,
+                "stale_frame_timeout_count": self._stale_frame_timeout_count,
+                "reconnect_count": self.reconnect_attempts,
+                "ffmpeg_start_count": self.ffmpeg_start_count,
+                "resolver_attempt_count": stream_resolver.metrics.resolver_attempt_count,
+                "resolver_success_count": stream_resolver.metrics.resolver_success_count,
+                "http_429_count": stream_resolver.metrics.http_429_count,
+                "http_403_count": stream_resolver.metrics.http_403_count,
+                "cooldown_remaining_seconds": round(stream_resolver.get_cooldown_remaining(), 2),
+                "abnormal_exit_count": self.abnormal_exit_count,
+                "clean_eof_count": self.clean_eof_count,
+                "last_error_type": self.last_error_type,
+                "last_error_message": self.last_error_message,
+                "stream_fps": self.stream_fps,
+                "last_frame_time": self._last_frame_timestamp,
+                "last_frame_age": self.frame_age_seconds,
+                "last_error": str(self.error or "") or self._last_ffmpeg_stderr or ("\n".join(self.stderr_lines)[-2000:] if self.stderr_lines else ""),
+                "resolver_metrics": stream_resolver.get_metrics_dict(),
+            }
 
     @property
     def buffer_age_ms(self) -> float:
@@ -664,19 +799,46 @@ class CameraReader:
         Blocks up to timeout seconds until a new frame arrives.
         Returns None if stream has terminated or timed out.
         """
-        # If stream has stalled > 15s while process is alive, terminate stalled FFmpeg to unblock auto-recovery
-        if self.process is not None and self._last_frame_timestamp > 0 and not self._stale_termination_requested and self.frame_age_seconds > 15.0:
-            logger.warning("[DATT-STREAM] Stale frame detected (>15s). Terminating unresponsive FFmpeg process.")
-            logger.error("[DATT-REGRESSION] stale watchdog terminating ffmpeg_pid=%s exit_code=%s stderr_tail=%s last_frame_timestamp=%s reader_thread_alive=%s",
-                         self.process.pid, self.process.poll(), "\n".join(self.stderr_lines)[-2000:] or "<empty>",
-                         self.last_frame_time, self._thread.is_alive() if self._thread else False)
-            self._recovery_started_at = time.time()
-            with self.lock:
-                self.latest = None
-                self._stream_alive = False
-            self._stale_termination_requested = True
-            if self.process.poll() is None:
-                self.process.terminate()  # reader thread owns cleanup and reconnect
+        # Generation-aware watchdogs
+        proc = self.process
+        if proc is not None and proc.poll() is None and not self._stale_termination_requested:
+            now = time.time()
+            # Condition A: FIRST FRAME TIMEOUT
+            # Process started but has not delivered its first frame within deadline
+            if not self._first_frame_received:
+                if self._process_started_at > 0 and (now - self._process_started_at) > self.first_frame_timeout_seconds:
+                    self._first_frame_timeout_count += 1
+                    self.last_error_type = "FIRST_FRAME_TIMEOUT"
+                    self.last_error_message = f"Process gen={self.process_generation} delivered no frame within {self.first_frame_timeout_seconds}s"
+                    logger.warning(
+                        "[DATT-STREAM] First-frame timeout (>%ss). Terminating unresponsive FFmpeg process.",
+                        self.first_frame_timeout_seconds,
+                    )
+                    self._recovery_started_at = now
+                    with self.lock:
+                        self.latest = None
+                        self._stream_alive = False
+                    self._stale_termination_requested = True
+                    if proc.poll() is None:
+                        proc.terminate()
+            # Condition B: STALE FRAME TIMEOUT
+            # Process previously delivered frames but no fresh frame arrived within interval
+            else:
+                if self._generation_frame_timestamp > 0 and (now - self._generation_frame_timestamp) > self.stale_frame_timeout_seconds:
+                    self._stale_frame_timeout_count += 1
+                    self.last_error_type = "STALE_FRAME_TIMEOUT"
+                    self.last_error_message = f"Process gen={self.process_generation} stalled: no frame for >{self.stale_frame_timeout_seconds}s"
+                    logger.warning(
+                        "[DATT-STREAM] Stale frame detected (>%ss). Terminating unresponsive FFmpeg process.",
+                        self.stale_frame_timeout_seconds,
+                    )
+                    self._recovery_started_at = now
+                    with self.lock:
+                        self.latest = None
+                        self._stream_alive = False
+                    self._stale_termination_requested = True
+                    if proc.poll() is None:
+                        proc.terminate()
 
         deadline = time.perf_counter() + timeout
         while time.perf_counter() < deadline:
@@ -703,4 +865,12 @@ class CameraReader:
         self._cleanup_process()
 
         if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=3.0)
+        if self._stderr_thread is not None and self._stderr_thread.is_alive():
+            self._stderr_thread.join(timeout=1.0)
+        if self._health_thread is not None and self._health_thread.is_alive():
+            self._health_thread.join(timeout=1.0)
+        with self.lock:
+            self._stream_alive = False
+            self.finished = True
+            self.latest = None

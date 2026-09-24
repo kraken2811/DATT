@@ -255,7 +255,7 @@ class CameraManager:
 
                     cam_name = name or f"Local Video: {file_path.name}"
                     cam_info = CameraInfo(
-                        id=f"local_{int(time.time())}",
+                        id=f"local_{time.time()}",
                         name=cam_name,
                         type="file",
                         url=str(file_path),
@@ -265,18 +265,18 @@ class CameraManager:
                     )
 
                 elif stype in ("youtube_vod", "vod"):
-                    reader = YouTubeVODReader(youtube_url=src_str)
+                    reader = YouTubeVODReader(youtube_url=src_str, loop=loop)
                     reader.start()
 
                     cam_name = name or "YouTube VOD"
                     cam_info = CameraInfo(
-                        id=f"vod_{int(time.time())}",
+                        id=f"vod_{time.time()}",
                         name=cam_name,
                         type="youtube_vod",
                         url=src_str,
-                        width=1280,
-                        height=720,
-                        description="YouTube VOD video stream",
+                        width=reader.width or 1280,
+                        height=reader.height or 720,
+                        description=f"YouTube VOD stream (loop={loop})",
                     )
 
                 elif stype in ("youtube", "live"):
@@ -285,7 +285,7 @@ class CameraManager:
 
                     cam_name = name or "YouTube Stream"
                     cam_info = CameraInfo(
-                        id=f"youtube_{int(time.time())}",
+                        id=f"youtube_{time.time()}",
                         name=cam_name,
                         type="youtube",
                         url=src_str,
@@ -302,6 +302,14 @@ class CameraManager:
                 self._reader = reader
                 self._active_camera = cam_info
                 self._status = "RUNNING"
+
+                # Reset target matcher tracks on source switch
+                try:
+                    from src.recognition.target_matcher import target_matcher
+                    target_matcher.reset_tracks()
+                except Exception as exc:
+                    logger.debug("CameraManager: Could not reset target matcher: %s", exc)
+
                 logger.info(
                     "CameraManager: Video source '%s' is now active [type=%s].",
                     cam_info.name, stype,
@@ -349,6 +357,10 @@ class CameraManager:
         # Release lock during read() to allow switch_camera to execute concurrently
         try:
             frame = reader.read(timeout=timeout)
+            diag = reader.diagnostics() if hasattr(reader, "diagnostics") else {}
+            ffmpeg_alive = diag.get("ffmpeg_alive")
+            reader_alive = diag.get("reader_alive", reader.stream_alive)
+
             if frame is not None:
                 with self._lock:
                     previous = self._status
@@ -356,7 +368,7 @@ class CameraManager:
                         self._status = "RUNNING"
                         self._error_reason = ""
                         logger.info("[DATT-STREAM STATE CHANGE] old_status=%s new_status=RUNNING reason=frame_received last_frame_age=%.1f ffmpeg_alive=%s reader_alive=%s",
-                                    previous, reader.frame_age_seconds, reader.diagnostics()["ffmpeg_alive"], reader.diagnostics()["reader_alive"])
+                                    previous, reader.frame_age_seconds, ffmpeg_alive, reader_alive)
                 return frame
 
             with self._lock:
@@ -375,7 +387,7 @@ class CameraManager:
                 if self._status != previous:
                     logger.warning("[DATT-STREAM STATE CHANGE] old_status=%s new_status=%s reason=%s last_frame_age=%.1f ffmpeg_alive=%s reader_alive=%s",
                                    previous, self._status, self._error_reason, reader.frame_age_seconds,
-                                   reader.diagnostics()["ffmpeg_alive"], reader.diagnostics()["reader_alive"])
+                                   ffmpeg_alive, reader_alive)
             return None
         except Exception as exc:
             with self._lock:
