@@ -31,8 +31,12 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+import cv2
 import httpx
+import numpy as np
 import uvicorn
+
+from src.recognition.target_matcher import target_manager
 
 # Ensure repository root is on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -244,6 +248,189 @@ async def switch_camera(request: Request) -> JSONResponse:
             content={"status": "error", "message": f"Camera switch failed: {exc}"},
             status_code=503,
         )
+
+
+# -----------------------------------------------------------------------------
+# Video Source Management API
+# -----------------------------------------------------------------------------
+
+@app.post("/set_video_source")
+@app.post("/api/set_video_source")
+async def set_video_source(request: Request) -> JSONResponse:
+    """Set active video source to Local MP4 or YouTube VOD."""
+    b_url = get_backend_url(request).rstrip("/")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    stype = str(body.get("type", "local")).lower().strip()
+    source = str(body.get("source", "")).strip()
+    loop = bool(body.get("loop", True))
+    name = body.get("name")
+
+    if not source:
+        return JSONResponse(
+            content={"status": "error", "message": "Source path or URL cannot be empty"},
+            status_code=400,
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{b_url}/set_video_source",
+                json={"type": stype, "source": source, "loop": loop, "name": name},
+            )
+            return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    except Exception as exc:
+        return JSONResponse(
+            content={"status": "error", "message": f"Failed setting video source on backend: {exc}"},
+            status_code=503,
+        )
+
+
+@app.get("/video_source")
+@app.get("/api/video_source")
+async def get_video_source(request: Request) -> JSONResponse:
+    """Get active video source info."""
+    b_url = get_backend_url(request).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{b_url}/video_source")
+            if resp.status_code == 200:
+                return JSONResponse(content=resp.json(), status_code=200)
+    except Exception as exc:
+        logger.debug("Backend video_source unreachable: %s", exc)
+
+    return JSONResponse(
+        content={"status": "ok", "source": {"type": "default", "status": "RUNNING"}},
+        status_code=200,
+    )
+
+
+# -----------------------------------------------------------------------------
+# Target Registration & Management API
+# -----------------------------------------------------------------------------
+
+@app.get("/targets")
+@app.get("/api/targets")
+async def get_targets() -> JSONResponse:
+    """Retrieve all registered targets."""
+    targets = [t.to_dict() for t in target_manager.list_targets()]
+    return JSONResponse(content={"status": "ok", "targets": targets}, status_code=200)
+
+
+@app.post("/register_target")
+@app.post("/api/register_target")
+async def register_target(request: Request) -> JSONResponse:
+    """Register a new target with face image and/or clothing color.
+
+    Supports both multipart/form-data (file upload) and application/json.
+    """
+    content_type = request.headers.get("content-type", "").lower()
+    name = ""
+    color = None
+    threshold = 0.45
+    img = None
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        name = str(form.get("name", "")).strip()
+        raw_color = form.get("color") or form.get("clothing_color")
+        color = str(raw_color).strip() if raw_color else None
+
+        thresh_val = form.get("threshold") or form.get("face_threshold")
+        if thresh_val:
+            try:
+                threshold = float(thresh_val)
+            except ValueError:
+                threshold = 0.45
+
+        file_obj = form.get("face_image")
+        if file_obj is not None and hasattr(file_obj, "read"):
+            content = await file_obj.read()
+            if content:
+                nparr = np.frombuffer(content, np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+    else:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        name = str(body.get("name", "")).strip()
+        raw_color = body.get("color") or body.get("clothing_color")
+        color = str(raw_color).strip() if raw_color else None
+        threshold = float(body.get("threshold", body.get("face_threshold", 0.45)))
+
+        b64_img = body.get("face_image") or body.get("face_image_base64")
+        if b64_img and isinstance(b64_img, str):
+            try:
+                import base64
+                if "," in b64_img:
+                    b64_img = b64_img.split(",", 1)[1]
+                img_bytes = base64.b64decode(b64_img)
+                nparr = np.frombuffer(img_bytes, np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            except Exception as exc:
+                return JSONResponse(
+                    content={"status": "error", "message": f"Invalid base64 image: {exc}"},
+                    status_code=400,
+                )
+
+    if not name:
+        return JSONResponse(
+            content={"status": "error", "message": "Target name is required"},
+            status_code=400,
+        )
+
+    try:
+        target = target_manager.register_target(
+            name=name,
+            face_image=img,
+            clothing_color=color,
+            face_threshold=threshold,
+        )
+        return JSONResponse(
+            content={
+                "status": "ok",
+                "target": target.to_dict(),
+                "message": f"Target '{target.name}' registered successfully",
+            },
+            status_code=200,
+        )
+    except ValueError as exc:
+        return JSONResponse(content={"status": "error", "message": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse(
+            content={"status": "error", "message": f"Registration failed: {exc}"},
+            status_code=500,
+        )
+
+
+@app.delete("/targets/{target_id}")
+@app.delete("/api/targets/{target_id}")
+async def delete_target(target_id: str, request: Request) -> JSONResponse:
+    """Remove a registered target by ID."""
+    b_url = get_backend_url(request).rstrip("/")
+    removed = target_manager.remove_target(target_id)
+
+    # Also notify backend server if remote
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            await client.delete(f"{b_url}/targets/{target_id}")
+    except Exception:
+        pass
+
+    if removed:
+        return JSONResponse(
+            content={"status": "ok", "message": f"Target '{target_id}' removed"},
+            status_code=200,
+        )
+    return JSONResponse(
+        content={"status": "error", "message": f"Target '{target_id}' not found"},
+        status_code=404,
+    )
 
 
 # Cache mapping event_id -> snapshot_path for fast lookup

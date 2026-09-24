@@ -70,7 +70,24 @@
         infoLastEvent: document.getElementById("infoLastEvent"),
 
         // Events Elements
-        eventsContainer: document.getElementById("eventsContainer")
+        eventsContainer: document.getElementById("eventsContainer"),
+
+        // Video Source Elements
+        sourceTypeSelect: document.getElementById("sourceTypeSelect"),
+        sourceInput: document.getElementById("sourceInput"),
+        sourceLoopCheckbox: document.getElementById("sourceLoopCheckbox"),
+        applySourceBtn: document.getElementById("applySourceBtn"),
+        sourceFeedback: document.getElementById("sourceFeedback"),
+
+        // Target Registration Elements
+        targetNameInput: document.getElementById("targetNameInput"),
+        targetColorSelect: document.getElementById("targetColorSelect"),
+        targetFaceInput: document.getElementById("targetFaceInput"),
+        targetFaceFilename: document.getElementById("targetFaceFilename"),
+        registerTargetBtn: document.getElementById("registerTargetBtn"),
+        targetFeedback: document.getElementById("targetFeedback"),
+        targetCount: document.getElementById("targetCount"),
+        targetsList: document.getElementById("targetsList")
     };
 
     /**
@@ -398,11 +415,186 @@
     }
 
     /**
+     * Switch video source (Local MP4 / YouTube VOD).
+     */
+    async function applyVideoSource() {
+        const type = DOM.sourceTypeSelect.value;
+        const source = DOM.sourceInput.value.trim();
+        const loop = DOM.sourceLoopCheckbox.checked;
+
+        if (!source) {
+            DOM.sourceFeedback.textContent = "Please enter a file path or URL.";
+            DOM.sourceFeedback.className = "feedback-msg feedback-error";
+            return;
+        }
+
+        DOM.applySourceBtn.disabled = true;
+        DOM.sourceFeedback.textContent = "Applying video source...";
+        DOM.sourceFeedback.className = "feedback-msg feedback-info";
+
+        try {
+            const resp = await fetch(apiUrl("/api/set_video_source"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ type, source, loop })
+            });
+            const data = await resp.json();
+
+            if (resp.ok && data.status === "ok") {
+                DOM.sourceFeedback.textContent = "Video source active!";
+                DOM.sourceFeedback.className = "feedback-msg feedback-success";
+                triggerVideoRefresh();
+            } else {
+                DOM.sourceFeedback.textContent = data.message || "Failed to set source.";
+                DOM.sourceFeedback.className = "feedback-msg feedback-error";
+            }
+        } catch (err) {
+            DOM.sourceFeedback.textContent = `Error: ${err.message}`;
+            DOM.sourceFeedback.className = "feedback-msg feedback-error";
+        } finally {
+            DOM.applySourceBtn.disabled = false;
+        }
+    }
+
+    /**
+     * Register a new target.
+     */
+    async function registerTarget() {
+        const name = DOM.targetNameInput.value.trim();
+        const color = DOM.targetColorSelect.value;
+        const file = DOM.targetFaceInput.files[0];
+
+        if (!name) {
+            DOM.targetFeedback.textContent = "Please enter a target name.";
+            DOM.targetFeedback.className = "feedback-msg feedback-error";
+            return;
+        }
+
+        if (!color && !file) {
+            DOM.targetFeedback.textContent = "Please choose a color or upload a face image.";
+            DOM.targetFeedback.className = "feedback-msg feedback-error";
+            return;
+        }
+
+        DOM.registerTargetBtn.disabled = true;
+        DOM.targetFeedback.textContent = "Registering target...";
+        DOM.targetFeedback.className = "feedback-msg feedback-info";
+
+        try {
+            const formData = new FormData();
+            formData.append("name", name);
+            if (color) formData.append("color", color);
+            if (file) formData.append("face_image", file);
+
+            const resp = await fetch(apiUrl("/api/register_target"), {
+                method: "POST",
+                body: formData
+            });
+            const data = await resp.json();
+
+            if (resp.ok && data.status === "ok") {
+                DOM.targetFeedback.textContent = `Target '${name}' registered!`;
+                DOM.targetFeedback.className = "feedback-msg feedback-success";
+                DOM.targetNameInput.value = "";
+                DOM.targetColorSelect.value = "";
+                DOM.targetFaceInput.value = "";
+                DOM.targetFaceFilename.textContent = "Face Image (Optional)";
+                await loadTargets();
+            } else {
+                DOM.targetFeedback.textContent = data.message || "Registration failed.";
+                DOM.targetFeedback.className = "feedback-msg feedback-error";
+            }
+        } catch (err) {
+            DOM.targetFeedback.textContent = `Error: ${err.message}`;
+            DOM.targetFeedback.className = "feedback-msg feedback-error";
+        } finally {
+            DOM.registerTargetBtn.disabled = false;
+        }
+    }
+
+    /**
+     * Load registered targets.
+     */
+    async function loadTargets() {
+        try {
+            const resp = await fetch(apiUrl("/api/targets"));
+            if (resp.ok) {
+                const data = await resp.json();
+                renderTargets(data.targets || []);
+            }
+        } catch (err) {
+            console.error("Failed loading targets:", err);
+        }
+    }
+
+    /**
+     * Render targets list into UI.
+     */
+    function renderTargets(targets) {
+        if (!DOM.targetCount || !DOM.targetsList) return;
+        DOM.targetCount.textContent = targets.length;
+
+        if (!targets || targets.length === 0) {
+            DOM.targetsList.innerHTML = '<div class="target-item-empty">No active targets registered.</div>';
+            return;
+        }
+
+        DOM.targetsList.innerHTML = targets.map(t => {
+            const faceBadge = t.has_face ? '<span class="target-badge badge-face">Face</span>' : '';
+            const colorBadge = t.clothing_color ? `<span class="target-badge badge-color">${escapeHtml(t.clothing_color)}</span>` : '';
+            return `
+                <div class="target-item" data-id="${escapeHtml(t.id)}">
+                    <div class="target-info">
+                        <div class="target-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div>
+                        <div class="target-badges">${faceBadge}${colorBadge}</div>
+                    </div>
+                    <button type="button" class="target-del-btn" title="Remove Target" onclick="window.dattDeleteTarget('${escapeHtml(t.id)}')">✖</button>
+                </div>
+            `;
+        }).join("");
+    }
+
+    /**
+     * Delete a target.
+     */
+    window.dattDeleteTarget = async function(targetId) {
+        try {
+            const resp = await fetch(apiUrl(`/api/targets/${encodeURIComponent(targetId)}`), {
+                method: "DELETE"
+            });
+            if (resp.ok) {
+                await loadTargets();
+            }
+        } catch (err) {
+            console.error("Failed deleting target:", err);
+        }
+    };
+
+    /**
      * Initialize Application.
      */
     function init() {
         // Event Listeners
         DOM.switchCameraBtn.addEventListener("click", switchCamera);
+
+        if (DOM.applySourceBtn) {
+            DOM.applySourceBtn.addEventListener("click", applyVideoSource);
+        }
+
+        if (DOM.registerTargetBtn) {
+            DOM.registerTargetBtn.addEventListener("click", registerTarget);
+        }
+
+        if (DOM.targetFaceInput) {
+            DOM.targetFaceInput.addEventListener("change", (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    DOM.targetFaceFilename.textContent = file.name;
+                } else {
+                    DOM.targetFaceFilename.textContent = "Face Image (Optional)";
+                }
+            });
+        }
 
         DOM.backendUrlInput.addEventListener("change", (e) => {
             const url = e.target.value.trim();
@@ -416,6 +608,7 @@
 
         // Initial Data Fetch
         fetchCameras();
+        loadTargets();
         pollTelemetry();
         pollEvents();
 

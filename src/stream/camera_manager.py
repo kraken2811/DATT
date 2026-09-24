@@ -12,9 +12,13 @@ from typing import Any
 
 import numpy as np
 
+import config
 from src.config.camera_config import CameraInfo, get_camera, get_default_camera
+from src.stream.video_source import LocalVideoReader, YouTubeVODReader
+from src.stream.youtube_resolver import stream_resolver
 from src.stream.youtube_stream import CameraReader
 from src.utils.logger import logger
+
 
 
 class CameraManager:
@@ -33,6 +37,7 @@ class CameraManager:
 
         self._status: str = "STOPPED"  # "STOPPED", "RUNNING", "SWITCHING", "ERROR"
         self._error_reason: str = ""
+        self._last_camera_started_at: float = 0.0
 
     @property
     def status(self) -> str:
@@ -96,10 +101,12 @@ class CameraManager:
 
     def stream_diagnostics(self) -> dict[str, Any]:
         with self._lock:
-            return self._reader.diagnostics() if self._reader else {
+            base = self._reader.diagnostics() if self._reader else {
                 "ffmpeg_alive": False, "reader_alive": False, "last_frame_age": 999.0,
                 "frames_received": 0, "ffmpeg_exit_code": None, "last_error": self._error_reason,
             }
+            base["resolver_metrics"] = stream_resolver.get_metrics_dict()
+            return base
 
     def get_active_camera(self) -> CameraInfo | None:
         """Return the currently active CameraInfo metadata."""
@@ -119,6 +126,15 @@ class CameraManager:
             RuntimeError: If stream initialization fails.
         """
         with self._lock:
+            # Apply startup stagger delay if another camera started recently
+            stagger = getattr(config, "CAMERA_STARTUP_STAGGER", 2.0)
+            elapsed = time.time() - self._last_camera_started_at
+            if self._last_camera_started_at > 0 and elapsed < stagger:
+                wait_stagger = stagger - elapsed
+                logger.info("CameraManager: Staggering camera start by %.2fs...", wait_stagger)
+                time.sleep(wait_stagger)
+            self._last_camera_started_at = time.time()
+
             # Stop existing reader if one is already running
             self._stop_reader_internal()
 
@@ -151,6 +167,7 @@ class CameraManager:
                 logger.error("CameraManager Error: %s", self._error_reason, exc_info=True)
                 raise RuntimeError(self._error_reason) from exc
 
+
     def stop_camera(self) -> None:
         """Stop the currently running camera stream cleanly."""
         with self._lock:
@@ -181,6 +198,139 @@ class CameraManager:
                 camera_id,
             )
             return self.start_camera(camera_id)
+
+    def set_video_source(
+        self,
+        source_type: str,
+        source: str,
+        loop: bool = True,
+        name: str | None = None,
+    ) -> CameraInfo:
+        """Switch active stream dynamically to a Local MP4 or YouTube VOD source.
+
+        Args:
+            source_type: 'local' or 'youtube_vod' or 'youtube'
+            source: Local file path or YouTube URL
+            loop: Whether to loop local video upon EOF
+            name: Optional display name for source
+
+        Returns:
+            CameraInfo: Metadata representing the active source
+        """
+        with self._lock:
+            stype = str(source_type).lower().strip()
+            src_str = str(source).strip()
+
+            if not src_str:
+                raise ValueError("Source path or URL cannot be empty")
+
+            # Apply startup stagger delay if another camera/source started recently
+            stagger = getattr(config, "CAMERA_STARTUP_STAGGER", 2.0)
+            elapsed = time.time() - self._last_camera_started_at
+            if self._last_camera_started_at > 0 and elapsed < stagger:
+                wait_stagger = stagger - elapsed
+                logger.info("CameraManager: Staggering video source start by %.2fs...", wait_stagger)
+                time.sleep(wait_stagger)
+            self._last_camera_started_at = time.time()
+
+            logger.info(
+                "CameraManager: Setting video source [type=%s, source=%s, loop=%s]...",
+                stype, src_str, loop,
+            )
+
+
+            # Safely stop and release previous reader
+            self._stop_reader_internal()
+            self._status = "SWITCHING"
+            self._error_reason = ""
+
+            try:
+                if stype in ("local", "file", "mp4"):
+                    file_path = Path(src_str)
+                    if not file_path.is_file():
+                        raise FileNotFoundError(f"Local video file not found: {file_path}")
+
+                    reader = LocalVideoReader(file_path=file_path, loop=loop)
+                    reader.start()
+
+                    cam_name = name or f"Local Video: {file_path.name}"
+                    cam_info = CameraInfo(
+                        id=f"local_{int(time.time())}",
+                        name=cam_name,
+                        type="file",
+                        url=str(file_path),
+                        width=reader.width or 1280,
+                        height=reader.height or 720,
+                        description=f"Local MP4 file (loop={loop})",
+                    )
+
+                elif stype in ("youtube_vod", "vod"):
+                    reader = YouTubeVODReader(youtube_url=src_str)
+                    reader.start()
+
+                    cam_name = name or "YouTube VOD"
+                    cam_info = CameraInfo(
+                        id=f"vod_{int(time.time())}",
+                        name=cam_name,
+                        type="youtube_vod",
+                        url=src_str,
+                        width=1280,
+                        height=720,
+                        description="YouTube VOD video stream",
+                    )
+
+                elif stype in ("youtube", "live"):
+                    reader = CameraReader(url=src_str)
+                    reader.start()
+
+                    cam_name = name or "YouTube Stream"
+                    cam_info = CameraInfo(
+                        id=f"youtube_{int(time.time())}",
+                        name=cam_name,
+                        type="youtube",
+                        url=src_str,
+                        width=1280,
+                        height=720,
+                        description="YouTube Live/HLS stream",
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported source type: '{source_type}'. "
+                        "Supported types: 'local', 'youtube_vod', 'youtube'"
+                    )
+
+                self._reader = reader
+                self._active_camera = cam_info
+                self._status = "RUNNING"
+                logger.info(
+                    "CameraManager: Video source '%s' is now active [type=%s].",
+                    cam_info.name, stype,
+                )
+                return cam_info
+
+            except Exception as exc:
+                self._status = "ERROR"
+                self._error_reason = f"Failed to set video source: {exc}"
+                logger.error("CameraManager Error: %s", self._error_reason, exc_info=True)
+                raise RuntimeError(self._error_reason) from exc
+
+    def get_current_source_info(self) -> dict[str, Any]:
+        """Return runtime details of the current video source."""
+        with self._lock:
+            cam = self._active_camera
+            return {
+                "id": cam.id if cam else None,
+                "name": cam.name if cam else None,
+                "type": cam.type if cam else None,
+                "url": cam.url if cam else None,
+                "status": self.status,
+                "stream_fps": self.stream_fps,
+                "stream_alive": self.stream_alive,
+                "finished": self.finished,
+                "diagnostics": self.stream_diagnostics(),
+                "resolver_metrics": stream_resolver.get_metrics_dict(),
+            }
+
 
     def read(self, timeout: float = 2.0) -> np.ndarray | None:
         """Read the latest frame from the active camera reader.

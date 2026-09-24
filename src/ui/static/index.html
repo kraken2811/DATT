@@ -35,6 +35,66 @@
 
             <div class="sidebar-divider"></div>
 
+            <!-- Video Source Manager (Local MP4 & YouTube VOD) -->
+            <div class="sidebar-section">
+                <label class="input-label">🎬 Video Source Control</label>
+                <select id="sourceTypeSelect" class="select-input">
+                    <option value="local">Local MP4 Video</option>
+                    <option value="youtube_vod">YouTube VOD</option>
+                </select>
+                <input type="text" id="sourceInput" class="text-input" placeholder="Path to .mp4 or YouTube URL" title="Local file path (e.g. data/test.mp4) or YouTube link">
+                <div class="checkbox-row">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="sourceLoopCheckbox" checked>
+                        <span>Loop Video on EOF</span>
+                    </label>
+                </div>
+                <button type="button" id="applySourceBtn" class="secondary-btn">
+                    <span class="btn-icon">▶️</span>
+                    <span class="btn-text">Apply Source</span>
+                </button>
+                <div id="sourceFeedback" class="feedback-msg"></div>
+            </div>
+
+            <div class="sidebar-divider"></div>
+
+            <!-- Target Registration & Management -->
+            <div class="sidebar-section">
+                <label class="input-label">🎯 Target Registration</label>
+                <input type="text" id="targetNameInput" class="text-input" placeholder="Target Name (e.g. Alice)" required>
+                <select id="targetColorSelect" class="select-input">
+                    <option value="">Clothing Color: Any</option>
+                    <option value="red">Red</option>
+                    <option value="blue">Blue</option>
+                    <option value="green">Green</option>
+                    <option value="yellow">Yellow</option>
+                    <option value="black">Black</option>
+                    <option value="white">White</option>
+                </select>
+                <div class="file-upload-wrapper">
+                    <label for="targetFaceInput" class="file-upload-label">
+                        <span class="file-upload-icon">📷</span>
+                        <span id="targetFaceFilename">Face Image (Optional)</span>
+                    </label>
+                    <input type="file" id="targetFaceInput" accept="image/*" class="file-input-hidden">
+                </div>
+                <button type="button" id="registerTargetBtn" class="primary-btn highlight-btn">
+                    <span class="btn-icon">➕</span>
+                    <span class="btn-text">Register Target</span>
+                </button>
+                <div id="targetFeedback" class="feedback-msg"></div>
+
+                <!-- Active Targets List -->
+                <div class="targets-container">
+                    <div class="targets-header">Registered Targets (<span id="targetCount">0</span>)</div>
+                    <div id="targetsList" class="targets-list">
+                        <div class="target-item-empty">No active targets registered.</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-divider"></div>
+
             <div class="sidebar-section diagnostics">
                 <div class="diag-row">
                     <span class="diag-label">Connection:</span>

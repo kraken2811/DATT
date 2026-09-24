@@ -187,6 +187,7 @@ class TestYouTubeStream(unittest.TestCase):
             reader.process = MagicMock()
 
         reader._spawn_ffmpeg = mock_spawn
+        reader._get_stream_url_with_diagnostics = MagicMock(return_value="https://manifest/live.m3u8")
         with patch("src.stream.youtube_stream.get_stream_url", return_value="https://manifest/live.m3u8"):
             with patch.object(reader.stop_event, "wait", return_value=False) as mock_event_wait:
                 success = reader._reconnect()

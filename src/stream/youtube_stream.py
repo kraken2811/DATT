@@ -21,7 +21,10 @@ import numpy as np
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
+import config
+
 logger = logging.getLogger("datt.stream")
+
 YTDLP_REFRESH_COOLDOWN_SECONDS = 30.0
 URL_REFRESH_AFTER_FAILURES = 3
 
@@ -104,52 +107,21 @@ def select_best_video_format(formats: list[dict[str, Any]]) -> str | None:
     return best_format.get("url")
 
 
+from src.stream.youtube_resolver import stream_resolver
+
+
 def get_stream_url(url: str) -> str:
     """Extract direct video stream URL using yt-dlp if it is a YouTube URL.
 
     Robustly selects HLS / H264 <=720p video format for YouTube Live.
+    Delegates to centralized stream_resolver for caching, single-flight deduplication,
+    global rate limiting, and HTTP 429 backoff.
     """
-    # If the URL is already a direct stream or file, return as is
-    if not ("youtube.com" in url or "youtu.be" in url):
+    if not ("youtube.com" in url or "youtu.be" in url or (len(url) == 11 and "/" not in url)):
         return url
 
-    ydl_opts: dict[str, Any] = {
-        "format": "bestvideo[height<=720]/best[height<=720]/bestvideo/best",
-        "quiet": True,
-        "noplaylist": True,
-        "js_runtimes": {
-            "node": {}
-        },
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android"]
-            }
-        },
-        "nocheckcertificate": True,
-    }
+    return stream_resolver.resolve_stream_url(url, is_vod=False)
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
-            info = ydl.extract_info(url, download=False)
-    except DownloadError as exc:
-        raise RuntimeError(f"Failed extracting YouTube stream: {exc}") from exc
-
-    if not info or not isinstance(info, dict):
-        raise RuntimeError("Failed to extract video info from YouTube")
-
-    # 1. First attempt robust format selection from available formats
-    formats = info.get("formats", [])
-    if isinstance(formats, list) and formats:
-        selected_url = select_best_video_format(formats)
-        if selected_url:
-            return selected_url
-
-    # 2. Fallback to info['url'] if present
-    direct_url = info.get("url")
-    if isinstance(direct_url, str) and direct_url:
-        return direct_url
-
-    raise RuntimeError("No valid video stream URL found from YouTube")
 
 
 def build_ffmpeg_command(
@@ -252,6 +224,9 @@ class CameraReader:
         self.reconnect_delays: list[int] = [3, 5, 10, 20, 40, 60, 120, 300]
         self._force_url_refresh = False
         self._stale_termination_requested = False
+        self._consecutive_frame_failures: int = 0
+        self._direct_reconnect_attempts: int = 0
+
 
     @property
     def last_frame_time(self) -> float:
@@ -402,15 +377,35 @@ class CameraReader:
                         self._last_ffmpeg_stderr or "<empty>")
 
     def _reconnect(self) -> bool:
-        """Retry indefinitely with bounded delays until stopped or recovered."""
+        """Retry indefinitely with bounded delays until stopped or recovered.
+
+        Follows Smart Reconnection rules:
+        Step 1: Try reconnecting using the current direct stream URL (up to STREAM_DIRECT_RECONNECT_RETRIES times).
+        Step 2: Only after direct URL reconnect fails repeatedly (or forced refresh), invalidate cache and call stream_resolver.
+        Step 3: Handled by stream_resolver with exponential backoff + jitter on HTTP 429.
+        """
+        direct_reconnect_limit = getattr(config, "STREAM_DIRECT_RECONNECT_RETRIES", 3)
+
         while not self.stop_event.is_set():
             self.reconnect_attempts += 1
             delay_idx = min(self.reconnect_attempts - 1, len(self.reconnect_delays) - 1)
             delay = 0 if self.reconnect_attempts == 1 and self._stream_url is None and not self._force_url_refresh else self.reconnect_delays[delay_idx]
-            if self._force_url_refresh:
-                delay = max(delay, 60)
-            if self._stream_url is None and ("youtube.com" in self.url or "youtu.be" in self.url):
-                delay = max(delay, YTDLP_REFRESH_COOLDOWN_SECONDS - (time.time() - self._last_ytdlp_call_at))
+
+            # Decide whether to retry direct URL or refresh from resolver
+            use_cached = (
+                not self._force_url_refresh
+                and self._stream_url is not None
+                and self._direct_reconnect_attempts < direct_reconnect_limit
+            )
+
+            if use_cached:
+                logger.info(
+                    "[STREAM] camera=%s reconnect existing URL (attempt %d/%d)",
+                    self.url, self._direct_reconnect_attempts + 1, direct_reconnect_limit,
+                )
+            else:
+                logger.info("[STREAM] camera=%s requesting new URL from resolver", self.url)
+
             delay = max(0, delay)
             delay += random.uniform(0, min(5, delay * 0.1))
             logger.warning(
@@ -423,23 +418,39 @@ class CameraReader:
                 return False
 
             try:
-                use_refresh = self._force_url_refresh or self._stream_url is None or self.reconnect_attempts >= URL_REFRESH_AFTER_FAILURES
-                strategy = "refresh_url" if use_refresh else ("use_cached_url" if self._stream_url else "restart_ffmpeg")
-                self.recovery_state = "URL_REFRESH_REQUIRED" if use_refresh else "FFmpeg_RESTART"
+                if use_cached:
+                    self._direct_reconnect_attempts += 1
+                    target_url = self._stream_url
+                    strategy = "use_cached_url"
+                else:
+                    strategy = "refresh_url"
+                    stream_resolver.invalidate_cache(self.url, reason="direct_reconnect_exhausted")
+                    target_url = self._get_stream_url_with_diagnostics("recovery")
+                    self._direct_reconnect_attempts = 0
+
+                assert target_url is not None
+                self.recovery_state = "URL_REFRESH_REQUIRED" if not use_cached else "FFmpeg_RESTART"
                 logger.info("[DATT-RECOVERY] attempt=%s strategy=%s", self.reconnect_attempts, strategy)
-                new_url = self._get_stream_url_with_diagnostics("recovery") if use_refresh else self._stream_url
-                assert new_url is not None
-                self._spawn_ffmpeg(new_url)
-                self._stream_url = new_url
+                self._spawn_ffmpeg(target_url)
+                self._stream_url = target_url
                 self._force_url_refresh = False
-                logger.info("[DATT STREAM RECOVERY] attempt=%s new_pid=%s recovered_time=%s",
-                            self.reconnect_attempts, self.process.pid if self.process else None,
-                            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+                self._consecutive_frame_failures = 0
+                stream_resolver.record_success(self.url)
+                if use_cached:
+                    stream_resolver.metrics.direct_url_reconnects += 1
+                logger.info(
+                    "[DATT STREAM RECOVERY] attempt=%s new_pid=%s recovered_time=%s",
+                    self.reconnect_attempts, self.process.pid if self.process else None,
+                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                )
                 return True
+
             except Exception as exc:
+                stream_resolver.record_failure(self.url)
                 if "429" in "\n".join(self.stderr_lines) or "429" in str(exc):
                     self._force_url_refresh = True
                     self._stream_url = None
+                    logger.error("[YT-429] 429 detected during camera reconnect on %s", self.url)
                 logger.warning(
                     "[DATT-STREAM] Reconnect attempt %d failed: %s",
                     self.reconnect_attempts,
@@ -452,17 +463,12 @@ class CameraReader:
 
     def _get_stream_url_with_diagnostics(self, reason: str) -> str:
         now = time.time()
-        elapsed = now - self._last_ytdlp_call_at
-        remaining = max(0.0, YTDLP_REFRESH_COOLDOWN_SECONDS - elapsed)
-        allowed = remaining <= 0.0
-        logger.info("[DATT-YTDLP] refresh_allowed=%s last_refresh=%s cooldown_remaining=%.1f",
-                    allowed, self._last_ytdlp_call_at or None, remaining)
-        if not allowed:
-            raise RuntimeError("yt-dlp refresh cooldown active")
         self._ytdlp_attempt += 1
         self._last_ytdlp_call_at = now
-        logger.info("[DATT-YTDLP CALL] timestamp=%s reason=%s attempt=%s",
-                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), reason, self._ytdlp_attempt)
+        logger.info(
+            "[DATT-YTDLP CALL] timestamp=%s reason=%s attempt=%s",
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), reason, self._ytdlp_attempt,
+        )
         try:
             result = get_stream_url(self.url)
             logger.info("[DATT-YTDLP RESULT] success=True error=")
@@ -486,6 +492,8 @@ class CameraReader:
         """Read frame bytes from FFmpeg pipe continuously with auto-reconnection."""
         sequence = 0
         self.reconnect_attempts = 0
+        self._consecutive_frame_failures = 0
+        max_frame_failures = getattr(config, "STREAM_READ_FAILURE_THRESHOLD", 10)
 
         while not self.stop_event.is_set():
             if self.process is None or self.process.stdout is None:
@@ -502,13 +510,8 @@ class CameraReader:
                 raw = b""
             read_end = time.perf_counter()
 
-            if (read_end - read_start) > 2.0 or len(raw) != self.frame_size:
-                logger.warning("[DATT-PIPE WARNING] read_duration_ms=%.1f expected_bytes=%d received_bytes=%d",
-                               (read_end - read_start) * 1000, self.frame_size, len(raw))
-                logger.warning("[DATT-STREAM FRAME EOF] expected_bytes=%d received_bytes=%d ffmpeg_poll=%s",
-                               self.frame_size, len(raw), self.process.poll() if self.process else None)
-
             if len(raw) == self.frame_size:
+                self._consecutive_frame_failures = 0
                 now_wall = time.time()
                 now_perf = time.perf_counter()
                 frame = np.frombuffer(raw, np.uint8).reshape(
@@ -545,27 +548,39 @@ class CameraReader:
 
                 continue
 
-            # EOF or broken pipe encountered
+            # Incomplete or empty frame bytes received
             if self.stop_event.is_set():
                 break
 
+            self._consecutive_frame_failures += 1
             proc = self.process
+            proc_alive = proc is not None and proc.poll() is None
+
+            # Distinguish temporary frame drop from true stream death:
+            # If FFmpeg is alive and failures are below threshold, pause briefly and retry reading
+            if proc_alive and self._consecutive_frame_failures < max_frame_failures:
+                logger.debug(
+                    "[DATT-PIPE WARNING] read_duration_ms=%.1f expected_bytes=%d received_bytes=%d (drop %d/%d)",
+                    (read_end - read_start) * 1000, self.frame_size, len(raw),
+                    self._consecutive_frame_failures, max_frame_failures,
+                )
+                time.sleep(0.05)
+                continue
+
+            # Failure threshold exceeded or FFmpeg process exited
             exit_code = proc.poll() if proc is not None else None
             old_pid = proc.pid if proc is not None else self._last_ffmpeg_pid
             old_runtime = time.time() - self._process_started_at if self._process_started_at else 0.0
             reason = "stdout_eof" if len(raw) == 0 else "incomplete_frame"
-            logger.error("[DATT-REGRESSION] before reconnect ffmpeg_pid=%s exit_code=%s stderr_tail=%s last_frame_timestamp=%s reader_thread_alive=%s",
-                         old_pid, exit_code, "\n".join(self.stderr_lines)[-2000:] or "<empty>",
-                         self.last_frame_time,
-                         self._thread.is_alive() if self._thread else False)
-            logger.warning("[DATT-STREAM RECOVERY] reason=%s old_pid=%s old_runtime=%ss",
-                           reason, old_pid, int(old_runtime))
-            logger.warning("[DATT-STREAM FFmpeg EXIT] exit_code=%s stderr=%s",
-                           exit_code, "\n".join(self.stderr_lines)[-2000:])
-            logger.error("[DATT STREAM FAILURE] pid=%s runtime=%ss exit_code=%s stderr=%s",
-                         old_pid, int(old_runtime), exit_code,
-                         "\n".join(self.stderr_lines)[-2000:] or "<empty>")
-            logger.warning("[DATT-STREAM STDERR] %s", "\n".join(self.stderr_lines)[-2000:] or "<empty>")
+            logger.warning(
+                "[DATT-STREAM RECOVERY] reason=%s old_pid=%s old_runtime=%ss consecutive_failures=%d",
+                reason, old_pid, int(old_runtime), self._consecutive_frame_failures,
+            )
+            logger.warning(
+                "[DATT-STREAM FFmpeg EXIT] exit_code=%s stderr=%s",
+                exit_code, "\n".join(self.stderr_lines)[-2000:],
+            )
+
             with self.lock:
                 self._stream_alive = False
                 self.latest = None
@@ -627,12 +642,17 @@ class CameraReader:
 
     def diagnostics(self) -> dict[str, Any]:
         proc = self.process
-        return {"ffmpeg_alive": proc is not None and proc.poll() is None,
-                "reader_alive": self._thread.is_alive() if self._thread else False,
-                "last_frame_age": self.frame_age_seconds, "frames_received": self._frames_received,
-                "ffmpeg_pid": proc.pid if proc else self._last_ffmpeg_pid,
-                "ffmpeg_exit_code": proc.poll() if proc else self._last_ffmpeg_exit_code,
-                "last_error": str(self.error or "") or self._last_ffmpeg_stderr or ("\n".join(self.stderr_lines)[-2000:] if self.stderr_lines else "")}
+        return {
+            "ffmpeg_alive": proc is not None and proc.poll() is None,
+            "reader_alive": self._thread.is_alive() if self._thread else False,
+            "last_frame_age": self.frame_age_seconds,
+            "frames_received": self._frames_received,
+            "ffmpeg_pid": proc.pid if proc else self._last_ffmpeg_pid,
+            "ffmpeg_exit_code": proc.poll() if proc else self._last_ffmpeg_exit_code,
+            "last_error": str(self.error or "") or self._last_ffmpeg_stderr or ("\n".join(self.stderr_lines)[-2000:] if self.stderr_lines else ""),
+            "resolver_metrics": stream_resolver.get_metrics_dict(),
+        }
+
 
     @property
     def buffer_age_ms(self) -> float:

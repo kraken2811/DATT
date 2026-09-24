@@ -25,6 +25,7 @@ import numpy as np
 
 from src.config.camera_config import list_cameras
 from src.events.event_storage import event_storage
+from src.recognition.target_matcher import target_manager
 from src.runtime.shared_state import SharedRuntimeState, shared_state
 from src.stream.camera_manager import CameraManager
 
@@ -75,6 +76,10 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self.handle_status()
         elif path == "/cameras":
             self.handle_cameras()
+        elif path in ("/video_source", "/api/video_source"):
+            self.handle_video_source()
+        elif path in ("/targets", "/api/targets"):
+            self.handle_targets()
         elif path == "/switch_camera":
             self.handle_switch_camera(query)
         elif path == "/events":
@@ -88,17 +93,36 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self) -> None:
-        """Route POST requests (e.g. switch_camera)."""
+        """Route POST requests (switch_camera, set_video_source, register_target)."""
         path = self.path.split("?")[0]
-        if path == "/switch_camera":
-            content_len = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_len).decode("utf-8") if content_len > 0 else "{}"
-            try:
-                data = json.loads(body)
-            except Exception:
-                data = {}
+        content_len = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_len).decode("utf-8", errors="replace") if content_len > 0 else "{}"
+        try:
+            data = json.loads(body)
+        except Exception:
+            data = {}
+
+        if path in ("/switch_camera", "/api/switch_camera"):
             cam_id = data.get("camera_id") or data.get("id")
             self._execute_camera_switch(cam_id)
+        elif path in ("/set_video_source", "/api/set_video_source"):
+            self._execute_set_video_source(data)
+        elif path in ("/register_target", "/api/register_target"):
+            self._execute_register_target(data)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_DELETE(self) -> None:
+        """Route DELETE requests (remove target)."""
+        path = self.path.split("?")[0]
+        if path.startswith("/api/targets/") or path.startswith("/targets/"):
+            target_id = path.split("/")[-1]
+            removed = target_manager.remove_target(target_id)
+            if removed:
+                self._send_json_response({"status": "ok", "message": f"Target '{target_id}' removed"})
+            else:
+                self._send_json_response({"status": "error", "message": f"Target '{target_id}' not found"}, code=404)
         else:
             self.send_response(404)
             self.end_headers()
@@ -272,6 +296,83 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.state.set_status("ERROR", f"Camera switch failed: {exc}")
             self._send_json_response({"status": "error", "message": str(exc)}, code=500)
+
+    def handle_video_source(self) -> None:
+        """Return runtime details of current video source."""
+        if self.camera_manager is None:
+            self._send_json_response({"status": "error", "message": "CameraManager not connected"}, code=503)
+            return
+        info = self.camera_manager.get_current_source_info()
+        self._send_json_response({"status": "ok", "source": info})
+
+    def handle_targets(self) -> None:
+        """Return list of currently registered targets."""
+        targets = [t.to_dict() for t in target_manager.list_targets()]
+        self._send_json_response({"status": "ok", "targets": targets})
+
+    def _execute_set_video_source(self, data: dict[str, Any]) -> None:
+        """Switch video source to Local MP4 or YouTube VOD."""
+        if self.camera_manager is None:
+            self._send_json_response(
+                {"status": "error", "message": "CameraManager not connected to server"}, code=503
+            )
+            return
+
+        stype = data.get("type", "local")
+        src = data.get("source", "")
+        loop = bool(data.get("loop", True))
+        name = data.get("name")
+
+        if not src:
+            self._send_json_response({"status": "error", "message": "Missing 'source' parameter"}, code=400)
+            return
+
+        try:
+            cam_info = self.camera_manager.set_video_source(source_type=stype, source=src, loop=loop, name=name)
+            self.state.set_camera(cam_info.id, cam_info.name)
+            self._send_json_response({
+                "status": "ok",
+                "camera": cam_info.to_dict(),
+                "message": f"Successfully set video source: {cam_info.name}",
+            })
+        except Exception as exc:
+            self.state.set_status("ERROR", f"Failed setting video source: {exc}")
+            self._send_json_response({"status": "error", "message": str(exc)}, code=400)
+
+    def _execute_register_target(self, data: dict[str, Any]) -> None:
+        """Register target via JSON payload."""
+        import base64
+        name = data.get("name", "")
+        color = data.get("color") or data.get("clothing_color")
+        threshold = float(data.get("threshold", data.get("face_threshold", 0.45)))
+        b64_img = data.get("face_image") or data.get("face_image_base64")
+
+        img = None
+        if b64_img and isinstance(b64_img, str):
+            try:
+                if "," in b64_img:
+                    b64_img = b64_img.split(",", 1)[1]
+                img_bytes = base64.b64decode(b64_img)
+                nparr = np.frombuffer(img_bytes, np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            except Exception as exc:
+                self._send_json_response({"status": "error", "message": f"Invalid base64 image: {exc}"}, code=400)
+                return
+
+        try:
+            target = target_manager.register_target(
+                name=name,
+                face_image=img,
+                clothing_color=color,
+                face_threshold=threshold,
+            )
+            self._send_json_response({
+                "status": "ok",
+                "target": target.to_dict(),
+                "message": f"Target '{target.name}' registered successfully",
+            })
+        except Exception as exc:
+            self._send_json_response({"status": "error", "message": str(exc)}, code=400)
 
     def handle_events(self, query: dict[str, list[str]]) -> None:
         """Return recent occupancy events from SQLite."""

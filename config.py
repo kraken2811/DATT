@@ -64,3 +64,18 @@ ZONE_POLYGON: list[tuple[int, int]] | None = None
 # 6. DISPLAY & DEBUG CONFIGURATION
 # ==============================================================================
 SHOW_RAW_DETECTIONS: bool = False
+
+# ==============================================================================
+# 7. YOUTUBE & STREAM RESOLVER CONFIGURATION
+# ==============================================================================
+YOUTUBE_MAX_RESOLVE_RETRIES: int = 3
+YOUTUBE_RESOLVE_MIN_INTERVAL: float = 3.0    # Minimum interval in seconds between yt-dlp extractions
+YOUTUBE_BACKOFF_BASE: float = 10.0           # Base delay in seconds for HTTP 429 exponential backoff
+YOUTUBE_BACKOFF_MAX: float = 120.0           # Maximum delay in seconds for HTTP 429
+YOUTUBE_BACKOFF_JITTER: float = 5.0          # Random jitter in seconds to prevent thundering herd
+YOUTUBE_MAX_CONCURRENT_RESOLVE: int = 1      # Global concurrency limit for yt-dlp extractions
+YOUTUBE_URL_TTL_SECONDS: float = 14400.0     # Stream cache TTL in seconds (4 hours default)
+STREAM_READ_FAILURE_THRESHOLD: int = 10      # Consecutive frame read failures before reconnecting
+STREAM_DIRECT_RECONNECT_RETRIES: int = 3     # Attempts to reconnect using current direct URL before re-resolving
+CAMERA_STARTUP_STAGGER: float = 2.0          # Startup delay between initializing multiple cameras
+

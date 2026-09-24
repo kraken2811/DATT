@@ -17,6 +17,7 @@ import config
 from src.counter.zone_counter import ZoneCounter
 from src.detector.yolo_detector import YOLODetector
 from src.events.event_manager import event_manager
+from src.recognition.target_matcher import target_matcher
 from src.runtime.shared_state import shared_state
 from src.stream.camera_manager import CameraManager
 from src.tracker.bytetrack_tracker import PersonTracker
@@ -163,6 +164,7 @@ def run_pipeline(
                 )
                 active_cam = current_cam
                 tracker.reset()
+                target_matcher.reset_tracks()
                 counter.people_count = 0
                 event_manager.reset()
                 shared_state.set_camera(active_cam.id, active_cam.name)
@@ -188,10 +190,13 @@ def run_pipeline(
             # 3. Update ByteTrack
             tracks = tracker.update(detections)
 
-            # 4. Update Zone Occupancy Counter
+            # 4. Target Matcher (Associates registered targets with active ByteTrack tracks)
+            target_matches = target_matcher.match_tracks(frame, tracks, frame_id=total_frames)
+
+            # 5. Update Zone Occupancy Counter
             people_in_view = counter.update(tracks, frame_shape=frame.shape)
 
-            # Measure total pipeline latency (detection + tracking + counting)
+            # Measure total pipeline latency (detection + tracking + matching + counting)
             last_pipeline_ms = (time.perf_counter() - pipeline_t0) * 1000
 
             total_frames += 1
@@ -202,13 +207,14 @@ def run_pipeline(
             last_track_count = len(tracks)
             last_people_in_view = people_in_view
 
-            # 5. UI Observation & Event Layer (Non-blocking latest-frame update)
+            # 6. UI Observation & Event Layer (Non-blocking latest-frame update)
             if ui_mode:
                 annotated_frame = render_frame(
                     frame=frame,
                     tracks=tracks,
                     people_count=last_people_in_view,
                     zone_polygon=config.ZONE_POLYGON,
+                    target_matches=target_matches,
                 )
                 # Process occupancy events asynchronously
                 event_manager.process_frame(

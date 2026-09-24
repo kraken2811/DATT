@@ -20,14 +20,16 @@ def render_frame(
     tracks: Any,
     people_count: int,
     zone_polygon: list[tuple[int, int]] | np.ndarray | None = None,
+    target_matches: dict[int, Any] | None = None,
 ) -> np.ndarray:
-    """Render bounding boxes, tracking labels, and people count HUD onto frame.
+    """Render bounding boxes, tracking labels, people count HUD, and target highlights.
 
     Args:
         frame: Original BGR numpy image.
         tracks: Tracked detections (supervision.Detections or similar).
         people_count: Current count of people in view from ZoneCounter.
         zone_polygon: Optional ROI polygon coordinates.
+        target_matches: Optional dict mapping track_id -> TargetMatchInfo.
 
     Returns:
         np.ndarray: Annotated BGR frame copy.
@@ -63,27 +65,41 @@ def render_frame(
             if x2 <= x1 or y2 <= y1:
                 continue
 
-            # Format label: ID 12 | 0.92
             tid = tracker_id[i] if tracker_id is not None and i < len(tracker_id) else None
             conf = confidence[i] if confidence is not None and i < len(confidence) else None
 
-            if tid is not None and conf is not None:
-                label = f"ID {tid} | {conf:.2f}"
-            elif tid is not None:
-                label = f"ID {tid}"
-            elif conf is not None:
-                label = f"Person | {conf:.2f}"
-            else:
-                label = "Person"
+            # Check if this track is matched to a registered target
+            target_match = None
+            if tid is not None and target_matches:
+                target_match = target_matches.get(int(tid))
 
-            # Vibrant Cyan/Teal box: BGR (255, 200, 0)
-            box_color = (255, 200, 0)
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), box_color, 2, cv2.LINE_AA)
+            if target_match is not None:
+                # Highlight matched target with vibrant Gold/Amber: BGR (0, 215, 255)
+                box_color = (0, 215, 255)
+                box_thickness = 3
+                t_name = getattr(target_match, "target_name", "Target")
+                score = getattr(target_match, "score", 1.0)
+                mtype = getattr(target_match, "match_type", "")
+                label = f"TARGET: {t_name} | ID {tid} | {score:.2f}"
+            else:
+                # Normal person: Vibrant Cyan/Teal box: BGR (255, 200, 0)
+                box_color = (255, 200, 0)
+                box_thickness = 2
+                if tid is not None and conf is not None:
+                    label = f"ID {tid} | {conf:.2f}"
+                elif tid is not None:
+                    label = f"ID {tid}"
+                elif conf is not None:
+                    label = f"Person | {conf:.2f}"
+                else:
+                    label = "Person"
+
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), box_color, box_thickness, cv2.LINE_AA)
 
             # Draw Label Tag with solid dark background
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = 0.55
-            font_thickness = 1
+            font_thickness = 1 if target_match is None else 2
             (text_w, text_h), baseline = cv2.getTextSize(label, font, font_scale, font_thickness)
 
             tag_y1 = max(0, y1 - text_h - baseline - 6)
@@ -95,14 +111,15 @@ def render_frame(
             cv2.rectangle(canvas, (tag_x1, tag_y1), (tag_x2, tag_y2), (20, 20, 20), -1)
             # Outline for tag matching box color
             cv2.rectangle(canvas, (tag_x1, tag_y1), (tag_x2, tag_y2), box_color, 1, cv2.LINE_AA)
-            # Label text in bright white
+            # Label text in bright white (or bright yellow for target)
+            text_color = (255, 255, 255) if target_match is None else (0, 255, 255)
             cv2.putText(
                 canvas,
                 label,
                 (tag_x1 + 4, tag_y2 - baseline - 2),
                 font,
                 font_scale,
-                (255, 255, 255),
+                text_color,
                 font_thickness,
                 cv2.LINE_AA,
             )
