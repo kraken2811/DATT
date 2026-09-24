@@ -7,6 +7,7 @@ maintaining only the latest frame buffer with zero queue buildup.
 from collections import deque
 from dataclasses import dataclass
 import logging
+import random
 from pathlib import Path
 import shutil
 import subprocess
@@ -246,8 +247,11 @@ class CameraReader:
 
         # Auto-Recovery Configuration
         self.reconnect_attempts: int = 0
-        self.max_reconnect_retries: int = 5
-        self.reconnect_delays: list[int] = [3, 5, 10, 15, 30]
+        # Keep trying at a bounded rate; a transient upstream limit must not
+        # permanently disable the camera.
+        self.reconnect_delays: list[int] = [3, 5, 10, 20, 40, 60, 120, 300]
+        self._force_url_refresh = False
+        self._stale_termination_requested = False
 
     @property
     def last_frame_time(self) -> float:
@@ -310,7 +314,7 @@ class CameraReader:
         self._last_ffmpeg_stderr = ""
         self._process_started_at = time.time()
         logger.info("[DATT-FFMPEG] started pid=%s", self.process.pid)
-        logger.info("[DATT-STREAM START] pid=%s frame_size=%s url=%s", self.process.pid, self.frame_size, stream_url)
+        logger.info("[DATT-STREAM START] pid=%s frame_size=%s", self.process.pid, self.frame_size)
         if self.process.stderr is not None:
             self._stderr_thread = threading.Thread(
                 target=self._drain_stderr,
@@ -326,43 +330,17 @@ class CameraReader:
             raise RuntimeError(f"FFmpeg failed to open video stream: {err_msg}")
 
     def start(self) -> None:
-        """Resolve stream URL, spawn FFmpeg process with retries, and start reader thread."""
-        max_retries = 3
-        last_error: Exception | None = None
-
-        for attempt in range(1, max_retries + 1):
-            try:
-                stream_url = self._get_stream_url_with_diagnostics("startup")
-                self._stream_url = stream_url
-                self._spawn_ffmpeg(stream_url)
-
-                self.stop_event.clear()
-                self.finished = False
-                self._last_frame_timestamp = time.time()
-                self._stream_alive = True
-                self._thread = threading.Thread(
-                    target=self._read_loop, name="ffmpeg-capture", daemon=True
-                )
-                self._thread.start()
-                self._health_thread = threading.Thread(target=self._health_loop, name="ffmpeg-health", daemon=True)
-                self._health_thread.start()
-                return
-
-            except Exception as exc:
-                last_error = exc
-                logger.warning(
-                    "CameraReader: Attempt %d/%d to start stream failed: %s",
-                    attempt,
-                    max_retries,
-                    exc,
-                )
-                self._cleanup_process()
-                if attempt < max_retries:
-                    time.sleep(3.0)
-
-        raise RuntimeError(
-            f"FFmpeg failed to open YouTube video stream after {max_retries} attempts: {last_error}"
-        ) from last_error
+        """Start capture asynchronously; startup failures use the same retry loop."""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self.stop_event.clear()
+        self.finished = False
+        self._last_frame_timestamp = 0.0
+        self._stream_alive = False
+        self._thread = threading.Thread(target=self._read_loop, name="ffmpeg-capture", daemon=True)
+        self._thread.start()
+        self._health_thread = threading.Thread(target=self._health_loop, name="ffmpeg-health", daemon=True)
+        self._health_thread.start()
 
     def _drain_stderr(self, pipe) -> None:
         """Continuously drain FFmpeg stderr to prevent pipe buffer deadlocks."""
@@ -424,15 +402,20 @@ class CameraReader:
                         self._last_ffmpeg_stderr or "<empty>")
 
     def _reconnect(self) -> bool:
-        """Execute auto-reconnect backoff sequence when FFmpeg exits unexpectedly."""
-        while not self.stop_event.is_set() and self.reconnect_attempts < self.max_reconnect_retries:
+        """Retry indefinitely with bounded delays until stopped or recovered."""
+        while not self.stop_event.is_set():
             self.reconnect_attempts += 1
             delay_idx = min(self.reconnect_attempts - 1, len(self.reconnect_delays) - 1)
-            delay = self.reconnect_delays[delay_idx]
+            delay = 0 if self.reconnect_attempts == 1 and self._stream_url is None and not self._force_url_refresh else self.reconnect_delays[delay_idx]
+            if self._force_url_refresh:
+                delay = max(delay, 60)
+            if self._stream_url is None and ("youtube.com" in self.url or "youtu.be" in self.url):
+                delay = max(delay, YTDLP_REFRESH_COOLDOWN_SECONDS - (time.time() - self._last_ytdlp_call_at))
+            delay = max(0, delay)
+            delay += random.uniform(0, min(5, delay * 0.1))
             logger.warning(
-                "[DATT-STREAM] Reconnect attempt %d/%d (waiting %ds)...",
+                "[DATT-STREAM] Reconnect attempt %d (waiting %.1fs)...",
                 self.reconnect_attempts,
-                self.max_reconnect_retries,
                 delay,
             )
             # Sleep with stop_event check
@@ -440,7 +423,7 @@ class CameraReader:
                 return False
 
             try:
-                use_refresh = self._stream_url is None or self.reconnect_attempts >= URL_REFRESH_AFTER_FAILURES
+                use_refresh = self._force_url_refresh or self._stream_url is None or self.reconnect_attempts >= URL_REFRESH_AFTER_FAILURES
                 strategy = "refresh_url" if use_refresh else ("use_cached_url" if self._stream_url else "restart_ffmpeg")
                 self.recovery_state = "URL_REFRESH_REQUIRED" if use_refresh else "FFmpeg_RESTART"
                 logger.info("[DATT-RECOVERY] attempt=%s strategy=%s", self.reconnect_attempts, strategy)
@@ -448,21 +431,23 @@ class CameraReader:
                 assert new_url is not None
                 self._spawn_ffmpeg(new_url)
                 self._stream_url = new_url
-                logger.info("[DATT STREAM RECOVERY] attempt=%s new_url=%s new_pid=%s recovered_time=%s",
-                            self.reconnect_attempts, new_url, self.process.pid if self.process else None,
+                self._force_url_refresh = False
+                logger.info("[DATT STREAM RECOVERY] attempt=%s new_pid=%s recovered_time=%s",
+                            self.reconnect_attempts, self.process.pid if self.process else None,
                             time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
                 return True
             except Exception as exc:
+                if "429" in "\n".join(self.stderr_lines) or "429" in str(exc):
+                    self._force_url_refresh = True
+                    self._stream_url = None
                 logger.warning(
-                    "[DATT-STREAM] Reconnect attempt %d/%d failed: %s",
+                    "[DATT-STREAM] Reconnect attempt %d failed: %s",
                     self.reconnect_attempts,
-                    self.max_reconnect_retries,
-                    exc,
+                    type(exc).__name__,
                 )
                 self._cleanup_process()
 
-        self.recovery_state = "FAILED"
-        logger.error("[DATT-RECOVERY] attempt=%s strategy=FAILED", self.reconnect_attempts)
+        self.recovery_state = "STOPPED"
         return False
 
     def _get_stream_url_with_diagnostics(self, reason: str) -> str:
@@ -587,8 +572,12 @@ class CameraReader:
                 self.last_read_sequence = -1
 
             self._recovery_started_at = time.time()
+            if "429" in "\n".join(self.stderr_lines):
+                self._force_url_refresh = True
+                self._stream_url = None
 
             self._cleanup_process()
+            self._stale_termination_requested = False
 
             if not self._reconnect():
                 break
@@ -621,10 +610,6 @@ class CameraReader:
             logger.info("[DATT-CAMERA READER HEALTH]\nthread_alive=%s\nframes_received=%s\nlast_frame_time=%s\nframe_age_seconds=%.1f\nstream_fps=%.2f\nread_errors=%s",
                         self._thread.is_alive() if self._thread else False, self._frames_received,
                         self.last_frame_time, age, self.stream_fps, self._read_errors)
-            if (proc is not None and code is not None) or self._last_ffmpeg_exit_code is not None:
-                logger.error("[DATT-FFMPEG EXIT]\nexit_code=%s\nruntime=%ss\nlast_stderr=%s",
-                             code if proc is not None else self._last_ffmpeg_exit_code,
-                             int(runtime), self._last_ffmpeg_stderr or "\n".join(self.stderr_lines)[-2000:])
             status = self.status
             if status != self._last_status:
                 logger.warning("[DATT-STREAM STATE CHANGE]\nold_status=%s\nnew_status=%s\nreason=%s\nlast_frame_age=%.1f\nffmpeg_alive=%s\nreader_alive=%s",
@@ -660,7 +645,7 @@ class CameraReader:
         Returns None if stream has terminated or timed out.
         """
         # If stream has stalled > 15s while process is alive, terminate stalled FFmpeg to unblock auto-recovery
-        if self.process is not None and self.frame_age_seconds > 15.0:
+        if self.process is not None and self._last_frame_timestamp > 0 and not self._stale_termination_requested and self.frame_age_seconds > 15.0:
             logger.warning("[DATT-STREAM] Stale frame detected (>15s). Terminating unresponsive FFmpeg process.")
             logger.error("[DATT-REGRESSION] stale watchdog terminating ffmpeg_pid=%s exit_code=%s stderr_tail=%s last_frame_timestamp=%s reader_thread_alive=%s",
                          self.process.pid, self.process.poll(), "\n".join(self.stderr_lines)[-2000:] or "<empty>",
@@ -669,7 +654,9 @@ class CameraReader:
             with self.lock:
                 self.latest = None
                 self._stream_alive = False
-            self._cleanup_process()
+            self._stale_termination_requested = True
+            if self.process.poll() is None:
+                self.process.terminate()  # reader thread owns cleanup and reconnect
 
         deadline = time.perf_counter() + timeout
         while time.perf_counter() < deadline:
