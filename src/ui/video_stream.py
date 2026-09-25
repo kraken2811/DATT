@@ -84,6 +84,8 @@ def create_status_placeholder(
 class StreamRequestHandler(BaseHTTPRequestHandler):
     """HTTP request handler for MJPEG video streaming, telemetry, and camera control."""
 
+    protocol_version = "HTTP/1.1"
+
     # References to SharedRuntimeState and CameraManager (set on server class)
     state: SharedRuntimeState = shared_state
     camera_manager: CameraManager | None = None
@@ -210,6 +212,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Retry-After", "1")
             self.end_headers()
             return
+        self.close_connection = False
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Age", "0")
@@ -313,6 +316,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(frame_bytes)
         self.wfile.write(b"\r\n")
+        self.wfile.flush()
 
     def handle_telemetry(self) -> None:
         """Return realtime telemetry JSON."""
