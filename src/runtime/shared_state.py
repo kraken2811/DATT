@@ -160,6 +160,26 @@ class SharedRuntimeState:
         self._buffer_age_ms = 0.0
 
     @property
+    def status(self) -> str:
+        with self._lock:
+            return self._status
+
+    @property
+    def is_idle(self) -> bool:
+        with self._lock:
+            return self._status == "IDLE"
+
+    @property
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._status == "RUNNING"
+
+    @property
+    def error_message(self) -> str:
+        with self._lock:
+            return self._error_message
+
+    @property
     def source_generation(self) -> int:
         with self._lock:
             return self._source_generation
