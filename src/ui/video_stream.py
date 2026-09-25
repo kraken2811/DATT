@@ -27,7 +27,10 @@ from src.config.camera_config import list_cameras
 from src.events.event_storage import event_storage
 from src.recognition.target_matcher import target_manager
 from src.runtime.shared_state import SharedRuntimeState, shared_state
+from src.stream.caltrans_service import caltrans_service
 from src.stream.camera_manager import CameraManager
+from src.stream.preview_manager import preview_manager
+from src.stream.seattle_sdot_service import SEATTLE_STREAM_HEADERS, seattle_service
 
 
 class StreamRequestHandler(BaseHTTPRequestHandler):
@@ -76,6 +79,14 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self.handle_status()
         elif path == "/cameras":
             self.handle_cameras()
+        elif path in ("/public_cameras", "/api/public_cameras"):
+            self.handle_public_cameras(query)
+        elif path in ("/source_status", "/api/source_status"):
+            self.handle_source_status()
+        elif path in ("/camera_snapshot", "/api/camera_snapshot"):
+            self.handle_camera_snapshot(query)
+        elif path in ("/preview_feed", "/api/preview_feed"):
+            self.handle_preview_feed(query)
         elif path in ("/video_source", "/api/video_source"):
             self.handle_video_source()
         elif path in ("/targets", "/api/targets"):
@@ -93,7 +104,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self) -> None:
-        """Route POST requests (switch_camera, set_video_source, register_target)."""
+        """Route POST requests (switch_camera, set_video_source, select_source, stop_camera, register_target)."""
         path = self.path.split("?")[0]
         content_len = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_len).decode("utf-8", errors="replace") if content_len > 0 else "{}"
@@ -105,6 +116,12 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         if path in ("/switch_camera", "/api/switch_camera"):
             cam_id = data.get("camera_id") or data.get("id")
             self._execute_camera_switch(cam_id)
+        elif path in ("/select_source", "/api/select_source"):
+            self._execute_select_source(data)
+        elif path in ("/stop_camera", "/api/stop_camera"):
+            self._execute_stop_camera()
+        elif path in ("/stop_preview", "/api/stop_preview"):
+            self._execute_stop_preview()
         elif path in ("/set_video_source", "/api/set_video_source"):
             self._execute_set_video_source(data)
         elif path in ("/register_target", "/api/register_target"):
@@ -373,6 +390,182 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             })
         except Exception as exc:
             self._send_json_response({"status": "error", "message": str(exc)}, code=400)
+
+    def handle_public_cameras(self, query: dict[str, list[str]]) -> None:
+        """Return public CCTV camera catalog for Caltrans and/or Seattle SDOT."""
+        search_query = query.get("q", [""])[0] or query.get("query", [""])[0]
+        force_refresh = query.get("refresh", ["false"])[0].lower() in ("true", "1")
+        provider = query.get("provider", [""])[0].lower().strip()
+
+        try:
+            cameras: list[dict[str, Any]] = []
+            if provider in ("seattle", "seattle_sdot", "sdot"):
+                cameras = seattle_service.get_cameras(force_refresh=force_refresh, query=search_query)
+            elif provider in ("all", "*"):
+                seattle_cams = seattle_service.get_cameras(force_refresh=force_refresh, query=search_query)
+                caltrans_cams = caltrans_service.get_cameras(force_refresh=force_refresh, query=search_query)
+                cameras = seattle_cams + caltrans_cams
+            else:
+                # Default / caltrans: preserves 100% backward compatibility
+                cameras = caltrans_service.get_cameras(force_refresh=force_refresh, query=search_query)
+
+            self._send_json_response({
+                "status": "ok",
+                "cameras": cameras,
+                "total": len(cameras),
+                "provider": provider or "caltrans",
+            })
+        except Exception as exc:
+            self._send_json_response({"status": "error", "message": str(exc), "cameras": []}, code=500)
+
+    def handle_source_status(self) -> None:
+        """Return connection verification status for active video source."""
+        if self.camera_manager is None:
+            self._send_json_response({
+                "status": "STOPPED",
+                "is_ready": False,
+                "frames_received": 0,
+                "frame_age_seconds": 999.0,
+                "stream_alive": False,
+                "error_reason": "CameraManager not connected",
+            })
+            return
+
+        source_info = self.camera_manager.get_current_source_info()
+        diag = source_info.get("diagnostics", {})
+        frames = diag.get("frames_received", 0)
+        age = self.camera_manager.frame_age_seconds
+        alive = self.camera_manager.stream_alive
+        status = self.camera_manager.status
+        is_ready = self.camera_manager.is_connection_ready(max_frame_age=5.0)
+
+        self._send_json_response({
+            "status": status,
+            "is_ready": is_ready,
+            "frames_received": frames,
+            "frame_age_seconds": round(age, 2),
+            "stream_alive": alive,
+            "error_reason": self.camera_manager.error_reason,
+            "camera": {
+                "id": source_info.get("id"),
+                "name": source_info.get("name"),
+                "type": source_info.get("type"),
+                "url": source_info.get("url"),
+            },
+        })
+
+    def handle_camera_snapshot(self, query: dict[str, list[str]]) -> None:
+        """Proxy remote camera snapshot JPEG image."""
+        snap_url = query.get("url", [""])[0]
+        if not snap_url:
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        img_bytes = preview_manager.fetch_snapshot_image(snap_url)
+        if img_bytes is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(img_bytes)))
+        self.send_header("Cache-Control", "public, max-age=30")
+        self.end_headers()
+        self.wfile.write(img_bytes)
+
+    def handle_preview_feed(self, query: dict[str, list[str]]) -> None:
+        """Stream lightweight preview MJPEG (zero AI)."""
+        stream_url = query.get("url", [""])[0]
+        provider = query.get("provider", [""])[0]
+        headers = None
+        if provider in ("Seattle SDOT", "seattle", "seattle_sdot"):
+            headers = dict(SEATTLE_STREAM_HEADERS)
+
+        if stream_url and preview_manager.get_active_url() != stream_url:
+            preview_manager.start_preview(stream_url, headers=headers)
+
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        self.send_header("Cache-Control", "no-cache, private")
+        self.end_headers()
+
+        blank_frame = np.zeros((360, 640, 3), dtype=np.uint8)
+        cv2.putText(blank_frame, "CONNECTING PREVIEW...", (160, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 229, 255), 2)
+        _, blank_jpeg = cv2.imencode(".jpg", blank_frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        blank_bytes = blank_jpeg.tobytes()
+
+        try:
+            self._write_frame(blank_bytes)
+            while preview_manager.is_active():
+                frame_bytes = preview_manager.get_latest_frame_jpeg()
+                if frame_bytes is not None:
+                    self._write_frame(frame_bytes)
+                    time.sleep(0.06)  # ~15 FPS
+                else:
+                    time.sleep(0.05)
+        except (BrokenPipeError, ConnectionResetError, socket.timeout):
+            pass
+        finally:
+            self.close_connection = True
+
+    def _execute_select_source(self, data: dict[str, Any]) -> None:
+        """Safely switch or start a selected camera source."""
+        if self.camera_manager is None:
+            self._send_json_response({"status": "error", "message": "CameraManager not connected"}, code=503)
+            return
+
+        preview_manager.stop_preview()
+
+        stype = str(data.get("source_type") or data.get("type") or "direct_hls").lower().strip()
+        source = str(data.get("source") or data.get("stream_url") or data.get("url") or "").strip()
+        name = data.get("name") or data.get("locationName")
+        provider = data.get("provider") or ""
+        loop = bool(data.get("loop", True))
+
+        headers = data.get("headers")
+        if not headers and provider in ("Seattle SDOT", "seattle", "seattle_sdot"):
+            headers = dict(SEATTLE_STREAM_HEADERS)
+
+        if not source:
+            self._send_json_response({"status": "error", "message": "Source cannot be empty"}, code=400)
+            return
+
+        try:
+            cam_info = self.camera_manager.set_video_source(
+                source_type=stype,
+                source=source,
+                loop=loop,
+                name=name,
+                headers=headers,
+            )
+            self.state.set_camera(cam_info.id, cam_info.name)
+            self.state.set_status("RUNNING")
+            self._send_json_response({
+                "status": "ok",
+                "message": f"Connecting to {cam_info.name}...",
+                "camera": cam_info.to_dict(),
+            })
+        except Exception as exc:
+            self.state.set_status("ERROR", str(exc))
+            self._send_json_response({"status": "error", "message": str(exc)}, code=500)
+
+    def _execute_stop_camera(self) -> None:
+        """Stop active camera and transition pipeline to IDLE state."""
+        preview_manager.stop_preview()
+        if self.camera_manager is not None:
+            self.camera_manager.stop_camera()
+        self.state.set_camera("", "")
+        self.state.set_status("IDLE")
+        self._send_json_response({"status": "ok", "message": "Camera stopped successfully"})
+
+    def _execute_stop_preview(self) -> None:
+        """Stop active preview."""
+        preview_manager.stop_preview()
+        self._send_json_response({"status": "ok", "message": "Preview stopped"})
 
     def handle_events(self, query: dict[str, list[str]]) -> None:
         """Return recent occupancy events from SQLite."""

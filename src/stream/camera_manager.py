@@ -14,6 +14,8 @@ import numpy as np
 
 import config
 from src.config.camera_config import CameraInfo, get_camera, get_default_camera
+from src.stream.direct_hls import DirectHLSReader
+from src.stream.preview_manager import preview_manager
 from src.stream.video_source import LocalVideoReader, YouTubeVODReader
 from src.stream.youtube_resolver import stream_resolver
 from src.stream.youtube_stream import CameraReader
@@ -143,16 +145,26 @@ class CameraManager:
             else:
                 cam_info = get_camera(camera_id, self.config_path)
 
+            # Ensure preview resources are closed before AI pipeline starts
+            preview_manager.stop_preview()
+
             self._status = "SWITCHING"
             self._error_reason = ""
             logger.info("CameraManager: Starting camera '%s' (%s)...", cam_info.name, cam_info.url)
 
             try:
-                reader = CameraReader(
-                    url=cam_info.url,
-                    width=cam_info.width,
-                    height=cam_info.height,
-                )
+                if cam_info.type == "direct_hls":
+                    reader = DirectHLSReader(
+                        url=cam_info.url,
+                        width=cam_info.width,
+                        height=cam_info.height,
+                    )
+                else:
+                    reader = CameraReader(
+                        url=cam_info.url,
+                        width=cam_info.width,
+                        height=cam_info.height,
+                    )
                 reader.start()
 
                 self._reader = reader
@@ -173,8 +185,28 @@ class CameraManager:
         with self._lock:
             logger.info("CameraManager: Stopping active camera stream...")
             self._stop_reader_internal()
+            self._active_camera = None
             self._status = "STOPPED"
             self._error_reason = ""
+
+    def has_active_camera(self) -> bool:
+        """Check if an active camera source is configured and running."""
+        with self._lock:
+            return self._reader is not None and self._active_camera is not None
+
+    def is_connection_ready(self, max_frame_age: float = 5.0) -> bool:
+        """Check if active source satisfies connection criteria:
+        - frames_received > 0
+        - frame_age_seconds <= max_frame_age
+        - stream_alive is True
+        """
+        with self._lock:
+            if self._reader is None or self._status != "RUNNING":
+                return False
+            frames = getattr(self._reader, "_frames_received", 0)
+            age = self.frame_age_seconds
+            alive = self.stream_alive
+            return frames > 0 and age <= max_frame_age and alive
 
     def switch_camera(self, camera_id: str) -> CameraInfo:
         """Switch active camera to a new source dynamically.
@@ -205,14 +237,16 @@ class CameraManager:
         source: str,
         loop: bool = True,
         name: str | None = None,
+        headers: dict[str, str] | None = None,
     ) -> CameraInfo:
-        """Switch active stream dynamically to a Local MP4 or YouTube VOD source.
+        """Switch active stream dynamically to a Local MP4, Direct HLS, or YouTube source.
 
         Args:
-            source_type: 'local' or 'youtube_vod' or 'youtube'
-            source: Local file path or YouTube URL
+            source_type: 'direct_hls', 'local', 'youtube_vod', or 'youtube'
+            source: Local file path or Stream URL
             loop: Whether to loop local video upon EOF
             name: Optional display name for source
+            headers: Optional generic HTTP headers for HLS ingestion
 
         Returns:
             CameraInfo: Metadata representing the active source
@@ -239,13 +273,29 @@ class CameraManager:
             )
 
 
-            # Safely stop and release previous reader
+            # Safely stop and release previous reader and preview
+            preview_manager.stop_preview()
             self._stop_reader_internal()
             self._status = "SWITCHING"
             self._error_reason = ""
 
             try:
-                if stype in ("local", "file", "mp4"):
+                if stype in ("direct_hls", "hls"):
+                    reader = DirectHLSReader(url=src_str, width=1280, height=720, headers=headers)
+                    reader.start()
+
+                    cam_name = name or "Direct HLS Stream"
+                    cam_info = CameraInfo(
+                        id=f"hls_{time.time()}",
+                        name=cam_name,
+                        type="direct_hls",
+                        url=src_str,
+                        width=1280,
+                        height=720,
+                        description="Direct HLS (.m3u8) video stream",
+                    )
+
+                elif stype in ("local", "file", "mp4"):
                     file_path = Path(src_str)
                     if not file_path.is_file():
                         raise FileNotFoundError(f"Local video file not found: {file_path}")
@@ -296,7 +346,7 @@ class CameraManager:
                 else:
                     raise ValueError(
                         f"Unsupported source type: '{source_type}'. "
-                        "Supported types: 'local', 'youtube_vod', 'youtube'"
+                        "Supported types: 'direct_hls', 'local', 'youtube_vod', 'youtube'"
                     )
 
                 self._reader = reader

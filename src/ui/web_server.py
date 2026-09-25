@@ -37,6 +37,9 @@ import numpy as np
 import uvicorn
 
 from src.recognition.target_matcher import target_manager
+from src.stream.caltrans_service import caltrans_service
+from src.stream.preview_manager import preview_manager
+from src.stream.seattle_sdot_service import seattle_service
 
 # Ensure repository root is on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -305,6 +308,205 @@ async def get_video_source(request: Request) -> JSONResponse:
     return JSONResponse(
         content={"status": "ok", "source": {"type": "default", "status": "RUNNING"}},
         status_code=200,
+    )
+
+
+# -----------------------------------------------------------------------------
+# Public CCTV Cameras & Source Selection API
+# -----------------------------------------------------------------------------
+
+@app.get("/public_cameras")
+@app.get("/api/public_cameras")
+async def get_public_cameras(request: Request) -> JSONResponse:
+    """Retrieve Public CCTV camera catalog (Caltrans or Seattle SDOT)."""
+    q = request.query_params.get("q") or request.query_params.get("query", "")
+    force_refresh = request.query_params.get("refresh", "false").lower() in ("true", "1")
+    provider = request.query_params.get("provider", "").lower().strip()
+    b_url = get_backend_url(request).rstrip("/")
+
+    try:
+        if provider in ("seattle", "seattle_sdot", "sdot"):
+            cams = seattle_service.get_cameras(force_refresh=force_refresh, query=q)
+        elif provider in ("all", "*"):
+            seattle_cams = seattle_service.get_cameras(force_refresh=force_refresh, query=q)
+            caltrans_cams = caltrans_service.get_cameras(force_refresh=force_refresh, query=q)
+            cams = seattle_cams + caltrans_cams
+        else:
+            cams = caltrans_service.get_cameras(force_refresh=force_refresh, query=q)
+
+        return JSONResponse(
+            content={"status": "ok", "cameras": cams, "total": len(cams), "provider": provider or "caltrans"},
+            status_code=200,
+        )
+    except Exception as exc:
+        logger.debug("Local public camera fetch failed (%s), proxying to backend...", exc)
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(
+                f"{b_url}/public_cameras?provider={urllib.parse.quote(provider)}&q={urllib.parse.quote(q)}"
+            )
+            if resp.status_code == 200:
+                return JSONResponse(content=resp.json(), status_code=200)
+    except Exception as exc:
+        logger.debug("Backend public_cameras failed: %s", exc)
+
+    if provider in ("seattle", "seattle_sdot", "sdot"):
+        cams = seattle_service.get_cameras(query=q)
+    else:
+        cams = caltrans_service.get_cameras(query=q)
+    return JSONResponse(
+        content={"status": "ok", "cameras": cams, "total": len(cams), "provider": provider or "caltrans"},
+        status_code=200,
+    )
+
+
+@app.post("/select_source")
+@app.post("/api/select_source")
+async def select_source(request: Request) -> JSONResponse:
+    """Safely select and activate a camera source (Direct HLS, Local, YouTube)."""
+    b_url = get_backend_url(request).rstrip("/")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    preview_manager.stop_preview()
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(f"{b_url}/select_source", json=body)
+            return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    except Exception as exc:
+        return JSONResponse(
+            content={"status": "error", "message": f"Failed selecting camera source on backend: {exc}"},
+            status_code=503,
+        )
+
+
+@app.post("/stop_camera")
+@app.post("/api/stop_camera")
+async def stop_camera(request: Request) -> JSONResponse:
+    """Safely stop active camera and return to IDLE/selection state."""
+    b_url = get_backend_url(request).rstrip("/")
+    preview_manager.stop_preview()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(f"{b_url}/stop_camera")
+            return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    except Exception as exc:
+        return JSONResponse(
+            content={"status": "error", "message": f"Failed stopping camera on backend: {exc}"},
+            status_code=503,
+        )
+
+
+@app.get("/source_status")
+@app.get("/api/source_status")
+async def get_source_status(request: Request) -> JSONResponse:
+    """Get active source connection verification status."""
+    b_url = get_backend_url(request).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=2.5) as client:
+            resp = await client.get(f"{b_url}/source_status")
+            if resp.status_code == 200:
+                return JSONResponse(content=resp.json(), status_code=200)
+    except Exception as exc:
+        logger.debug("Backend source_status unreachable: %s", exc)
+
+    return JSONResponse(
+        content={
+            "status": "STOPPED",
+            "is_ready": False,
+            "frames_received": 0,
+            "frame_age_seconds": 999.0,
+            "stream_alive": False,
+            "error_reason": "Backend unreachable",
+        },
+        status_code=200,
+    )
+
+
+@app.get("/camera_snapshot")
+@app.get("/api/camera_snapshot")
+async def get_camera_snapshot(request: Request) -> Response:
+    """Proxy remote camera snapshot JPEG image."""
+    url = request.query_params.get("url", "")
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing snapshot url")
+
+    data = preview_manager.fetch_snapshot_image(url)
+    if data is not None:
+        return Response(
+            content=data,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=30", "Access-Control-Allow-Origin": "*"},
+        )
+
+    b_url = get_backend_url(request).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            resp = await client.get(f"{b_url}/camera_snapshot?url={urllib.parse.quote(url)}")
+            if resp.status_code == 200:
+                return Response(
+                    content=resp.content,
+                    media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=30", "Access-Control-Allow-Origin": "*"},
+                )
+    except Exception:
+        pass
+    raise HTTPException(status_code=404, detail="Snapshot image unavailable")
+
+
+@app.post("/stop_preview")
+@app.post("/api/stop_preview")
+async def stop_preview_route(request: Request) -> JSONResponse:
+    """Safely terminate preview resources."""
+    preview_manager.stop_preview()
+    b_url = get_backend_url(request).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            await client.post(f"{b_url}/stop_preview")
+    except Exception:
+        pass
+    return JSONResponse(content={"status": "ok", "message": "Preview stopped"})
+
+
+@app.get("/preview_feed")
+@app.get("/api/preview_feed")
+async def preview_feed(request: Request) -> Response:
+    """Relay lightweight preview MJPEG stream without AI."""
+    b_url = get_backend_url(request).rstrip("/")
+    stream_url = request.query_params.get("url", "")
+    target_url = f"{b_url}/preview_feed?url={urllib.parse.quote(stream_url)}"
+
+    try:
+        client = httpx.AsyncClient(timeout=httpx.Timeout(connect=3.0, read=None, write=5.0, pool=None))
+        req = client.build_request("GET", target_url)
+        resp = await client.send(req, stream=True)
+        if resp.status_code != 200:
+            await resp.aclose()
+            await client.aclose()
+            return Response(content=b"Preview stream unavailable", status_code=503, media_type="text/plain")
+    except Exception:
+        return Response(content=b"Preview feed offline", status_code=503, media_type="text/plain")
+
+    async def stream_mjpeg():
+        try:
+            async for chunk in resp.aiter_raw():
+                if await request.is_disconnected():
+                    break
+                yield chunk
+        except Exception:
+            pass
+        finally:
+            await resp.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        stream_mjpeg(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-cache, private, no-store", "Access-Control-Allow-Origin": "*"},
     )
 
 

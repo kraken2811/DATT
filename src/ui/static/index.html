@@ -1,281 +1,554 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="vi">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DATT — AI People Counter & Camera Monitor</title>
+    <title>DATT — HỆ THỐNG GIÁM SÁT THÔNG MINH</title>
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <div class="app-layout">
-        <!-- Sidebar: Camera Management & Controls -->
-        <aside class="sidebar" id="sidebar">
-            <div class="sidebar-header">
-                <h2>🎥 Camera Management</h2>
-            </div>
 
-            <div class="sidebar-section">
-                <label for="backendUrlInput" class="input-label">AI Backend URL</label>
-                <input type="text" id="backendUrlInput" class="text-input" value="http://localhost:8000" placeholder="http://localhost:8000" title="Base URL of AI streaming server">
-                <span class="input-help">FastAPI proxy auto-relays if Colab tunnel or local.</span>
-            </div>
-
-            <div class="sidebar-section">
-                <label for="cameraSelect" class="input-label">Select Camera Stream</label>
-                <select id="cameraSelect" class="select-input">
-                    <option value="" disabled selected>Loading cameras...</option>
-                </select>
-                <button type="button" id="switchCameraBtn" class="primary-btn">
-                    <span class="btn-icon">🔄</span>
-                    <span class="btn-text">Switch Camera</span>
-                </button>
-                <div id="cameraSwitchFeedback" class="feedback-msg"></div>
-            </div>
-
-            <div class="sidebar-divider"></div>
-
-            <!-- Video Source Manager (Local MP4 & YouTube VOD) -->
-            <div class="sidebar-section">
-                <label class="input-label">🎬 Video Source Control</label>
-                <select id="sourceTypeSelect" class="select-input">
-                    <option value="local">Local MP4 Video</option>
-                    <option value="youtube_vod">YouTube VOD</option>
-                </select>
-                <input type="text" id="sourceInput" class="text-input" placeholder="Path to .mp4 or YouTube URL" title="Local file path (e.g. data/test.mp4) or YouTube link">
-                <div class="checkbox-row">
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="sourceLoopCheckbox" checked>
-                        <span>Loop Video on EOF</span>
-                    </label>
-                </div>
-                <button type="button" id="applySourceBtn" class="secondary-btn">
-                    <span class="btn-icon">▶️</span>
-                    <span class="btn-text">Apply Source</span>
-                </button>
-                <div id="sourceFeedback" class="feedback-msg"></div>
-            </div>
-
-            <div class="sidebar-divider"></div>
-
-            <!-- Target Registration & Management -->
-            <div class="sidebar-section">
-                <label class="input-label">🎯 Target Registration</label>
-                <input type="text" id="targetNameInput" class="text-input" placeholder="Target Name (e.g. Alice)" required>
-                <select id="targetColorSelect" class="select-input">
-                    <option value="">Clothing Color: Any</option>
-                    <option value="red">Red</option>
-                    <option value="blue">Blue</option>
-                    <option value="green">Green</option>
-                    <option value="yellow">Yellow</option>
-                    <option value="black">Black</option>
-                    <option value="white">White</option>
-                </select>
-                <div class="file-upload-wrapper">
-                    <label for="targetFaceInput" class="file-upload-label">
-                        <span class="file-upload-icon">📷</span>
-                        <span id="targetFaceFilename">Face Image (Optional)</span>
-                    </label>
-                    <input type="file" id="targetFaceInput" accept="image/*" class="file-input-hidden">
-                </div>
-                <button type="button" id="registerTargetBtn" class="primary-btn highlight-btn">
-                    <span class="btn-icon">➕</span>
-                    <span class="btn-text">Register Target</span>
-                </button>
-                <div id="targetFeedback" class="feedback-msg"></div>
-
-                <!-- Active Targets List -->
-                <div class="targets-container">
-                    <div class="targets-header">Registered Targets (<span id="targetCount">0</span>)</div>
-                    <div id="targetsList" class="targets-list">
-                        <div class="target-item-empty">No active targets registered.</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="sidebar-divider"></div>
-
-            <div class="sidebar-section diagnostics">
-                <div class="diag-row">
-                    <span class="diag-label">Connection:</span>
-                    <span id="sidebarConnStatus" class="badge badge-disconnected">DISCONNECTED</span>
-                </div>
-                <div class="diag-row">
-                    <span class="diag-label">Ping Latency:</span>
-                    <span id="pingLatency" class="diag-value">-- ms</span>
-                </div>
-                <div class="diag-row">
-                    <span class="diag-label">Telemetry Poll:</span>
-                    <span class="diag-value">1000 ms</span>
-                </div>
-                <div class="diag-row">
-                    <span class="diag-label">Events Poll:</span>
-                    <span class="diag-value">10000 ms</span>
-                </div>
-            </div>
-
-            <div class="sidebar-divider"></div>
-
-            <div class="sidebar-footer">
-                <div class="footer-title">DATT — AI People Counter</div>
-                <div class="footer-sub">Phase 4.4 Stable Web Monitor</div>
-                <div class="footer-desc">Level 2 Realtime Monitoring & Camera Control</div>
-            </div>
-        </aside>
-
-        <!-- Main Content Area -->
-        <main class="main-content" id="mainContent">
-            <!-- Header Bar -->
-            <header class="main-header">
-                <div class="header-left">
-                    <h1 class="header-title">👥 DATT AI Vision Monitor & Camera Manager</h1>
-                </div>
-                <div class="header-right">
-                    <div id="statusBadge" class="status-badge status-disconnected">STATUS: DISCONNECTED</div>
-                </div>
+    <!-- ===================================================================== -->
+    <!-- 1. CAMERA SELECTION SCREEN (Initial Landing Page)                     -->
+    <!-- ===================================================================== -->
+    <div id="selectionScreen" class="view-screen selection-screen">
+        <div class="selection-container">
+            <!-- Brand Header -->
+            <header class="selection-header">
+                <div class="selection-badge">AI VISION MONITOR</div>
+                <h1 class="brand-title">DATT</h1>
+                <h2 class="brand-subtitle">HỆ THỐNG GIÁM SÁT THÔNG MINH</h2>
+                <p class="selection-lead">Chọn camera để bắt đầu giám sát</p>
             </header>
 
-            <!-- Alert / Notification Banner -->
-            <div id="alertBanner" class="alert-banner alert-warning">
-                📡 Connecting to AI pipeline... Ensure <code>python app.py --ui</code> is running.
+            <!-- Source Selection Tabs -->
+            <div class="source-nav">
+                <button type="button" class="source-tab-btn active" data-tab="tab-public-cctv" id="tabBtnPublicCctv">
+                    <span class="tab-icon">🌐</span>
+                    <span class="tab-title">Public CCTV</span>
+                </button>
+                <button type="button" class="source-tab-btn" data-tab="tab-direct-hls" id="tabBtnDirectHls">
+                    <span class="tab-icon">⚡</span>
+                    <span class="tab-title">Direct HLS</span>
+                </button>
+                <button type="button" class="source-tab-btn" data-tab="tab-youtube" id="tabBtnYouTube">
+                    <span class="tab-icon">📺</span>
+                    <span class="tab-title">YouTube Live</span>
+                </button>
+                <button type="button" class="source-tab-btn" data-tab="tab-local" id="tabBtnLocal">
+                    <span class="tab-icon">📁</span>
+                    <span class="tab-title">Local Video</span>
+                </button>
             </div>
 
-            <!-- Two-Column Main Dashboard Grid -->
-            <div class="dashboard-grid">
-                <!-- Left Column (65%): Live Camera Stream -->
-                <section class="video-section card">
-                    <div class="section-header">
-                        <div class="section-title">
-                            <span class="title-icon">📹</span>
-                            <h3>Live Camera Stream (server-relayed MJPEG)</h3>
-                        </div>
-                        <div class="stream-meta">
-                            <span class="meta-pill" id="streamCamName">Camera: Loading...</span>
-                            <span class="meta-pill" id="streamResolution">640x640</span>
-                            <span class="meta-pill target-fps" id="streamTargetFps">Target 30 FPS</span>
-                        </div>
+            <!-- Tab 1: Public CCTV (Seattle SDOT & Caltrans) -->
+            <div id="tab-public-cctv" class="tab-pane active">
+                <div class="cctv-header-row">
+                    <div class="provider-selector-bar">
+                        <button type="button" class="provider-btn active" data-provider="seattle" id="btnProviderSeattle">
+                            <span class="provider-badge-icon">🌧️</span> Seattle SDOT
+                        </button>
+                        <button type="button" class="provider-btn" data-provider="caltrans" id="btnProviderCaltrans">
+                            <span class="provider-badge-icon">☀️</span> Caltrans
+                        </button>
                     </div>
-
-                    <div class="video-wrapper">
-                        <img id="videoFeed" class="video-stream-img" src="/video_feed" alt="Realtime AI Video Feed">
-                        <div id="videoErrorOverlay" class="video-overlay" style="display: none;">
-                            <div class="overlay-spinner"></div>
-                            <div class="overlay-title">Video Stream Disconnected</div>
-                            <div class="overlay-sub">Reconnecting automatically in 3 seconds...</div>
-                        </div>
+                    <div class="search-meta">
+                        <span id="cctvCountBadge" class="count-pill">Đang tải camera...</span>
+                        <button type="button" id="refreshCatalogBtn" class="icon-action-btn" title="Làm mới danh sách">🔄</button>
                     </div>
-                    <div class="video-caption">Server-side MJPEG relay; latest-frame display, target 30 FPS.</div>
-                </section>
+                </div>
 
-                <!-- Right Column (35%): Realtime AI Telemetry -->
-                <section class="telemetry-section card">
-                    <div class="section-header">
-                        <div class="section-title">
-                            <span class="title-icon">📊</span>
-                            <h3>Realtime AI Telemetry</h3>
-                        </div>
-                        <div class="active-cam-indicator">
-                            Active: <strong id="telemActiveCam">Connecting...</strong>
-                        </div>
+                <div class="search-bar-row">
+                    <div class="search-input-wrapper">
+                        <span class="search-icon">🔍</span>
+                        <input type="text" id="cctvSearchInput" class="search-input" placeholder="Tìm kiếm camera theo tên, vị trí, đường phố...">
                     </div>
+                </div>
 
-                    <!-- Hero Metric: People in View -->
-                    <div class="hero-metric-card">
-                        <div class="hero-metric-label">PEOPLE IN VIEW</div>
-                        <div class="hero-metric-value" id="metricPeopleCount">0</div>
+                <!-- CCTV Camera Cards Grid -->
+                <div id="cctvCardsGrid" class="cctv-cards-grid">
+                    <div class="cards-loading-state">
+                        <div class="ui-spinner"></div>
+                        <p>Đang tải danh mục camera...</p>
                     </div>
-
-                    <!-- Secondary Metrics Grid -->
-                    <div class="metrics-grid">
-                        <div class="metric-card">
-                            <div class="metric-label">Detections</div>
-                            <div class="metric-value" id="metricDetections">0</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-label">Active Tracks</div>
-                            <div class="metric-value" id="metricTracks">0</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-label">Processing FPS</div>
-                            <div class="metric-value" id="metricProcessingFps">0.0</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-label">Stream FPS</div>
-                            <div class="metric-value" id="metricStreamFps">0.0</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-label">YOLO Latency</div>
-                            <div class="metric-value latency" id="metricYoloLatency">0.0 ms</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-label">Pipeline Latency</div>
-                            <div class="metric-value latency" id="metricPipelineLatency">0.0 ms</div>
-                        </div>
-                    </div>
-
-                    <div class="card-divider"></div>
-
-                    <!-- Hardware & Model Info -->
-                    <div class="info-block">
-                        <div class="info-title">HARDWARE & MODEL</div>
-                        <div class="info-row">
-                            <span class="info-label">Device:</span>
-                            <span class="info-value" id="infoDevice">CPU</span>
-                        </div>
-                        <div class="info-row">
-                            <span class="info-label">GPU:</span>
-                            <span class="info-value" id="infoGpu">N/A</span>
-                        </div>
-                        <div class="info-row">
-                            <span class="info-label">VRAM:</span>
-                            <span class="info-value" id="infoVram">0.0 MB</span>
-                        </div>
-                        <div class="info-row">
-                            <span class="info-label">Model:</span>
-                            <span class="info-value" id="infoModel">YOLO11s (640x640)</span>
-                        </div>
-                    </div>
-
-                    <div class="card-divider"></div>
-
-                    <!-- Event Statistics -->
-                    <div class="info-block">
-                        <div class="info-title">OCCUPANCY EVENT STATS</div>
-                        <div class="info-row">
-                            <span class="info-label">Events Today:</span>
-                            <span class="info-value highlight" id="infoEventsToday">0</span>
-                        </div>
-                        <div class="info-row">
-                            <span class="info-label">Filtered Fluctuations:</span>
-                            <span class="info-value" id="infoFilteredEvents">0</span>
-                        </div>
-                        <div class="info-row">
-                            <span class="info-label">Last Saved Count:</span>
-                            <span class="info-value" id="infoLastSavedCount">0</span>
-                        </div>
-                        <div class="info-row">
-                            <span class="info-label">Last Event Time:</span>
-                            <span class="info-value" id="infoLastEvent">None</span>
-                        </div>
-                    </div>
-                </section>
+                </div>
             </div>
 
-            <!-- Bottom Section: Recent Occupancy Events -->
-            <section class="events-section card">
-                <div class="section-header">
-                    <div class="section-title">
-                        <span class="title-icon">📋</span>
-                        <h3>Recent Occupancy Events & Snapshots</h3>
+            <!-- Tab 2: Direct HLS Manual Entry -->
+            <div id="tab-direct-hls" class="tab-pane">
+                <div class="custom-source-card">
+                    <div class="source-card-header">
+                        <h3>⚡ Luồng Trực Tiếp HLS (Direct .m3u8)</h3>
+                        <p>Nhập liên kết HLS stream trực tiếp. Hệ thống xử lý qua FFmpeg không qua yt-dlp.</p>
                     </div>
-                    <div class="events-sub">Latest 5 events logged in database</div>
+                    <div class="form-group">
+                        <label for="hlsCustomName" class="form-label">Tên Camera / Vị trí</label>
+                        <input type="text" id="hlsCustomName" class="form-input" placeholder="Ví dụ: Hwy 5 at Pocket Rd">
+                    </div>
+                    <div class="form-group">
+                        <label for="hlsCustomUrl" class="form-label">URL Stream HLS (.m3u8)</label>
+                        <input type="url" id="hlsCustomUrl" class="form-input font-mono" placeholder="https://.../playlist.m3u8">
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" id="btnPreviewDirectHls" class="secondary-btn">
+                            <span class="btn-icon">👁️</span> Xem trước
+                        </button>
+                        <button type="button" id="btnConnectDirectHls" class="primary-btn highlight-btn">
+                            <span class="btn-icon">▶️</span> Sử dụng camera
+                        </button>
+                    </div>
+                    <div id="hlsCustomFeedback" class="feedback-msg"></div>
+                </div>
+            </div>
+
+            <!-- Tab 3: YouTube Live Streams -->
+            <div id="tab-youtube" class="tab-pane">
+                <div class="custom-source-card">
+                    <div class="source-card-header">
+                        <h3>📺 Luồng Trực Tiếp YouTube</h3>
+                        <p>Sử dụng các camera YouTube được định cấu hình sẵn hoặc nhập liên kết YouTube Live.</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="ytPresetSelect" class="form-label">Chọn Camera Định Sẵn</label>
+                        <select id="ytPresetSelect" class="form-select">
+                            <option value="">-- Chọn camera định cấu hình sẵn --</option>
+                        </select>
+                    </div>
+                    <div class="form-divider"><span>HOẶC</span></div>
+                    <div class="form-group">
+                        <label for="ytCustomName" class="form-label">Tên Camera Tùy Chọn</label>
+                        <input type="text" id="ytCustomName" class="form-input" placeholder="Ví dụ: Tokyo Live Stream">
+                    </div>
+                    <div class="form-group">
+                        <label for="ytCustomUrl" class="form-label">URL YouTube Live / Video</label>
+                        <input type="url" id="ytCustomUrl" class="form-input font-mono" placeholder="https://www.youtube.com/watch?v=...">
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" id="btnPreviewYouTube" class="secondary-btn">
+                            <span class="btn-icon">👁️</span> Xem trước
+                        </button>
+                        <button type="button" id="btnConnectYouTube" class="primary-btn highlight-btn">
+                            <span class="btn-icon">▶️</span> Sử dụng camera
+                        </button>
+                    </div>
+                    <div id="ytFeedback" class="feedback-msg"></div>
+                </div>
+            </div>
+
+            <!-- Tab 4: Local Video File -->
+            <div id="tab-local" class="tab-pane">
+                <div class="custom-source-card">
+                    <div class="source-card-header">
+                        <h3>📁 Video Cục Bộ (Local File)</h3>
+                        <p>Chạy tệp video .mp4 có sẵn trên hệ thống cho mục đích thử nghiệm và benchmark.</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="localVideoPath" class="form-label">Đường dẫn tệp video (.mp4, .mkv)</label>
+                        <input type="text" id="localVideoPath" class="form-input font-mono" placeholder="data/test.mp4 hoặc C:\videos\cam1.mp4">
+                    </div>
+                    <div class="form-group checkbox-row">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="localVideoLoop" checked>
+                            <span>Lặp lại video khi kết thúc (Loop on EOF)</span>
+                        </label>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" id="btnConnectLocal" class="primary-btn highlight-btn">
+                            <span class="btn-icon">▶️</span> Sử dụng camera
+                        </button>
+                    </div>
+                    <div id="localFeedback" class="feedback-msg"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- 2. CONNECTING SCREEN (Transition State)                               -->
+    <!-- ===================================================================== -->
+    <div id="connectingScreen" class="view-screen connecting-screen" style="display: none;">
+        <div class="status-modal-card">
+            <div class="connecting-radar">
+                <div class="radar-pulse"></div>
+                <div class="radar-pulse delay-1"></div>
+                <div class="radar-icon">📹</div>
+            </div>
+            <h2 class="status-heading">Đang kết nối camera...</h2>
+            <p class="status-subheading" id="connectingTargetName">Đang khởi tạo luồng video và đợi khung hình đầu tiên...</p>
+            <div class="connecting-progress-bar">
+                <div class="progress-fill"></div>
+            </div>
+            <div class="connecting-status-badges">
+                <span class="status-pill" id="badgeStepReader">1. Khởi động luồng</span>
+                <span class="status-pill" id="badgeStepFrame">2. Chờ khung hình</span>
+                <span class="status-pill" id="badgeStepAi">3. Đồng bộ AI</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- 3. ERROR SCREEN (Connection Failure)                                 -->
+    <!-- ===================================================================== -->
+    <div id="errorScreen" class="view-screen error-screen" style="display: none;">
+        <div class="status-modal-card error-card-box">
+            <div class="error-badge-icon">⚠️</div>
+            <h2 class="status-heading error-title">Không thể kết nối camera</h2>
+            <p class="status-subheading" id="errorMessageText">
+                Không nhận được khung hình hợp lệ từ nguồn video trong thời gian quy định. Vui lòng kiểm tra lại kết nối luồng.
+            </p>
+            <div class="error-details-box" id="errorDebugBox" style="display: none;"></div>
+            <div class="status-btn-group">
+                <button type="button" id="btnRetryConnection" class="primary-btn highlight-btn">
+                    <span class="btn-icon">🔄</span> Thử lại
+                </button>
+                <button type="button" id="btnBackToSelection" class="secondary-btn">
+                    <span class="btn-icon">📋</span> Chọn camera khác
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- 4. MONITORING DASHBOARD (Preserved DATT Dashboard)                    -->
+    <!-- ===================================================================== -->
+    <div id="monitoringScreen" class="view-screen monitoring-screen" style="display: none;">
+        <div class="app-layout">
+            <!-- Sidebar: Controls & Registration -->
+            <aside class="sidebar" id="sidebar">
+                <div class="sidebar-header">
+                    <h2>🎥 Camera Management</h2>
                 </div>
 
-                <div id="eventsContainer" class="events-grid">
-                    <div class="events-empty">No occupancy change events logged yet today.</div>
+                <div class="sidebar-section">
+                    <label for="backendUrlInput" class="input-label">AI Backend URL</label>
+                    <input type="text" id="backendUrlInput" class="text-input" value="http://localhost:8000" placeholder="http://localhost:8000" title="Base URL of AI streaming server">
+                    <span class="input-help">FastAPI proxy auto-relays if Colab tunnel or local.</span>
                 </div>
-            </section>
-        </main>
+
+                <div class="sidebar-section">
+                    <label for="cameraSelect" class="input-label">Select Camera Stream</label>
+                    <select id="cameraSelect" class="select-input">
+                        <option value="" disabled selected>Loading cameras...</option>
+                    </select>
+                    <button type="button" id="switchCameraBtn" class="primary-btn">
+                        <span class="btn-icon">🔄</span>
+                        <span class="btn-text">Switch Camera</span>
+                    </button>
+                    <div id="cameraSwitchFeedback" class="feedback-msg"></div>
+                </div>
+
+                <div class="sidebar-divider"></div>
+
+                <!-- Video Source Manager (Local MP4 & YouTube VOD) -->
+                <div class="sidebar-section">
+                    <label class="input-label">🎬 Video Source Control</label>
+                    <select id="sourceTypeSelect" class="select-input">
+                        <option value="direct_hls">Direct HLS (.m3u8)</option>
+                        <option value="local">Local MP4 Video</option>
+                        <option value="youtube_vod">YouTube VOD</option>
+                        <option value="youtube">YouTube Live</option>
+                    </select>
+                    <input type="text" id="sourceInput" class="text-input" placeholder="Path to .mp4 or stream URL" title="Local file path or URL">
+                    <div class="checkbox-row">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="sourceLoopCheckbox" checked>
+                            <span>Loop Video on EOF</span>
+                        </label>
+                    </div>
+                    <button type="button" id="applySourceBtn" class="secondary-btn">
+                        <span class="btn-icon">▶️</span>
+                        <span class="btn-text">Apply Source</span>
+                    </button>
+                    <div id="sourceFeedback" class="feedback-msg"></div>
+                </div>
+
+                <div class="sidebar-divider"></div>
+
+                <!-- Target Registration & Management -->
+                <div class="sidebar-section">
+                    <label class="input-label">🎯 Target Registration</label>
+                    <input type="text" id="targetNameInput" class="text-input" placeholder="Target Name (e.g. Alice)" required>
+                    <select id="targetColorSelect" class="select-input">
+                        <option value="">Clothing Color: Any</option>
+                        <option value="red">Red</option>
+                        <option value="blue">Blue</option>
+                        <option value="green">Green</option>
+                        <option value="yellow">Yellow</option>
+                        <option value="black">Black</option>
+                        <option value="white">White</option>
+                    </select>
+                    <div class="file-upload-wrapper">
+                        <label for="targetFaceInput" class="file-upload-label">
+                            <span class="file-upload-icon">📷</span>
+                            <span id="targetFaceFilename">Face Image (Optional)</span>
+                        </label>
+                        <input type="file" id="targetFaceInput" accept="image/*" class="file-input-hidden">
+                    </div>
+                    <button type="button" id="registerTargetBtn" class="primary-btn highlight-btn">
+                        <span class="btn-icon">➕</span>
+                        <span class="btn-text">Register Target</span>
+                    </button>
+                    <div id="targetFeedback" class="feedback-msg"></div>
+
+                    <!-- Active Targets List -->
+                    <div class="targets-container">
+                        <div class="targets-header">Registered Targets (<span id="targetCount">0</span>)</div>
+                        <div id="targetsList" class="targets-list">
+                            <div class="target-item-empty">No active targets registered.</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="sidebar-divider"></div>
+
+                <div class="sidebar-section diagnostics">
+                    <div class="diag-row">
+                        <span class="diag-label">Connection:</span>
+                        <span id="sidebarConnStatus" class="badge badge-disconnected">DISCONNECTED</span>
+                    </div>
+                    <div class="diag-row">
+                        <span class="diag-label">Ping Latency:</span>
+                        <span id="pingLatency" class="diag-value">-- ms</span>
+                    </div>
+                    <div class="diag-row">
+                        <span class="diag-label">Telemetry Poll:</span>
+                        <span class="diag-value">1000 ms</span>
+                    </div>
+                    <div class="diag-row">
+                        <span class="diag-label">Events Poll:</span>
+                        <span class="diag-value">10000 ms</span>
+                    </div>
+                </div>
+
+                <div class="sidebar-divider"></div>
+
+                <div class="sidebar-footer">
+                    <div class="footer-title">DATT — AI People Counter</div>
+                    <div class="footer-sub">Hệ thống Giám sát Thông minh</div>
+                    <div class="footer-desc">Realtime Vision & Occupancy Monitoring</div>
+                </div>
+            </aside>
+
+            <!-- Main Dashboard Area -->
+            <main class="main-content" id="mainContent">
+                <!-- Top Source Navigation Header Bar -->
+                <div class="active-source-banner">
+                    <div class="source-banner-left">
+                        <div class="source-cam-title" id="dashHeaderCamName">Camera Name</div>
+                        <div class="source-cam-sub">
+                            <span id="dashHeaderProvider">Caltrans • Direct HLS</span>
+                            <span class="live-indicator-pill" id="dashHeaderStatus">● LIVE</span>
+                        </div>
+                    </div>
+                    <div class="source-banner-right">
+                        <button type="button" id="btnSwitchCameraFromDash" class="btn-switch-cam-hero" title="Quay lại màn hình chọn camera">
+                            <span class="btn-icon">🔄</span>
+                            <span class="btn-text">ĐỔI CAMERA</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Header Bar -->
+                <header class="main-header">
+                    <div class="header-left">
+                        <h1 class="header-title">👥 DATT AI Vision Monitor & Camera Manager</h1>
+                    </div>
+                    <div class="header-right">
+                        <div id="statusBadge" class="status-badge status-disconnected">STATUS: DISCONNECTED</div>
+                    </div>
+                </header>
+
+                <!-- Alert / Notification Banner -->
+                <div id="alertBanner" class="alert-banner alert-warning" style="display: none;"></div>
+
+                <!-- Two-Column Main Dashboard Grid -->
+                <div class="dashboard-grid">
+                    <!-- Left Column (65%): Live Camera Stream -->
+                    <section class="video-section card">
+                        <div class="section-header">
+                            <div class="section-title">
+                                <span class="title-icon">📹</span>
+                                <h3>Live Camera Stream (server-relayed MJPEG)</h3>
+                            </div>
+                            <div class="stream-meta">
+                                <span class="meta-pill" id="streamCamName">Camera: Loading...</span>
+                                <span class="meta-pill" id="streamResolution">640x640</span>
+                                <span class="meta-pill target-fps" id="streamTargetFps">Target 30 FPS</span>
+                            </div>
+                        </div>
+
+                        <div class="video-wrapper">
+                            <img id="videoFeed" class="video-stream-img" src="/video_feed" alt="Realtime AI Video Feed">
+                            <div id="videoErrorOverlay" class="video-overlay" style="display: none;">
+                                <div class="overlay-spinner"></div>
+                                <div class="overlay-title">Video Stream Disconnected</div>
+                                <div class="overlay-sub">Reconnecting automatically in 3 seconds...</div>
+                            </div>
+                        </div>
+                        <div class="video-caption">Server-side MJPEG relay; latest-frame display, target 30 FPS.</div>
+                    </section>
+
+                    <!-- Right Column (35%): Realtime AI Telemetry -->
+                    <section class="telemetry-section card">
+                        <div class="section-header">
+                            <div class="section-title">
+                                <span class="title-icon">📊</span>
+                                <h3>Realtime AI Telemetry</h3>
+                            </div>
+                            <div class="active-cam-indicator">
+                                Active: <strong id="telemActiveCam">Connecting...</strong>
+                            </div>
+                        </div>
+
+                        <!-- Hero Metric: People in View -->
+                        <div class="hero-metric-card">
+                            <div class="hero-metric-label">PEOPLE IN VIEW</div>
+                            <div class="hero-metric-value" id="metricPeopleCount">0</div>
+                        </div>
+
+                        <!-- Secondary Metrics Grid -->
+                        <div class="metrics-grid">
+                            <div class="metric-card">
+                                <div class="metric-label">Detections</div>
+                                <div class="metric-value" id="metricDetections">0</div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-label">Active Tracks</div>
+                                <div class="metric-value" id="metricTracks">0</div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-label">Processing FPS</div>
+                                <div class="metric-value" id="metricProcessingFps">0.0</div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-label">Stream FPS</div>
+                                <div class="metric-value" id="metricStreamFps">0.0</div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-label">YOLO Latency</div>
+                                <div class="metric-value latency" id="metricYoloLatency">0.0 ms</div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-label">Pipeline Latency</div>
+                                <div class="metric-value latency" id="metricPipelineLatency">0.0 ms</div>
+                            </div>
+                        </div>
+
+                        <div class="card-divider"></div>
+
+                        <!-- Hardware & Model Info -->
+                        <div class="info-block">
+                            <div class="info-title">HARDWARE & MODEL</div>
+                            <div class="info-row">
+                                <span class="info-label">Device:</span>
+                                <span class="info-value" id="infoDevice">CPU</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">GPU:</span>
+                                <span class="info-value" id="infoGpu">N/A</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">VRAM:</span>
+                                <span class="info-value" id="infoVram">0.0 MB</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Model:</span>
+                                <span class="info-value" id="infoModel">YOLO11s (640x640)</span>
+                            </div>
+                        </div>
+
+                        <div class="card-divider"></div>
+
+                        <!-- Event Statistics -->
+                        <div class="info-block">
+                            <div class="info-title">OCCUPANCY EVENT STATS</div>
+                            <div class="info-row">
+                                <span class="info-label">Events Today:</span>
+                                <span class="info-value highlight" id="infoEventsToday">0</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Filtered Fluctuations:</span>
+                                <span class="info-value" id="infoFilteredEvents">0</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Last Saved Count:</span>
+                                <span class="info-value" id="infoLastSavedCount">0</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Last Event Time:</span>
+                                <span class="info-value" id="infoLastEvent">None</span>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+
+                <!-- Bottom Section: Recent Occupancy Events -->
+                <section class="events-section card">
+                    <div class="section-header">
+                        <div class="section-title">
+                            <span class="title-icon">📋</span>
+                            <h3>Recent Occupancy Events & Snapshots</h3>
+                        </div>
+                        <div class="events-sub">Latest 5 events logged in database</div>
+                    </div>
+
+                    <div id="eventsContainer" class="events-grid">
+                        <div class="events-empty">No occupancy change events logged yet today.</div>
+                    </div>
+                </section>
+            </main>
+        </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- 5. PREVIEW MODAL (Snapshot first, optional Live Preview)              -->
+    <!-- ===================================================================== -->
+    <div id="previewModal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <div class="modal-header">
+                <div class="modal-title-box">
+                    <span class="modal-badge" id="previewBadgeProvider">Caltrans</span>
+                    <h3 id="previewModalTitle">Xem trước camera</h3>
+                </div>
+                <button type="button" id="closePreviewBtn" class="modal-close-btn" title="Đóng">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="preview-viewport">
+                    <!-- 1. Snapshot Image (Default) -->
+                    <img id="previewImage" src="" alt="Camera Snapshot" class="preview-img-element">
+                    <!-- 2. Live MJPEG Preview Stream -->
+                    <img id="previewStream" src="" alt="Live Preview Stream" class="preview-img-element" style="display: none;">
+                    <div id="previewSpinner" class="preview-loading-overlay" style="display: none;">
+                        <div class="ui-spinner"></div>
+                        <p id="previewLoadingText">Đang tải hình ảnh...</p>
+                    </div>
+                </div>
+                <div class="preview-meta-panel">
+                    <div class="meta-col">
+                        <span class="meta-label">Nguồn phát:</span>
+                        <span class="meta-val font-mono" id="previewStreamUrl">--</span>
+                    </div>
+                    <div class="meta-col">
+                        <span class="meta-label">Loại nguồn:</span>
+                        <span class="meta-val" id="previewSourceType">Direct HLS</span>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="footer-left">
+                    <button type="button" id="btnToggleLivePreview" class="secondary-btn">
+                        <span class="btn-icon">▶️</span> <span id="toggleLiveText">Phát trực tiếp</span>
+                    </button>
+                </div>
+                <div class="footer-right">
+                    <button type="button" id="btnCancelPreview" class="secondary-btn">Hủy</button>
+                    <button type="button" id="btnConfirmSelectCamera" class="primary-btn highlight-btn">
+                        <span class="btn-icon">✔️</span> Sử dụng camera
+                    </button>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Main JavaScript Application -->

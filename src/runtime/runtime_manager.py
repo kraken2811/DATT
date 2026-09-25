@@ -140,7 +140,7 @@ class RuntimeManager:
         while time.time() - t0 < 8.0:
             if self._stop_event.is_set():
                 return
-            if shared_state.get_telemetry().status in ("RUNNING", "ERROR"):
+            if shared_state.get_telemetry().status in ("RUNNING", "ERROR", "IDLE"):
                 break
             time.sleep(0.1)
 

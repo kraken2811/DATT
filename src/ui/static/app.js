@@ -1,39 +1,124 @@
 /**
  * DATT AI Vision Monitor & Camera Manager - Frontend Client
- * Phase 4.4: Stable Browser-Based Monitoring Interface
+ * Phase 4.6: Initial Camera Selection, Public CCTV, Direct HLS & Multi-Source Routing
  *
- * Rules:
- * - Pure Vanilla JavaScript (no frameworks)
- * - Restful polling: Telemetry (1000 ms), Events (10000 ms)
- * - In-place DOM updates only (no full dashboard recreation)
- * - Video stream auto-reconnect on disconnect (3-second retry)
- * - Lazy loaded event snapshot thumbnails
+ * UI States:
+ * - SELECT_CAMERA : Initial selection screen (Public CCTV, Direct HLS, YouTube Live, Local)
+ * - CONNECTING    : Connecting overlay, verifying first frame
+ * - MONITORING    : Active monitoring dashboard
+ * - ERROR         : Connection timeout or failure screen with retry
  */
 
 (function () {
     "use strict";
 
-    // Configuration & State
+    // Application Configuration
     const CONFIG = {
         telemetryIntervalMs: 1000,
         eventsIntervalMs: 10000,
         videoReconnectDelayMs: 3000,
+        connectionTimeoutMs: 16000,
+        sourceStatusPollMs: 500,
         defaultBackendUrl: "http://localhost:8000"
     };
 
+    // UI States
+    const UI_STATE = {
+        SELECT_CAMERA: "SELECT_CAMERA",
+        CONNECTING: "CONNECTING",
+        MONITORING: "MONITORING",
+        ERROR: "ERROR"
+    };
+
+    // Client State
     const state = {
+        uiState: UI_STATE.SELECT_CAMERA,
         backendUrl: CONFIG.defaultBackendUrl,
         activeCameraId: "",
+        activeCameraName: "",
+        activeProvider: "",
+        activeSourceType: "",
+        connectingSourceData: null,
         isSwitchingCamera: false,
         telemetryTimer: null,
         eventsTimer: null,
         videoReconnectTimer: null,
+        connectionTimer: null,
         lastEventsJson: "",
-        consecutiveErrors: 0
+        consecutiveErrors: 0,
+        cctvCameras: [],
+        cctvProvider: "seattle",
+        previewingCamera: null,
+        isPreviewLive: false
     };
 
     // DOM Elements Cache
     const DOM = {
+        // Screens
+        selectionScreen: document.getElementById("selectionScreen"),
+        connectingScreen: document.getElementById("connectingScreen"),
+        errorScreen: document.getElementById("errorScreen"),
+        monitoringScreen: document.getElementById("monitoringScreen"),
+
+        // Connecting & Error UI
+        connectingTargetName: document.getElementById("connectingTargetName"),
+        badgeStepReader: document.getElementById("badgeStepReader"),
+        badgeStepFrame: document.getElementById("badgeStepFrame"),
+        badgeStepAi: document.getElementById("badgeStepAi"),
+        errorMessageText: document.getElementById("errorMessageText"),
+        errorDebugBox: document.getElementById("errorDebugBox"),
+        btnRetryConnection: document.getElementById("btnRetryConnection"),
+        btnBackToSelection: document.getElementById("btnBackToSelection"),
+
+        // Source Header on Dashboard
+        dashHeaderCamName: document.getElementById("dashHeaderCamName"),
+        dashHeaderProvider: document.getElementById("dashHeaderProvider"),
+        dashHeaderStatus: document.getElementById("dashHeaderStatus"),
+        btnSwitchCameraFromDash: document.getElementById("btnSwitchCameraFromDash"),
+
+        // Public CCTV Catalog Elements
+        cctvSearchInput: document.getElementById("cctvSearchInput"),
+        cctvCountBadge: document.getElementById("cctvCountBadge"),
+        refreshCatalogBtn: document.getElementById("refreshCatalogBtn"),
+        cctvCardsGrid: document.getElementById("cctvCardsGrid"),
+
+        // Direct HLS Tab Elements
+        hlsCustomName: document.getElementById("hlsCustomName"),
+        hlsCustomUrl: document.getElementById("hlsCustomUrl"),
+        btnPreviewDirectHls: document.getElementById("btnPreviewDirectHls"),
+        btnConnectDirectHls: document.getElementById("btnConnectDirectHls"),
+        hlsCustomFeedback: document.getElementById("hlsCustomFeedback"),
+
+        // YouTube Tab Elements
+        ytPresetSelect: document.getElementById("ytPresetSelect"),
+        ytCustomName: document.getElementById("ytCustomName"),
+        ytCustomUrl: document.getElementById("ytCustomUrl"),
+        btnPreviewYouTube: document.getElementById("btnPreviewYouTube"),
+        btnConnectYouTube: document.getElementById("btnConnectYouTube"),
+        ytFeedback: document.getElementById("ytFeedback"),
+
+        // Local Video Tab Elements
+        localVideoPath: document.getElementById("localVideoPath"),
+        localVideoLoop: document.getElementById("localVideoLoop"),
+        btnConnectLocal: document.getElementById("btnConnectLocal"),
+        localFeedback: document.getElementById("localFeedback"),
+
+        // Preview Modal Elements
+        previewModal: document.getElementById("previewModal"),
+        closePreviewBtn: document.getElementById("closePreviewBtn"),
+        previewModalTitle: document.getElementById("previewModalTitle"),
+        previewBadgeProvider: document.getElementById("previewBadgeProvider"),
+        previewImage: document.getElementById("previewImage"),
+        previewStream: document.getElementById("previewStream"),
+        previewSpinner: document.getElementById("previewSpinner"),
+        previewStreamUrl: document.getElementById("previewStreamUrl"),
+        previewSourceType: document.getElementById("previewSourceType"),
+        btnToggleLivePreview: document.getElementById("btnToggleLivePreview"),
+        toggleLiveText: document.getElementById("toggleLiveText"),
+        btnCancelPreview: document.getElementById("btnCancelPreview"),
+        btnConfirmSelectCamera: document.getElementById("btnConfirmSelectCamera"),
+
+        // Sidebar / Dashboard Elements
         backendUrlInput: document.getElementById("backendUrlInput"),
         cameraSelect: document.getElementById("cameraSelect"),
         switchCameraBtn: document.getElementById("switchCameraBtn"),
@@ -43,7 +128,7 @@
         statusBadge: document.getElementById("statusBadge"),
         alertBanner: document.getElementById("alertBanner"),
 
-        // Video Elements
+        // Video Feed Elements
         videoFeed: document.getElementById("videoFeed"),
         videoErrorOverlay: document.getElementById("videoErrorOverlay"),
         streamCamName: document.getElementById("streamCamName"),
@@ -59,7 +144,7 @@
         metricYoloLatency: document.getElementById("metricYoloLatency"),
         metricPipelineLatency: document.getElementById("metricPipelineLatency"),
 
-        // Info Elements
+        // Hardware & Model Elements
         infoDevice: document.getElementById("infoDevice"),
         infoGpu: document.getElementById("infoGpu"),
         infoVram: document.getElementById("infoVram"),
@@ -72,7 +157,7 @@
         // Events Elements
         eventsContainer: document.getElementById("eventsContainer"),
 
-        // Video Source Elements
+        // Video Source Sidebar Elements
         sourceTypeSelect: document.getElementById("sourceTypeSelect"),
         sourceInput: document.getElementById("sourceInput"),
         sourceLoopCheckbox: document.getElementById("sourceLoopCheckbox"),
@@ -92,51 +177,672 @@
 
     /**
      * Resolve API endpoint URL.
-     * Uses relative path to hit FastAPI proxy, or appends backend query if configured.
      */
     function apiUrl(path) {
         return path;
     }
 
     /**
-     * Update connection badges and status headers.
+     * UI State Machine Transition Controller.
      */
-    function updateStatus(status, errorMessage) {
-        const cleanStatus = (status || "DISCONNECTED").toUpperCase();
+    function setUiState(newState, meta) {
+        state.uiState = newState;
+        meta = meta || {};
 
-        // Header status badge
-        DOM.statusBadge.textContent = `STATUS: ${cleanStatus}`;
-        DOM.statusBadge.className = `status-badge status-${cleanStatus.toLowerCase()}`;
+        // Hide all screens first
+        DOM.selectionScreen.style.display = "none";
+        DOM.connectingScreen.style.display = "none";
+        DOM.errorScreen.style.display = "none";
+        DOM.monitoringScreen.style.display = "none";
 
-        // Sidebar status badge
-        DOM.sidebarConnStatus.textContent = cleanStatus;
-        DOM.sidebarConnStatus.className = `badge badge-${cleanStatus.toLowerCase()}`;
+        if (newState === UI_STATE.SELECT_CAMERA) {
+            DOM.selectionScreen.style.display = "flex";
+            stopMonitoringTimers();
+            stopConnectionPolling();
+            fetchPublicCctvCameras();
+            fetchConfigCameras();
+        } else if (newState === UI_STATE.CONNECTING) {
+            DOM.connectingScreen.style.display = "flex";
+            stopMonitoringTimers();
+            const camName = meta.name || "Camera";
+            DOM.connectingTargetName.textContent = `Đang kết nối luồng "${camName}" và đợi khung hình đầu tiên...`;
+            resetConnectingSteps();
+        } else if (newState === UI_STATE.ERROR) {
+            DOM.errorScreen.style.display = "flex";
+            stopMonitoringTimers();
+            stopConnectionPolling();
+            DOM.errorMessageText.textContent = meta.message || "Không thể kết nối camera. Vui lòng kiểm tra lại luồng phát.";
+            if (meta.debug) {
+                DOM.errorDebugBox.style.display = "block";
+                DOM.errorDebugBox.textContent = `Chi tiết lỗi: ${meta.debug}`;
+            } else {
+                DOM.errorDebugBox.style.display = "none";
+            }
+        } else if (newState === UI_STATE.MONITORING) {
+            DOM.monitoringScreen.style.display = "block";
+            stopConnectionPolling();
+            updateSourceHeader(meta.name, meta.provider, meta.source_type);
+            triggerVideoRefresh();
+            startMonitoringTimers();
+        }
+    }
 
-        // Alert Banner
-        if (cleanStatus === "ERROR") {
-            DOM.alertBanner.style.display = "block";
-            DOM.alertBanner.className = "alert-banner alert-error";
-            DOM.alertBanner.innerHTML = `⚠️ <strong>Camera Status: ERROR</strong> — ${errorMessage || "Stream ended or camera disconnected unexpectedly."}`;
-        } else if (cleanStatus === "WARNING") {
-            DOM.alertBanner.style.display = "block";
-            DOM.alertBanner.className = "alert-banner alert-warning";
-            DOM.alertBanner.innerHTML = `⚠️ <strong>Camera Warning:</strong> ${errorMessage || "Frame delay detected (>5s)..."}`;
-        } else if (cleanStatus === "DISCONNECTED") {
-            DOM.alertBanner.style.display = "block";
-            DOM.alertBanner.className = "alert-banner alert-warning";
-            DOM.alertBanner.innerHTML = `📡 <strong>Connecting to AI pipeline...</strong> Ensure <code>python src/main.py</code> is running.`;
-        } else if (cleanStatus === "SWITCHING") {
-            DOM.alertBanner.style.display = "block";
-            DOM.alertBanner.className = "alert-banner alert-warning";
-            DOM.alertBanner.innerHTML = `🔄 <strong>Switching camera stream...</strong> Please wait.`;
-        } else {
-            // RUNNING: clear any alert banner cleanly
-            DOM.alertBanner.style.display = "none";
+    function resetConnectingSteps() {
+        DOM.badgeStepReader.className = "status-pill active-step";
+        DOM.badgeStepFrame.className = "status-pill";
+        DOM.badgeStepAi.className = "status-pill";
+    }
+
+    function updateSourceHeader(name, provider, sourceType) {
+        state.activeCameraName = name || state.activeCameraName || "Active Camera";
+        state.activeProvider = provider || state.activeProvider || "Camera Source";
+        state.activeSourceType = sourceType || state.activeSourceType || "HLS";
+
+        DOM.dashHeaderCamName.textContent = state.activeCameraName;
+        DOM.dashHeaderProvider.textContent = `${state.activeProvider} • ${state.activeSourceType}`;
+        DOM.dashHeaderStatus.textContent = "● LIVE";
+    }
+
+    /**
+     * Start/Stop Polling Timers.
+     */
+    function startMonitoringTimers() {
+        stopMonitoringTimers();
+        pollTelemetry();
+        pollEvents();
+        loadTargets();
+        state.telemetryTimer = setInterval(pollTelemetry, CONFIG.telemetryIntervalMs);
+        state.eventsTimer = setInterval(pollEvents, CONFIG.eventsIntervalMs);
+    }
+
+    function stopMonitoringTimers() {
+        if (state.telemetryTimer) {
+            clearInterval(state.telemetryTimer);
+            state.telemetryTimer = null;
+        }
+        if (state.eventsTimer) {
+            clearInterval(state.eventsTimer);
+            state.eventsTimer = null;
+        }
+    }
+
+    function stopConnectionPolling() {
+        if (state.connectionTimer) {
+            clearInterval(state.connectionTimer);
+            state.connectionTimer = null;
         }
     }
 
     /**
-     * Poll Realtime AI Telemetry (every 1000 ms).
+     * Switch Tabs on Camera Selection Screen.
+     */
+    function initTabs() {
+        const tabBtns = document.querySelectorAll(".source-tab-btn");
+        tabBtns.forEach(btn => {
+            btn.addEventListener("click", () => {
+                const targetId = btn.getAttribute("data-tab");
+                tabBtns.forEach(b => b.classList.remove("active"));
+                btn.classList.add("active");
+
+                document.querySelectorAll(".tab-pane").forEach(pane => {
+                    pane.classList.remove("active");
+                });
+                const targetPane = document.getElementById(targetId);
+                if (targetPane) {
+                    targetPane.classList.add("active");
+                }
+            });
+        });
+    }
+
+    /**
+     * Provider Selector (Seattle SDOT vs Caltrans).
+     */
+    function initProviderSelector() {
+        const providerBtns = document.querySelectorAll(".provider-btn");
+        providerBtns.forEach(btn => {
+            btn.addEventListener("click", () => {
+                const provider = btn.getAttribute("data-provider");
+                providerBtns.forEach(b => b.classList.remove("active"));
+                btn.classList.add("active");
+                state.cctvProvider = provider;
+                if (DOM.cctvSearchInput) {
+                    DOM.cctvSearchInput.value = "";
+                }
+                fetchPublicCctvCameras(false);
+            });
+        });
+    }
+
+    /**
+     * Fetch & Render Public CCTV Cameras (Seattle SDOT or Caltrans).
+     */
+    async function fetchPublicCctvCameras(forceRefresh) {
+        try {
+            DOM.cctvCountBadge.textContent = "Đang tải danh mục...";
+            const provider = state.cctvProvider || "seattle";
+            const refreshParam = forceRefresh ? "&refresh=true" : "";
+            const url = apiUrl(`/api/public_cameras?provider=${encodeURIComponent(provider)}${refreshParam}`);
+            const resp = await fetch(url);
+            if (resp.ok) {
+                const data = await resp.json();
+                state.cctvCameras = data.cameras || [];
+                const providerLabel = provider === "seattle" ? "Seattle SDOT" : "Caltrans";
+                DOM.cctvCountBadge.textContent = `Hiển thị ${state.cctvCameras.length} camera (${providerLabel})`;
+                renderCctvCards(state.cctvCameras);
+            } else {
+                DOM.cctvCountBadge.textContent = "Lỗi tải camera";
+                DOM.cctvCardsGrid.innerHTML = `
+                    <div class="cards-loading-state">
+                        <p style="color:#ef4444;">⚠️ Không thể tải danh mục camera CCTV. Vui lòng bấm làm mới.</p>
+                    </div>`;
+            }
+        } catch (err) {
+            DOM.cctvCountBadge.textContent = "Lỗi kết nối";
+            DOM.cctvCardsGrid.innerHTML = `
+                <div class="cards-loading-state">
+                    <p style="color:#ef4444;">⚠️ Lỗi kết nối mạng: ${err.message}</p>
+                </div>`;
+        }
+    }
+
+    /**
+     * Render CCTV Cards in Responsive Grid.
+     */
+    function renderCctvCards(cameras) {
+        if (!cameras || cameras.length === 0) {
+            DOM.cctvCardsGrid.innerHTML = `
+                <div class="cards-loading-state">
+                    <p>Không tìm thấy camera nào phù hợp với từ khóa.</p>
+                </div>`;
+            return;
+        }
+
+        DOM.cctvCardsGrid.innerHTML = cameras.map(cam => {
+            const safeName = escapeHtml(cam.name);
+            const safeId = escapeHtml(cam.id);
+            const safeStream = escapeHtml(cam.stream_url);
+            const safeSnapshot = escapeHtml(cam.snapshot_url || "");
+            const provider = escapeHtml(cam.provider || (state.cctvProvider === "seattle" ? "Seattle SDOT" : "Caltrans"));
+            const sourceType = escapeHtml(cam.source_type || "direct_hls");
+            const resBadge = cam.resolution ? `<span class="cctv-tag font-mono">${escapeHtml(cam.resolution)}</span>` : "";
+            const proxySnapshot = safeSnapshot ? `/api/camera_snapshot?url=${encodeURIComponent(cam.snapshot_url)}` : "";
+
+            return `
+                <div class="cctv-card" id="card_${safeId}">
+                    <div class="cctv-thumb-box">
+                        <img src="${proxySnapshot || '/static/favicon.ico'}"
+                             alt="${safeName}"
+                             class="cctv-thumb-img"
+                             loading="lazy"
+                             onerror="this.onerror=null;this.src='/static/favicon.ico';">
+                        <div class="cctv-status-badge">
+                            <span class="pulse-dot"></span> LIVE
+                        </div>
+                    </div>
+                    <div class="cctv-card-body">
+                        <h4 class="cctv-card-title">${safeName}</h4>
+                        <div class="cctv-meta-row">
+                            <span>Provider: <strong>${provider}</strong></span>
+                            ${resBadge}
+                            <span class="cctv-tag">${sourceType}</span>
+                        </div>
+                        <div class="cctv-card-actions">
+                            <button type="button" class="btn-preview-card"
+                                    onclick="window.dattPreviewCamera('${safeId}', '${safeName}', '${safeStream}', '${safeSnapshot}', '${provider}', '${sourceType}')">
+                                👁️ Xem thử
+                            </button>
+                            <button type="button" class="btn-select-card"
+                                    onclick="window.dattSelectCamera('${safeName}', '${safeStream}', '${sourceType}', '${provider}')">
+                                ▶️ Chọn
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join("");
+    }
+
+    /**
+     * Real-time Local Search Filter for CCTV Cards.
+     */
+    function initSearch() {
+        DOM.cctvSearchInput.addEventListener("input", (e) => {
+            const query = e.target.value.trim().toLowerCase();
+            if (!query) {
+                DOM.cctvCountBadge.textContent = `Hiển thị ${state.cctvCameras.length} camera`;
+                renderCctvCards(state.cctvCameras);
+                return;
+            }
+
+            const filtered = state.cctvCameras.filter(c => {
+                const name = (c.name || "").toLowerCase();
+                const streamName = (c.stream_name || "").toLowerCase();
+                const district = (c.district || "").toLowerCase();
+                const county = (c.county || "").toLowerCase();
+                const city = (c.city || "").toLowerCase();
+                return (
+                    name.includes(query) ||
+                    streamName.includes(query) ||
+                    district.includes(query) ||
+                    county.includes(query) ||
+                    city.includes(query)
+                );
+            });
+
+            DOM.cctvCountBadge.textContent = `Tìm thấy ${filtered.length} / ${state.cctvCameras.length} camera`;
+            renderCctvCards(filtered);
+        });
+
+        DOM.refreshCatalogBtn.addEventListener("click", () => {
+            fetchPublicCctvCameras(true);
+        });
+    }
+
+    /**
+     * Preview Modal Controller (Snapshot first, optional live stream).
+     */
+    window.dattPreviewCamera = function (id, name, streamUrl, snapshotUrl, provider, sourceType) {
+        state.previewingCamera = { id, name, streamUrl, snapshotUrl, provider, sourceType };
+        state.isPreviewLive = false;
+
+        DOM.previewModalTitle.textContent = `Xem trước: ${name}`;
+        DOM.previewBadgeProvider.textContent = provider || "Caltrans";
+        DOM.previewStreamUrl.textContent = streamUrl || "--";
+        DOM.previewSourceType.textContent = sourceType || "Direct HLS";
+
+        // Snapshot first
+        DOM.previewStream.style.display = "none";
+        DOM.previewStream.src = "";
+        DOM.previewImage.style.display = "block";
+        DOM.previewSpinner.style.display = "none";
+        DOM.toggleLiveText.textContent = "Phát trực tiếp";
+
+        const proxySnapshot = snapshotUrl ? `/api/camera_snapshot?url=${encodeURIComponent(snapshotUrl)}` : "";
+        DOM.previewImage.src = proxySnapshot || "/static/favicon.ico";
+
+        DOM.previewModal.style.display = "flex";
+    };
+
+    async function closePreview() {
+        DOM.previewModal.style.display = "none";
+        DOM.previewStream.src = "";
+        DOM.previewStream.style.display = "none";
+        state.isPreviewLive = false;
+        state.previewingCamera = null;
+
+        // Clean up preview resources on backend
+        try {
+            await fetch(apiUrl("/api/stop_preview"), { method: "POST" });
+        } catch (e) {
+            // suppress
+        }
+    }
+
+    async function toggleLivePreview() {
+        if (!state.previewingCamera || !state.previewingCamera.streamUrl) return;
+
+        if (!state.isPreviewLive) {
+            // Switch to Live Preview
+            state.isPreviewLive = true;
+            DOM.previewImage.style.display = "none";
+            DOM.previewStream.style.display = "block";
+            DOM.previewSpinner.style.display = "flex";
+            DOM.previewLoadingText.textContent = "Đang kết nối luồng xem trước...";
+            DOM.toggleLiveText.textContent = "Xem ảnh chụp (Snapshot)";
+
+            DOM.previewStream.onload = () => {
+                DOM.previewSpinner.style.display = "none";
+            };
+
+            const streamUrl = state.previewingCamera.streamUrl;
+            const provider = state.previewingCamera.provider || "";
+            DOM.previewStream.src = `/api/preview_feed?url=${encodeURIComponent(streamUrl)}&provider=${encodeURIComponent(provider)}&t=${Date.now()}`;
+        } else {
+            // Switch back to Snapshot
+            state.isPreviewLive = false;
+            DOM.previewStream.style.display = "none";
+            DOM.previewStream.src = "";
+            DOM.previewImage.style.display = "block";
+            DOM.previewSpinner.style.display = "none";
+            DOM.toggleLiveText.textContent = "Phát trực tiếp";
+
+            try {
+                await fetch(apiUrl("/api/stop_preview"), { method: "POST" });
+            } catch (e) {}
+        }
+    }
+
+    /**
+     * Primary Camera Selection & Connection Verification Sequence.
+     * Criteria: frames_received > 0, frame_age_seconds < 5.0, stream_alive is true.
+     */
+    window.dattSelectCamera = async function (name, streamUrl, sourceType, provider) {
+        await closePreview();
+
+        const sourceData = {
+            name: name,
+            source: streamUrl,
+            stream_url: streamUrl,
+            source_type: sourceType || "direct_hls",
+            provider: provider || "Caltrans"
+        };
+        state.connectingSourceData = sourceData;
+
+        // Transition to CONNECTING state
+        setUiState(UI_STATE.CONNECTING, { name: name });
+
+        try {
+            // 1. Tell backend to stop old source & start new source
+            const resp = await fetch(apiUrl("/api/select_source"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    source_type: sourceData.source_type,
+                    source: sourceData.source,
+                    url: sourceData.source,
+                    name: sourceData.name,
+                    provider: sourceData.provider
+                })
+            });
+
+            if (!resp.ok) {
+                const errData = await resp.json().catch(() => ({}));
+                setUiState(UI_STATE.ERROR, {
+                    message: "Không thể gửi yêu cầu kết nối camera tới máy chủ.",
+                    debug: errData.message || resp.statusText
+                });
+                return;
+            }
+
+            DOM.badgeStepReader.className = "status-pill active-step";
+
+            // 2. Poll /api/source_status until verified or timeout
+            pollConnectionVerification(sourceData);
+
+        } catch (err) {
+            setUiState(UI_STATE.ERROR, {
+                message: "Lỗi mạng khi kết nối camera.",
+                debug: err.message
+            });
+        }
+    };
+
+    function pollConnectionVerification(sourceData) {
+        stopConnectionPolling();
+        const startConnectTime = Date.now();
+
+        state.connectionTimer = setInterval(async () => {
+            const elapsed = Date.now() - startConnectTime;
+
+            // Timeout check
+            if (elapsed > CONFIG.connectionTimeoutMs) {
+                stopConnectionPolling();
+                setUiState(UI_STATE.ERROR, {
+                    message: `Không nhận được khung hình từ camera "${sourceData.name}" sau 15 giây.`,
+                    debug: "Connection verification timed out (first frame not arrived)"
+                });
+                return;
+            }
+
+            try {
+                const resp = await fetch(apiUrl("/api/source_status"));
+                if (resp.ok) {
+                    const data = await resp.json();
+
+                    // Step badge updates
+                    if (data.status === "RUNNING" || data.status === "SWITCHING") {
+                        DOM.badgeStepReader.className = "status-pill active-step";
+                    }
+                    if (data.frames_received > 0) {
+                        DOM.badgeStepFrame.className = "status-pill active-step";
+                    }
+
+                    // Successful Connection Criteria:
+                    // 1. frames_received > 0
+                    // 2. frame_age_seconds is recent (< 5.0s)
+                    // 3. stream_alive is true
+                    // 4. status is RUNNING
+                    const framesOk = (data.frames_received > 0);
+                    const ageOk = (data.frame_age_seconds <= 5.0);
+                    const aliveOk = (data.stream_alive === true);
+                    const statusOk = (data.status === "RUNNING");
+
+                    if (framesOk && ageOk && aliveOk && statusOk) {
+                        DOM.badgeStepAi.className = "status-pill active-step";
+                        stopConnectionPolling();
+
+                        // Short delay to let AI pipeline finish first inference frame cleanly
+                        setTimeout(() => {
+                            setUiState(UI_STATE.MONITORING, {
+                                name: sourceData.name,
+                                provider: sourceData.provider,
+                                source_type: sourceData.source_type
+                            });
+                        }, 400);
+                        return;
+                    }
+
+                    if (data.status === "ERROR") {
+                        stopConnectionPolling();
+                        setUiState(UI_STATE.ERROR, {
+                            message: `Camera báo lỗi: ${data.error_reason || "Mất kết nối luồng"}`,
+                            debug: data.error_reason
+                        });
+                        return;
+                    }
+                }
+            } catch (err) {
+                // Ignore transient network blips during polling
+            }
+        }, CONFIG.sourceStatusPollMs);
+    }
+
+    /**
+     * Stop Camera & Return to Selection.
+     */
+    async function stopActiveCameraAndReturn() {
+        try {
+            await fetch(apiUrl("/api/stop_camera"), { method: "POST" });
+        } catch (e) {}
+
+        state.activeCameraId = "";
+        state.activeCameraName = "";
+        state.connectingSourceData = null;
+        setUiState(UI_STATE.SELECT_CAMERA);
+    }
+
+    /**
+     * Manual Direct HLS Tab Setup.
+     */
+    function initDirectHlsTab() {
+        DOM.btnPreviewDirectHls.addEventListener("click", () => {
+            const url = DOM.hlsCustomUrl.value.trim();
+            const name = DOM.hlsCustomName.value.trim() || "Custom HLS Camera";
+            if (!url) {
+                DOM.hlsCustomFeedback.className = "feedback-msg error";
+                DOM.hlsCustomFeedback.textContent = "Vui lòng nhập URL stream HLS (.m3u8).";
+                return;
+            }
+            DOM.hlsCustomFeedback.textContent = "";
+            window.dattPreviewCamera("custom_hls", name, url, "", "Direct HLS", "direct_hls");
+        });
+
+        DOM.btnConnectDirectHls.addEventListener("click", () => {
+            const url = DOM.hlsCustomUrl.value.trim();
+            const name = DOM.hlsCustomName.value.trim() || "Custom HLS Camera";
+            if (!url) {
+                DOM.hlsCustomFeedback.className = "feedback-msg error";
+                DOM.hlsCustomFeedback.textContent = "Vui lòng nhập URL stream HLS (.m3u8).";
+                return;
+            }
+            DOM.hlsCustomFeedback.textContent = "";
+            window.dattSelectCamera(name, url, "direct_hls", "Direct HLS");
+        });
+    }
+
+    /**
+     * YouTube Live Tab Setup.
+     */
+    async function fetchConfigCameras() {
+        try {
+            const resp = await fetch(apiUrl("/cameras"));
+            if (resp.ok) {
+                const data = await resp.json();
+                const cameras = data.cameras || [];
+
+                DOM.ytPresetSelect.innerHTML = '<option value="">-- Chọn camera định cấu hình sẵn --</option>';
+                cameras.forEach(c => {
+                    const opt = document.createElement("option");
+                    opt.value = c.id;
+                    opt.textContent = `${c.name} (${c.type})`;
+                    opt.dataset.url = c.url;
+                    opt.dataset.name = c.name;
+                    opt.dataset.type = c.type;
+                    DOM.ytPresetSelect.appendChild(opt);
+                });
+
+                // Also populate sidebar select
+                DOM.cameraSelect.innerHTML = "";
+                cameras.forEach(c => {
+                    const opt = document.createElement("option");
+                    opt.value = c.id;
+                    opt.textContent = `${c.name} (${c.type})`;
+                    DOM.cameraSelect.appendChild(opt);
+                });
+            }
+        } catch (e) {}
+    }
+
+    function initYouTubeTab() {
+        DOM.ytPresetSelect.addEventListener("change", (e) => {
+            const selectedOpt = e.target.selectedOptions[0];
+            if (selectedOpt && selectedOpt.dataset.url) {
+                DOM.ytCustomName.value = selectedOpt.dataset.name || "";
+                DOM.ytCustomUrl.value = selectedOpt.dataset.url || "";
+            }
+        });
+
+        DOM.btnPreviewYouTube.addEventListener("click", () => {
+            const url = DOM.ytCustomUrl.value.trim();
+            const name = DOM.ytCustomName.value.trim() || "YouTube Stream";
+            if (!url) {
+                DOM.ytFeedback.className = "feedback-msg error";
+                DOM.ytFeedback.textContent = "Vui lòng chọn hoặc nhập liên kết YouTube.";
+                return;
+            }
+            DOM.ytFeedback.textContent = "";
+            window.dattPreviewCamera("custom_yt", name, url, "", "YouTube", "youtube");
+        });
+
+        DOM.btnConnectYouTube.addEventListener("click", () => {
+            const url = DOM.ytCustomUrl.value.trim();
+            const name = DOM.ytCustomName.value.trim() || "YouTube Stream";
+            if (!url) {
+                DOM.ytFeedback.className = "feedback-msg error";
+                DOM.ytFeedback.textContent = "Vui lòng chọn hoặc nhập liên kết YouTube.";
+                return;
+            }
+            DOM.ytFeedback.textContent = "";
+            window.dattSelectCamera(name, url, "youtube", "YouTube Live");
+        });
+    }
+
+    /**
+     * Local Video Tab Setup.
+     */
+    function initLocalVideoTab() {
+        DOM.btnConnectLocal.addEventListener("click", () => {
+            const path = DOM.localVideoPath.value.trim();
+            if (!path) {
+                DOM.localFeedback.className = "feedback-msg error";
+                DOM.localFeedback.textContent = "Vui lòng nhập đường dẫn tệp video cục bộ.";
+                return;
+            }
+            DOM.localFeedback.textContent = "";
+            window.dattSelectCamera("Local Video", path, "local", "Local Video");
+        });
+    }
+
+    /**
+     * Preview Modal Actions Setup.
+     */
+    function initPreviewModal() {
+        DOM.closePreviewBtn.addEventListener("click", closePreview);
+        DOM.btnCancelPreview.addEventListener("click", closePreview);
+        DOM.btnToggleLivePreview.addEventListener("click", toggleLivePreview);
+
+        DOM.btnConfirmSelectCamera.addEventListener("click", () => {
+            if (state.previewingCamera) {
+                const cam = state.previewingCamera;
+                window.dattSelectCamera(cam.name, cam.streamUrl, cam.sourceType, cam.provider);
+            }
+        });
+
+        // Close on escape key
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape" && DOM.previewModal.style.display !== "none") {
+                closePreview();
+            }
+        });
+    }
+
+    /**
+     * Error & Retrying Actions Setup.
+     */
+    function initErrorActions() {
+        DOM.btnRetryConnection.addEventListener("click", () => {
+            if (state.connectingSourceData) {
+                const d = state.connectingSourceData;
+                window.dattSelectCamera(d.name, d.source, d.source_type, d.provider);
+            } else {
+                setUiState(UI_STATE.SELECT_CAMERA);
+            }
+        });
+
+        DOM.btnBackToSelection.addEventListener("click", () => {
+            setUiState(UI_STATE.SELECT_CAMERA);
+        });
+
+        // Switch camera button from monitoring dashboard
+        DOM.btnSwitchCameraFromDash.addEventListener("click", stopActiveCameraAndReturn);
+    }
+
+    /**
+     * Video Stream MJPEG Reconnect Logic.
+     */
+    function triggerVideoRefresh() {
+        if (!DOM.videoFeed) return;
+        DOM.videoErrorOverlay.style.display = "none";
+        DOM.videoFeed.src = `/video_feed?t=${Date.now()}`;
+    }
+
+    function setupVideoStream() {
+        if (!DOM.videoFeed) return;
+
+        DOM.videoFeed.onerror = function () {
+            DOM.videoErrorOverlay.style.display = "flex";
+            if (!state.videoReconnectTimer) {
+                state.videoReconnectTimer = setTimeout(() => {
+                    state.videoReconnectTimer = null;
+                    if (state.uiState === UI_STATE.MONITORING) {
+                        triggerVideoRefresh();
+                    }
+                }, CONFIG.videoReconnectDelayMs);
+            }
+        };
+
+        DOM.videoFeed.onload = function () {
+            DOM.videoErrorOverlay.style.display = "none";
+            if (state.videoReconnectTimer) {
+                clearTimeout(state.videoReconnectTimer);
+                state.videoReconnectTimer = null;
+            }
+        };
+    }
+
+    /**
+     * Poll Realtime AI Telemetry.
      */
     async function pollTelemetry() {
         const startTime = performance.now();
@@ -159,24 +865,16 @@
         }
     }
 
-    /**
-     * Apply telemetry metrics cleanly into existing DOM elements.
-     */
     function applyTelemetry(data) {
-        // Prioritize camera_status from backend, falling back to status
         const status = state.isSwitchingCamera ? "SWITCHING" : (data.camera_status || data.status || "DISCONNECTED");
         updateStatus(status, data.error_message);
 
-        // Active Camera Name
-        const camName = data.camera_name || data.camera_id || "Camera";
+        const camName = data.camera_name || data.camera_id || state.activeCameraName || "Camera";
         DOM.telemActiveCam.textContent = camName;
         DOM.streamCamName.textContent = `Camera: ${camName}`;
         DOM.streamResolution.textContent = data.input_size || "640x640";
 
-        // Hero Metric: People in View
         DOM.metricPeopleCount.textContent = data.people_count !== undefined ? data.people_count : 0;
-
-        // Secondary Metrics
         DOM.metricDetections.textContent = data.detection_count || 0;
         DOM.metricTracks.textContent = data.track_count || 0;
         DOM.metricProcessingFps.textContent = Number(data.processing_fps || 0).toFixed(1);
@@ -184,111 +882,52 @@
         DOM.metricYoloLatency.textContent = `${Number(data.yolo_latency_ms || 0).toFixed(1)} ms`;
         DOM.metricPipelineLatency.textContent = `${Number(data.pipeline_latency_ms || 0).toFixed(1)} ms`;
 
-        // Hardware & Model
         DOM.infoDevice.textContent = data.device || "CPU";
         DOM.infoGpu.textContent = data.gpu_name || "N/A";
         DOM.infoVram.textContent = `${Number(data.vram_mb || 0).toFixed(1)} MB`;
         DOM.infoModel.textContent = `${data.model_name || "YOLO11s"} (${data.input_size || "640x640"})`;
 
-        // Event Statistics
         DOM.infoEventsToday.textContent = data.event_count_today || 0;
         DOM.infoFilteredEvents.textContent = data.filtered_event_count || 0;
         DOM.infoLastSavedCount.textContent = data.last_saved_people_count || 0;
         DOM.infoLastEvent.textContent = data.last_event_time || data.last_event || "None";
-
-        // Sync dropdown selection if active camera changed externally
-        if (data.camera_id && data.camera_id !== state.activeCameraId && !state.isSwitchingCamera) {
-            state.activeCameraId = data.camera_id;
-            if (DOM.cameraSelect.value !== data.camera_id) {
-                DOM.cameraSelect.value = data.camera_id;
-            }
-        }
     }
 
     function handleTelemetryError() {
         state.consecutiveErrors++;
         DOM.pingLatency.textContent = "-- ms";
-        // Do not trigger error/disconnect on transient network or Colab latency (require 3 consecutive failures)
         if (state.consecutiveErrors >= 3) {
             updateStatus("DISCONNECTED", "AI Server connection lost");
         }
     }
 
-    /**
-     * Fetch Camera Configuration List.
-     */
-    async function fetchCameras() {
-        try {
-            const response = await fetch(apiUrl("/cameras"));
-            if (response.ok) {
-                const data = await response.json();
-                const cameras = data.cameras || [];
-                const activeId = data.active_camera_id || (cameras[0] ? cameras[0].id : "");
+    function updateStatus(status, errorMessage) {
+        const cleanStatus = (status || "DISCONNECTED").toUpperCase();
 
-                state.activeCameraId = activeId;
-                DOM.cameraSelect.innerHTML = "";
+        DOM.statusBadge.textContent = `STATUS: ${cleanStatus}`;
+        DOM.statusBadge.className = `status-badge status-${cleanStatus.toLowerCase()}`;
+        DOM.sidebarConnStatus.textContent = cleanStatus;
+        DOM.sidebarConnStatus.className = `badge badge-${cleanStatus.toLowerCase()}`;
 
-                if (cameras.length === 0) {
-                    DOM.cameraSelect.innerHTML = '<option value="" disabled>No cameras configured</option>';
-                    return;
-                }
-
-                cameras.forEach(cam => {
-                    const opt = document.createElement("option");
-                    opt.value = cam.id;
-                    opt.textContent = `${cam.name} (${cam.type})`;
-                    if (cam.id === activeId) {
-                        opt.selected = true;
-                    }
-                    DOM.cameraSelect.appendChild(opt);
-                });
-            }
-        } catch (err) {
-            DOM.cameraSelect.innerHTML = '<option value="" disabled>Failed to load cameras</option>';
+        if (cleanStatus === "ERROR") {
+            DOM.alertBanner.style.display = "block";
+            DOM.alertBanner.className = "alert-banner alert-error";
+            DOM.alertBanner.innerHTML = `⚠️ <strong>Camera Status: ERROR</strong> — ${errorMessage || "Stream ended or camera disconnected unexpectedly."}`;
+        } else if (cleanStatus === "WARNING") {
+            DOM.alertBanner.style.display = "block";
+            DOM.alertBanner.className = "alert-banner alert-warning";
+            DOM.alertBanner.innerHTML = `⚠️ <strong>Camera Warning:</strong> ${errorMessage || "Frame delay detected (>5s)..."}`;
+        } else if (cleanStatus === "DISCONNECTED") {
+            DOM.alertBanner.style.display = "block";
+            DOM.alertBanner.className = "alert-banner alert-warning";
+            DOM.alertBanner.innerHTML = `📡 <strong>Connecting to AI pipeline...</strong> Ensure <code>python src/main.py</code> is running.`;
+        } else {
+            DOM.alertBanner.style.display = "none";
         }
     }
 
     /**
-     * Switch Active Camera.
-     */
-    async function switchCamera() {
-        const selectedId = DOM.cameraSelect.value;
-        if (!selectedId || state.isSwitchingCamera) return;
-
-        state.isSwitchingCamera = true;
-        DOM.switchCameraBtn.disabled = true;
-        DOM.switchCameraBtn.querySelector(".btn-text").textContent = "Switching...";
-        DOM.cameraSwitchFeedback.className = "feedback-msg";
-        DOM.cameraSwitchFeedback.textContent = `Switching to ${selectedId}...`;
-        updateStatus("SWITCHING");
-
-        try {
-            const response = await fetch(apiUrl(`/switch_camera?id=${encodeURIComponent(selectedId)}`));
-            const data = await response.json();
-
-            if (response.ok && data.status === "ok") {
-                state.activeCameraId = selectedId;
-                DOM.cameraSwitchFeedback.className = "feedback-msg success";
-                DOM.cameraSwitchFeedback.textContent = `Switched: ${data.camera_name || selectedId}`;
-                triggerVideoRefresh();
-            } else {
-                DOM.cameraSwitchFeedback.className = "feedback-msg error";
-                DOM.cameraSwitchFeedback.textContent = data.message || "Camera switch failed";
-            }
-        } catch (err) {
-            DOM.cameraSwitchFeedback.className = "feedback-msg error";
-            DOM.cameraSwitchFeedback.textContent = `Error: ${err.message}`;
-        } finally {
-            setTimeout(() => {
-                state.isSwitchingCamera = false;
-                DOM.switchCameraBtn.disabled = false;
-                DOM.switchCameraBtn.querySelector(".btn-text").textContent = "Switch Camera";
-            }, 1000);
-        }
-    }
-
-    /**
-     * Poll Recent Occupancy Events (every 10000 ms).
+     * Poll Recent Occupancy Events.
      */
     async function pollEvents() {
         try {
@@ -297,115 +936,158 @@
                 const data = await response.json();
                 renderEvents(data.events || []);
             }
-        } catch (err) {
-            // Keep existing event list on fetch failure
-        }
+        } catch (err) {}
     }
 
-    /**
-     * Render latest 5 events with lazy loading thumbnails.
-     * Only mutates DOM if event IDs or count change.
-     */
     function renderEvents(events) {
-        const signature = JSON.stringify(events.map(e => ({ id: e.id, ts: e.timestamp, n: e.new_count })));
-        if (signature === state.lastEventsJson) {
-            return; // No change, skip DOM rebuild
-        }
-        state.lastEventsJson = signature;
+        const jsonStr = JSON.stringify(events);
+        if (jsonStr === state.lastEventsJson) return;
+        state.lastEventsJson = jsonStr;
 
         if (!events || events.length === 0) {
             DOM.eventsContainer.innerHTML = '<div class="events-empty">No occupancy change events logged yet today.</div>';
             return;
         }
 
-        DOM.eventsContainer.innerHTML = "";
-        events.slice(0, 5).forEach(ev => {
-            const card = document.createElement("div");
-            card.className = "event-card";
+        DOM.eventsContainer.innerHTML = events.slice(0, 5).map(ev => {
+            const countDiff = ev.new_count - ev.old_count;
+            const diffClass = countDiff > 0 ? "event-badge-increase" : "event-badge-decrease";
+            const diffSign = countDiff > 0 ? `+${countDiff}` : `${countDiff}`;
+            const timeStr = formatEventTime(ev.timestamp);
+            const snapshotUrl = ev.snapshot_path
+                ? apiUrl(`/event_snapshot?path=${encodeURIComponent(ev.snapshot_path)}`)
+                : (ev.id ? apiUrl(`/event_snapshot?id=${encodeURIComponent(ev.id)}`) : "");
 
-            const header = document.createElement("div");
-            header.className = "event-card-header";
-            header.innerHTML = `
-                <span class="event-time">🕒 ${escapeHtml(ev.timestamp || "")}</span>
-                <span class="event-cam">📹 ${escapeHtml(ev.camera_id || "")}</span>
+            return `
+                <div class="event-card">
+                    <div class="event-thumb-wrapper">
+                        ${snapshotUrl
+                            ? `<img class="event-thumb" src="${snapshotUrl}" alt="Event ${ev.id}" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'event-thumb-placeholder\\'>📷 No Image</div>';">`
+                            : `<div class="event-thumb-placeholder">📷 No Image</div>`}
+                    </div>
+                    <div class="event-details">
+                        <div class="event-top-row">
+                            <span class="event-badge ${diffClass}">${diffSign} People</span>
+                            <span class="event-time">${timeStr}</span>
+                        </div>
+                        <div class="event-count-flow">
+                            <span class="count-old">${ev.old_count}</span>
+                            <span class="count-arrow">→</span>
+                            <span class="count-new">${ev.new_count}</span>
+                        </div>
+                        <div class="event-meta">
+                            <span>ID: #${ev.id}</span>
+                            <span>Cam: ${escapeHtml(ev.camera_id || "cam")}</span>
+                        </div>
+                    </div>
+                </div>
             `;
-
-            const body = document.createElement("div");
-            body.className = "event-card-body";
-
-            const oldCount = ev.old_count !== undefined ? ev.old_count : (ev.old_value !== undefined ? ev.old_value : 0);
-            const newCount = ev.new_count !== undefined ? ev.new_count : (ev.new_value !== undefined ? ev.new_value : 0);
-
-            const transition = document.createElement("div");
-            transition.className = "event-transition";
-            transition.textContent = `Count: ${oldCount} ➔ ${newCount} people`;
-            body.appendChild(transition);
-
-            if (ev.snapshot_path || ev.id || ev.snapshot_id) {
-                const thumbWrapper = document.createElement("div");
-                thumbWrapper.className = "event-thumb-wrapper";
-
-                const img = document.createElement("img");
-                img.className = "event-thumb";
-                // Attribute loading="lazy" assigned before src to guarantee lazy network fetch
-                img.setAttribute("loading", "lazy");
-                img.loading = "lazy";
-                img.alt = `Snapshot @ ${ev.timestamp}`;
-
-                // Use id query parameter for efficient lazy snapshot retrieval
-                const snapId = ev.snapshot_id || ev.id;
-                const snapParam = snapId
-                    ? `id=${encodeURIComponent(snapId)}`
-                    : `path=${encodeURIComponent(ev.snapshot_path)}`;
-                img.src = `/event_snapshot?${snapParam}`;
-
-                img.onerror = () => {
-                    thumbWrapper.style.display = "none";
-                };
-
-                thumbWrapper.appendChild(img);
-                body.appendChild(thumbWrapper);
-            }
-
-            card.appendChild(header);
-            card.appendChild(body);
-            DOM.eventsContainer.appendChild(card);
-        });
+        }).join("");
     }
 
-    /**
-     * Native Video Stream Management & Auto-Reconnect
-     */
-    function setupVideoStream() {
-        DOM.videoFeed.onerror = handleVideoError;
-        DOM.videoFeed.onload = handleVideoSuccess;
-    }
-
-    function handleVideoError() {
-        DOM.videoErrorOverlay.style.display = "flex";
-        if (state.videoReconnectTimer) return;
-
-        // Auto-reconnect after 3 seconds with timestamp bust
-        state.videoReconnectTimer = setTimeout(() => {
-            state.videoReconnectTimer = null;
-            triggerVideoRefresh();
-        }, CONFIG.videoReconnectDelayMs);
-    }
-
-    function handleVideoSuccess() {
-        DOM.videoErrorOverlay.style.display = "none";
-        if (state.videoReconnectTimer) {
-            clearTimeout(state.videoReconnectTimer);
-            state.videoReconnectTimer = null;
+    function formatEventTime(timestamp) {
+        if (!timestamp) return "Just now";
+        try {
+            const date = new Date(timestamp * 1000);
+            return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        } catch (e) {
+            return "Just now";
         }
     }
 
-    function triggerVideoRefresh() {
-        const timestamp = Date.now();
-        DOM.videoFeed.src = `/video_feed?t=${timestamp}`;
+    /**
+     * Target Registration & Management.
+     */
+    async function loadTargets() {
+        try {
+            const resp = await fetch(apiUrl("/api/targets"));
+            if (resp.ok) {
+                const data = await resp.json();
+                renderTargets(data.targets || []);
+            }
+        } catch (e) {}
+    }
+
+    function renderTargets(targets) {
+        DOM.targetCount.textContent = targets.length;
+        if (targets.length === 0) {
+            DOM.targetsList.innerHTML = '<div class="target-item-empty">No active targets registered.</div>';
+            return;
+        }
+
+        DOM.targetsList.innerHTML = targets.map(t => {
+            const colorBadge = t.clothing_color ? `<span class="target-badge badge-color">${escapeHtml(t.clothing_color)}</span>` : "";
+            const faceBadge = t.has_face_feature ? `<span class="target-badge badge-face">Face ID</span>` : "";
+            return `
+                <div class="target-item">
+                    <div class="target-info">
+                        <span class="target-name">${escapeHtml(t.name)}</span>
+                        <div class="target-badges">${faceBadge}${colorBadge}</div>
+                    </div>
+                    <button type="button" class="target-del-btn" title="Remove Target" onclick="window.dattDeleteTarget('${escapeHtml(t.id)}')">✖</button>
+                </div>
+            `;
+        }).join("");
+    }
+
+    window.dattDeleteTarget = async function(targetId) {
+        try {
+            const resp = await fetch(apiUrl(`/api/targets/${encodeURIComponent(targetId)}`), {
+                method: "DELETE"
+            });
+            if (resp.ok) {
+                await loadTargets();
+            }
+        } catch (err) {}
+    };
+
+    async function registerTarget() {
+        const name = DOM.targetNameInput.value.trim();
+        const color = DOM.targetColorSelect.value;
+        const file = DOM.targetFaceInput.files[0];
+
+        if (!name) {
+            DOM.targetFeedback.className = "feedback-msg error";
+            DOM.targetFeedback.textContent = "Target name is required.";
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append("name", name);
+        if (color) formData.append("color", color);
+        if (file) formData.append("face_image", file);
+
+        DOM.registerTargetBtn.disabled = true;
+        DOM.targetFeedback.className = "feedback-msg";
+        DOM.targetFeedback.textContent = "Registering...";
+
+        try {
+            const resp = await fetch(apiUrl("/api/register_target"), {
+                method: "POST",
+                body: formData
+            });
+            const data = await resp.json();
+            if (resp.ok && data.status === "ok") {
+                DOM.targetFeedback.className = "feedback-msg success";
+                DOM.targetFeedback.textContent = `Registered: ${data.target.name}`;
+                DOM.targetNameInput.value = "";
+                DOM.targetFaceInput.value = "";
+                DOM.targetFaceFilename.textContent = "Face Image (Optional)";
+                await loadTargets();
+            } else {
+                DOM.targetFeedback.className = "feedback-msg error";
+                DOM.targetFeedback.textContent = data.message || "Registration failed.";
+            }
+        } catch (err) {
+            DOM.targetFeedback.className = "feedback-msg error";
+            DOM.targetFeedback.textContent = `Error: ${err.message}`;
+        } finally {
+            DOM.registerTargetBtn.disabled = false;
+        }
     }
 
     function escapeHtml(str) {
+        if (!str) return "";
         return String(str)
             .replace(/&/g, "&amp;")
             .replace(/</g, "&lt;")
@@ -415,171 +1097,42 @@
     }
 
     /**
-     * Switch video source (Local MP4 / YouTube VOD).
+     * Initial App Launch Sequence.
+     * Check if camera is already running; if not, open on Camera Selection screen.
      */
-    async function applyVideoSource() {
-        const type = DOM.sourceTypeSelect.value;
-        const source = DOM.sourceInput.value.trim();
-        const loop = DOM.sourceLoopCheckbox.checked;
-
-        if (!source) {
-            DOM.sourceFeedback.textContent = "Please enter a file path or URL.";
-            DOM.sourceFeedback.className = "feedback-msg feedback-error";
-            return;
-        }
-
-        DOM.applySourceBtn.disabled = true;
-        DOM.sourceFeedback.textContent = "Applying video source...";
-        DOM.sourceFeedback.className = "feedback-msg feedback-info";
-
+    async function checkInitialAppState() {
         try {
-            const resp = await fetch(apiUrl("/api/set_video_source"), {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ type, source, loop })
-            });
-            const data = await resp.json();
-
-            if (resp.ok && data.status === "ok") {
-                DOM.sourceFeedback.textContent = "Video source active!";
-                DOM.sourceFeedback.className = "feedback-msg feedback-success";
-                triggerVideoRefresh();
-            } else {
-                DOM.sourceFeedback.textContent = data.message || "Failed to set source.";
-                DOM.sourceFeedback.className = "feedback-msg feedback-error";
-            }
-        } catch (err) {
-            DOM.sourceFeedback.textContent = `Error: ${err.message}`;
-            DOM.sourceFeedback.className = "feedback-msg feedback-error";
-        } finally {
-            DOM.applySourceBtn.disabled = false;
-        }
-    }
-
-    /**
-     * Register a new target.
-     */
-    async function registerTarget() {
-        const name = DOM.targetNameInput.value.trim();
-        const color = DOM.targetColorSelect.value;
-        const file = DOM.targetFaceInput.files[0];
-
-        if (!name) {
-            DOM.targetFeedback.textContent = "Please enter a target name.";
-            DOM.targetFeedback.className = "feedback-msg feedback-error";
-            return;
-        }
-
-        if (!color && !file) {
-            DOM.targetFeedback.textContent = "Please choose a color or upload a face image.";
-            DOM.targetFeedback.className = "feedback-msg feedback-error";
-            return;
-        }
-
-        DOM.registerTargetBtn.disabled = true;
-        DOM.targetFeedback.textContent = "Registering target...";
-        DOM.targetFeedback.className = "feedback-msg feedback-info";
-
-        try {
-            const formData = new FormData();
-            formData.append("name", name);
-            if (color) formData.append("color", color);
-            if (file) formData.append("face_image", file);
-
-            const resp = await fetch(apiUrl("/api/register_target"), {
-                method: "POST",
-                body: formData
-            });
-            const data = await resp.json();
-
-            if (resp.ok && data.status === "ok") {
-                DOM.targetFeedback.textContent = `Target '${name}' registered!`;
-                DOM.targetFeedback.className = "feedback-msg feedback-success";
-                DOM.targetNameInput.value = "";
-                DOM.targetColorSelect.value = "";
-                DOM.targetFaceInput.value = "";
-                DOM.targetFaceFilename.textContent = "Face Image (Optional)";
-                await loadTargets();
-            } else {
-                DOM.targetFeedback.textContent = data.message || "Registration failed.";
-                DOM.targetFeedback.className = "feedback-msg feedback-error";
-            }
-        } catch (err) {
-            DOM.targetFeedback.textContent = `Error: ${err.message}`;
-            DOM.targetFeedback.className = "feedback-msg feedback-error";
-        } finally {
-            DOM.registerTargetBtn.disabled = false;
-        }
-    }
-
-    /**
-     * Load registered targets.
-     */
-    async function loadTargets() {
-        try {
-            const resp = await fetch(apiUrl("/api/targets"));
+            const resp = await fetch(apiUrl("/api/source_status"));
             if (resp.ok) {
                 const data = await resp.json();
-                renderTargets(data.targets || []);
+                if (data.is_ready && data.status === "RUNNING") {
+                    setUiState(UI_STATE.MONITORING, {
+                        name: (data.camera && data.camera.name) || "Live Camera",
+                        provider: "System",
+                        source_type: (data.camera && data.camera.type) || "Stream"
+                    });
+                    return;
+                }
             }
-        } catch (err) {
-            console.error("Failed loading targets:", err);
-        }
+        } catch (e) {}
+
+        // Default: Open on Camera Selection
+        setUiState(UI_STATE.SELECT_CAMERA);
     }
 
     /**
-     * Render targets list into UI.
-     */
-    function renderTargets(targets) {
-        if (!DOM.targetCount || !DOM.targetsList) return;
-        DOM.targetCount.textContent = targets.length;
-
-        if (!targets || targets.length === 0) {
-            DOM.targetsList.innerHTML = '<div class="target-item-empty">No active targets registered.</div>';
-            return;
-        }
-
-        DOM.targetsList.innerHTML = targets.map(t => {
-            const faceBadge = t.has_face ? '<span class="target-badge badge-face">Face</span>' : '';
-            const colorBadge = t.clothing_color ? `<span class="target-badge badge-color">${escapeHtml(t.clothing_color)}</span>` : '';
-            return `
-                <div class="target-item" data-id="${escapeHtml(t.id)}">
-                    <div class="target-info">
-                        <div class="target-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div>
-                        <div class="target-badges">${faceBadge}${colorBadge}</div>
-                    </div>
-                    <button type="button" class="target-del-btn" title="Remove Target" onclick="window.dattDeleteTarget('${escapeHtml(t.id)}')">✖</button>
-                </div>
-            `;
-        }).join("");
-    }
-
-    /**
-     * Delete a target.
-     */
-    window.dattDeleteTarget = async function(targetId) {
-        try {
-            const resp = await fetch(apiUrl(`/api/targets/${encodeURIComponent(targetId)}`), {
-                method: "DELETE"
-            });
-            if (resp.ok) {
-                await loadTargets();
-            }
-        } catch (err) {
-            console.error("Failed deleting target:", err);
-        }
-    };
-
-    /**
-     * Initialize Application.
+     * Application Initialization.
      */
     function init() {
-        // Event Listeners
-        DOM.switchCameraBtn.addEventListener("click", switchCamera);
-
-        if (DOM.applySourceBtn) {
-            DOM.applySourceBtn.addEventListener("click", applyVideoSource);
-        }
+        initTabs();
+        initProviderSelector();
+        initSearch();
+        initDirectHlsTab();
+        initYouTubeTab();
+        initLocalVideoTab();
+        initPreviewModal();
+        initErrorActions();
+        setupVideoStream();
 
         if (DOM.registerTargetBtn) {
             DOM.registerTargetBtn.addEventListener("click", registerTarget);
@@ -588,33 +1141,11 @@
         if (DOM.targetFaceInput) {
             DOM.targetFaceInput.addEventListener("change", (e) => {
                 const file = e.target.files[0];
-                if (file) {
-                    DOM.targetFaceFilename.textContent = file.name;
-                } else {
-                    DOM.targetFaceFilename.textContent = "Face Image (Optional)";
-                }
+                DOM.targetFaceFilename.textContent = file ? file.name : "Face Image (Optional)";
             });
         }
 
-        DOM.backendUrlInput.addEventListener("change", (e) => {
-            const url = e.target.value.trim();
-            if (url) {
-                state.backendUrl = url;
-            }
-        });
-
-        // Setup Native Video
-        setupVideoStream();
-
-        // Initial Data Fetch
-        fetchCameras();
-        loadTargets();
-        pollTelemetry();
-        pollEvents();
-
-        // Start Periodic Polling Timers
-        state.telemetryTimer = setInterval(pollTelemetry, CONFIG.telemetryIntervalMs);
-        state.eventsTimer = setInterval(pollEvents, CONFIG.eventsIntervalMs);
+        checkInitialAppState();
     }
 
     if (document.readyState === "loading") {

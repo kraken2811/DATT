@@ -120,8 +120,12 @@ def run_pipeline(
 
     logger.info("Initializing CameraManager...")
     camera_mgr = CameraManager()
-    active_cam = camera_mgr.start_camera(camera_id)
-    shared_state.set_camera(active_cam.id, active_cam.name)
+    active_cam = None
+    if camera_id is not None:
+        active_cam = camera_mgr.start_camera(camera_id)
+        shared_state.set_camera(active_cam.id, active_cam.name)
+    else:
+        shared_state.set_camera("", "")
 
     fps_meter = FPSMeter(window_seconds=1.0)
 
@@ -130,14 +134,16 @@ def run_pipeline(
     if ui_mode:
         logger.info("Starting MJPEG Stream Server at http://%s:%d...", host, port)
         server = start_stream_server(host=host, port=port, state=shared_state, camera_manager=camera_mgr)
-        shared_state.set_status("RUNNING")
+        if active_cam is not None:
+            shared_state.set_status("RUNNING")
+            logger.info("Camera stream started on '%s' (%s).", active_cam.name, active_cam.url)
+        else:
+            shared_state.set_status("IDLE")
+            logger.info("No initial camera specified. Waiting for user camera selection...")
         logger.info("MJPEG video stream:  http://%s:%d/video_feed", host, port)
         logger.info("Realtime telemetry:  http://%s:%d/telemetry", host, port)
         logger.info("Camera API:          http://%s:%d/cameras", host, port)
         logger.info("Events API:          http://%s:%d/events", host, port)
-        logger.info("To launch dashboard: streamlit run src/ui/dashboard.py")
-
-    logger.info("Camera stream started on '%s' (%s).", active_cam.name, active_cam.url)
 
     total_frames = 0
     yolo_latencies = []
@@ -154,12 +160,21 @@ def run_pipeline(
                 logger.info("Stop event signaled. Halting AI pipeline loop.")
                 break
 
-            # Check if camera was switched externally (via Dashboard / HTTP endpoint)
             current_cam = camera_mgr.get_active_camera()
-            if current_cam is not None and current_cam.id != active_cam.id:
+            if current_cam is None:
+                if active_cam is not None:
+                    active_cam = None
+                    shared_state.set_camera("", "")
+                    if shared_state.status != "ERROR":
+                        shared_state.set_status("IDLE")
+                time.sleep(0.05)
+                continue
+
+            # Check if camera was switched externally (via Dashboard / HTTP endpoint)
+            if active_cam is None or current_cam.id != active_cam.id:
                 logger.info(
-                    "Detected runtime camera switch: '%s' -> '%s'. Resetting tracker.",
-                    active_cam.id,
+                    "Detected runtime camera activation/switch: '%s' -> '%s'. Resetting tracker.",
+                    active_cam.id if active_cam else "None",
                     current_cam.id,
                 )
                 active_cam = current_cam
@@ -168,6 +183,7 @@ def run_pipeline(
                 counter.people_count = 0
                 event_manager.reset()
                 shared_state.set_camera(active_cam.id, active_cam.name)
+                shared_state.set_status("RUNNING")
 
             # 1. Read newest frame from CameraManager
             frame = camera_mgr.read(timeout=2.0)

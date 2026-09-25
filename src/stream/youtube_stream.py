@@ -107,7 +107,19 @@ def select_best_video_format(formats: list[dict[str, Any]]) -> str | None:
     return best_format.get("url")
 
 
-from src.stream.youtube_resolver import stream_resolver
+from src.stream.youtube_resolver import (
+    ERROR_BOT_CHALLENGE,
+    ERROR_CLEAN_STOP,
+    ERROR_EXTRACTOR_ERROR,
+    ERROR_FFMPEG_ERROR,
+    ERROR_HTTP_403,
+    ERROR_HTTP_429,
+    ERROR_NETWORK_ERROR,
+    ERROR_NO_FORMATS,
+    ERROR_VIDEO_UNAVAILABLE,
+    classify_youtube_error,
+    stream_resolver,
+)
 
 
 def get_stream_url(url: str) -> str:
@@ -195,6 +207,8 @@ class CameraReader:
         self.clean_eof_count: int = 0
         self.last_error_type: str = ""
         self.last_error_message: str = ""
+        self.last_resolver_error_type: str = ""
+        self.last_ffmpeg_error_type: str = ""
         self.first_frame_timeout_seconds: float = 15.0
         self.stale_frame_timeout_seconds: float = 15.0
 
@@ -415,6 +429,7 @@ class CameraReader:
 
             self._last_ffmpeg_exit_code = proc.poll()
             self._last_ffmpeg_stderr = "\n".join(self.stderr_lines)[-2000:]
+            self.stderr_lines.clear()
 
             # 3. Close stdout and stderr pipes
             if proc.stdout is not None:
@@ -523,35 +538,55 @@ class CameraReader:
 
             except Exception as exc:
                 stream_resolver.record_failure(self.url)
-                stderr_tail = "\n".join(self.stderr_lines)
                 err_str = str(exc)
+                cat = classify_youtube_error(err_str, default=ERROR_EXTRACTOR_ERROR)
+                self.last_resolver_error_type = cat
+                self.last_error_type = cat
+                self.last_error_message = err_str
 
-                if "429" in stderr_tail or "429" in err_str:
-                    self.last_error_type = "HTTP_429"
-                    self.last_error_message = f"429 in reconnect: {stderr_tail[-200:] or err_str}"
+                if cat == ERROR_HTTP_429:
+                    self.last_error_message = f"429 in reconnect: {err_str}"
                     stream_resolver.record_429(source="camera_reconnect")
                     # Suppress immediate yt-dlp refresh during cooldown
                     self._force_url_refresh = False
                     self._stream_url = None
                     logger.error("[YT-429] 429 detected during camera reconnect on %s", self.url)
-                elif "403" in stderr_tail or "403" in err_str:
-                    self.last_error_type = "HTTP_403"
-                    self.last_error_message = f"403 in reconnect: {stderr_tail[-200:] or err_str}"
+                elif cat == ERROR_HTTP_403:
+                    self.last_error_message = f"403 in reconnect: {err_str}"
                     stream_resolver.record_403(self.url, source="camera_reconnect")
                     if self._direct_reconnect_attempts >= direct_reconnect_limit:
                         self._force_url_refresh = True
                         self._stream_url = None
                     logger.warning("[YT-403] 403 detected during camera reconnect on %s", self.url)
-                else:
-                    self.last_error_type = "RECONNECT_FAILURE"
-                    self.last_error_message = err_str
+                elif cat == ERROR_NO_FORMATS:
+                    # NO_FORMATS is NOT 429! Do NOT call record_429()
+                    self._force_url_refresh = True
+                    self._stream_url = None
                     self.abnormal_exit_count += 1
-
-                logger.warning(
-                    "[DATT-STREAM] Reconnect attempt %d failed: %s",
-                    self.reconnect_attempts,
-                    type(exc).__name__,
-                )
+                    logger.warning("[YT-RECONNECT] No video formats found for %s, will retry with bounded backoff", self.url)
+                elif cat == ERROR_BOT_CHALLENGE:
+                    self._force_url_refresh = True
+                    self._stream_url = None
+                    self.abnormal_exit_count += 1
+                    logger.error("[YT-BOT] Bot challenge detected during reconnect on %s", self.url)
+                elif cat == ERROR_VIDEO_UNAVAILABLE:
+                    self._force_url_refresh = True
+                    self._stream_url = None
+                    self.abnormal_exit_count += 1
+                    logger.error("[YT-RECONNECT] Video unavailable: %s", self.url)
+                    if self.reconnect_attempts >= 3:
+                        logger.error("[YT-RECONNECT] Video %s permanently unavailable, aborting reconnect", self.url)
+                        self.error = exc
+                        self.finished = True
+                        return False
+                else:
+                    self.abnormal_exit_count += 1
+                    logger.warning(
+                        "[DATT-STREAM] Reconnect attempt %d failed: %s (%s)",
+                        self.reconnect_attempts,
+                        cat,
+                        type(exc).__name__,
+                    )
                 self._cleanup_process()
 
         self.recovery_state = "STOPPED"
@@ -686,24 +721,29 @@ class CameraReader:
             self._recovery_started_at = time.time()
             stderr_tail = "\n".join(self.stderr_lines)
 
-            if "429" in stderr_tail or "Too Many Requests" in stderr_tail:
-                self.last_error_type = "HTTP_429"
-                self.last_error_message = f"429 in FFmpeg: {stderr_tail[-200:]}"
-                stream_resolver.record_429(source="ffmpeg_live")
-                self._force_url_refresh = False
-                self._stream_url = None
-            elif "403" in stderr_tail or "Forbidden" in stderr_tail:
-                self.last_error_type = "HTTP_403"
-                self.last_error_message = f"403 in FFmpeg: {stderr_tail[-200:]}"
-                stream_resolver.record_403(self.url, source="ffmpeg_live")
-                self._force_url_refresh = True
-                self._stream_url = None
-            elif exit_code == 0:
+            if exit_code == 0:
                 self.clean_eof_count += 1
                 self.last_error_type = "CLEAN_EOF"
+                self.last_ffmpeg_error_type = "CLEAN_EOF"
             else:
                 self.abnormal_exit_count += 1
-                self.last_error_type = "FFMPEG_ABNORMAL_EXIT"
+                cat = classify_youtube_error(stderr_tail, default=ERROR_FFMPEG_ERROR)
+                self.last_ffmpeg_error_type = cat
+                if cat == ERROR_HTTP_429:
+                    self.last_error_type = ERROR_HTTP_429
+                    self.last_error_message = f"429 in FFmpeg: {stderr_tail[-200:]}"
+                    stream_resolver.record_429(source="ffmpeg_live")
+                    self._force_url_refresh = False
+                    self._stream_url = None
+                elif cat == ERROR_HTTP_403:
+                    self.last_error_type = ERROR_HTTP_403
+                    self.last_error_message = f"403 in FFmpeg: {stderr_tail[-200:]}"
+                    stream_resolver.record_403(self.url, source="ffmpeg_live")
+                    self._force_url_refresh = True
+                    self._stream_url = None
+                else:
+                    self.last_error_type = cat if cat != ERROR_FFMPEG_ERROR else "FFMPEG_ABNORMAL_EXIT"
+                    self.last_error_message = f"FFmpeg abnormal exit {exit_code}: {stderr_tail[-200:]}"
 
             self._cleanup_process()
             self._stale_termination_requested = False
@@ -763,7 +803,7 @@ class CameraReader:
                 "source_type": "youtube",
                 "reader_alive": self._thread.is_alive() if self._thread else False,
                 "ffmpeg_alive": proc_alive,
-                "ffmpeg_pid": proc.pid if proc else self._last_ffmpeg_pid,
+                "ffmpeg_pid": proc.pid if proc_alive else None,
                 "ffmpeg_exit_code": proc.poll() if proc else self._last_ffmpeg_exit_code,
                 "process_generation": self.process_generation,
                 "frames_received": self._frames_received,
@@ -777,11 +817,15 @@ class CameraReader:
                 "resolver_success_count": stream_resolver.metrics.resolver_success_count,
                 "http_429_count": stream_resolver.metrics.http_429_count,
                 "http_403_count": stream_resolver.metrics.http_403_count,
+                "no_formats_count": stream_resolver.metrics.no_formats_count,
+                "bot_challenge_count": stream_resolver.metrics.bot_challenge_count,
                 "cooldown_remaining_seconds": round(stream_resolver.get_cooldown_remaining(), 2),
                 "abnormal_exit_count": self.abnormal_exit_count,
                 "clean_eof_count": self.clean_eof_count,
                 "last_error_type": self.last_error_type,
                 "last_error_message": self.last_error_message,
+                "last_resolver_error_type": self.last_resolver_error_type,
+                "last_ffmpeg_error_type": self.last_ffmpeg_error_type,
                 "stream_fps": self.stream_fps,
                 "last_frame_time": self._last_frame_timestamp,
                 "last_frame_age": self.frame_age_seconds,

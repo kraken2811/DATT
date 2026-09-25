@@ -58,6 +58,133 @@ class StreamCacheEntry:
         return self.failure_count < max_failures
 
 
+
+# =========================================================================
+# YouTube Error Classification
+# =========================================================================
+
+ERROR_HTTP_429 = "HTTP_429"
+ERROR_HTTP_403 = "HTTP_403"
+ERROR_NO_FORMATS = "NO_FORMATS"
+ERROR_BOT_CHALLENGE = "BOT_CHALLENGE"
+ERROR_VIDEO_UNAVAILABLE = "VIDEO_UNAVAILABLE"
+ERROR_EXTRACTOR_ERROR = "EXTRACTOR_ERROR"
+ERROR_FFMPEG_ERROR = "FFMPEG_ERROR"
+ERROR_NETWORK_ERROR = "NETWORK_ERROR"
+ERROR_CLEAN_STOP = "CLEAN_STOP"
+
+# Explicit 429 markers (never bare "429")
+_RE_HTTP_429 = re.compile(
+    r"(?:HTTP\s*(?:Error)?\s*429|429\s+Too\s+Many\s+Requests|Too\s+Many\s+Requests|"
+    r"(?:status(?:\s*code)?|error(?:\s*code)?|response\s*code)[\s:=]+429\b|"
+    r"\bstatus=429\b|\bcode=429\b|\bHTTP/1\.[01]\s+429\b|\bHTTP/2\s+429\b)",
+    re.IGNORECASE,
+)
+
+# Explicit 403 markers
+_RE_HTTP_403 = re.compile(
+    r"(?:HTTP\s*(?:Error)?\s*403|403\s+Forbidden|\bForbidden\b|"
+    r"(?:status(?:\s*code)?|error(?:\s*code)?|response\s*code)[\s:=]+403\b|"
+    r"\bstatus=403\b|\bcode=403\b|\bHTTP/1\.[01]\s+403\b|\bHTTP/2\s+403\b)",
+    re.IGNORECASE,
+)
+
+# Explicit bot challenge markers
+_RE_BOT_CHALLENGE = re.compile(
+    r"(?:Sign\s+in\s+to\s+confirm\s+you(?:'re|\s+are)\s+not\s+a\s+bot|confirm\s+you(?:'re|\s+are)\s+not\s+a\s+bot|bot\s+detection)",
+    re.IGNORECASE,
+)
+
+# Explicit no formats markers
+_RE_NO_FORMATS = re.compile(
+    r"(?:No\s+video\s+formats?\s+found|Requested\s+format\s+is\s+not\s+available|no\s+suitable\s+format)",
+    re.IGNORECASE,
+)
+
+# Video unavailable markers
+_RE_VIDEO_UNAVAILABLE = re.compile(
+    r"(?:Video\s+unavailable|This\s+video\s+is\s+unavailable|Private\s+video|This\s+video\s+is\s+private|"
+    r"This\s+live\s+event\s+has\s+ended|Video\s+has\s+been\s+removed|This\s+video\s+has\s+been\s+removed|"
+    r"Premieres\s+in\s+\d+)",
+    re.IGNORECASE,
+)
+
+# Network / transport errors
+_RE_NETWORK_ERROR = re.compile(
+    r"(?:timed?\s*out|connection\s+reset|connection\s+refused|network\s+is\s+unreachable|"
+    r"name\s+resolution|getaddrinfo\s+failed|remotedisconnected|broken\s+pipe|"
+    r"connection\s+aborted|server\s+disconnected|tls\s+handshake\s+failed)",
+    re.IGNORECASE,
+)
+
+# FFmpeg error markers
+_RE_FFMPEG_ERROR = re.compile(
+    r"(?:ffmpeg\s+(?:failed|crash|error|abnormal|exited)|exit\s*code\s*[1-9]\d*|return_code=[1-9]\d*)",
+    re.IGNORECASE,
+)
+
+# Clean stop / cancellation
+_RE_CLEAN_STOP = re.compile(
+    r"(?:clean\s+stop|cancelled|stopped|stop_event\s+set)",
+    re.IGNORECASE,
+)
+
+
+def classify_youtube_error(message: str | Exception | None, default: str = ERROR_EXTRACTOR_ERROR) -> str:
+    """Classify YouTube/yt-dlp/FFmpeg failure based on explicit error evidence.
+
+    Explicitly distinguishes:
+    1. HTTP_429 (only on explicit 429 / Too Many Requests markers)
+    2. HTTP_403 (only on explicit 403 / Forbidden markers)
+    3. BOT_CHALLENGE (sign in / bot verification)
+    4. NO_FORMATS (No video formats found)
+    5. VIDEO_UNAVAILABLE (private/removed/ended)
+    6. NETWORK_ERROR (connection timeout/reset/DNS)
+    7. CLEAN_STOP (stopped cleanly)
+    8. FFMPEG_ERROR (FFmpeg non-zero exit / failure)
+    9. EXTRACTOR_ERROR (generic extraction failure)
+    """
+    if message is None:
+        return default
+    text = str(message).strip()
+    if not text:
+        return default
+
+    # 1. Explicit 429 evidence (Rate limit)
+    if _RE_HTTP_429.search(text):
+        return ERROR_HTTP_429
+
+    # 2. Explicit 403 evidence (Forbidden / token expired)
+    if _RE_HTTP_403.search(text):
+        return ERROR_HTTP_403
+
+    # 3. Bot challenge / CAPTCHA (distinct from 429 unless 429 is also present)
+    if _RE_BOT_CHALLENGE.search(text):
+        return ERROR_BOT_CHALLENGE
+
+    # 4. No formats available (NOT 429!)
+    if _RE_NO_FORMATS.search(text):
+        return ERROR_NO_FORMATS
+
+    # 5. Video permanently or temporarily unavailable
+    if _RE_VIDEO_UNAVAILABLE.search(text):
+        return ERROR_VIDEO_UNAVAILABLE
+
+    # 6. Network / transport errors
+    if _RE_NETWORK_ERROR.search(text):
+        return ERROR_NETWORK_ERROR
+
+    # 7. Clean stop / cancellation
+    if _RE_CLEAN_STOP.search(text):
+        return ERROR_CLEAN_STOP
+
+    # 8. FFmpeg error markers
+    if _RE_FFMPEG_ERROR.search(text):
+        return ERROR_FFMPEG_ERROR
+
+    return default
+
+
 @dataclass
 class ResolverMetrics:
     """Metrics tracking YouTube extraction events and cache efficiency."""
@@ -67,13 +194,17 @@ class ResolverMetrics:
     direct_url_reconnects: int = 0
     http_429_count: int = 0
     http_403_count: int = 0
+    no_formats_count: int = 0
+    bot_challenge_count: int = 0
     resolve_failures: int = 0
     stream_restarts: int = 0
     dedup_waits: int = 0
     resolver_attempt_count: int = 0
     resolver_success_count: int = 0
+    last_resolver_error_type: str = ""
+    last_resolver_error_message: str = ""
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "total_resolves": self.total_resolves,
             "cache_hits": self.cache_hits,
@@ -81,11 +212,15 @@ class ResolverMetrics:
             "direct_url_reconnects": self.direct_url_reconnects,
             "http_429_count": self.http_429_count,
             "http_403_count": self.http_403_count,
+            "no_formats_count": self.no_formats_count,
+            "bot_challenge_count": self.bot_challenge_count,
             "resolve_failures": self.resolve_failures,
             "stream_restarts": self.stream_restarts,
             "dedup_waits": self.dedup_waits,
             "resolver_attempt_count": self.resolver_attempt_count,
             "resolver_success_count": self.resolver_success_count,
+            "last_resolver_error_type": self.last_resolver_error_type,
+            "last_resolver_error_message": self.last_resolver_error_message,
         }
 
 
@@ -229,6 +364,8 @@ class YouTubeStreamResolver:
         self._cache: dict[str, StreamCacheEntry] = {}
         self._metrics = ResolverMetrics()
         self._policy = SharedRateLimitPolicy()
+        self.last_resolver_error_type: str = ""
+        self.last_resolver_error_message: str = ""
 
         # Single Flight deduplication data
         self._in_flight: dict[str, threading.Event] = {}
@@ -313,6 +450,8 @@ class YouTubeStreamResolver:
             self._policy = SharedRateLimitPolicy()
             self._last_extraction_finished_at = 0.0
             self._global_429_cooldown_until = 0.0
+            self.last_resolver_error_type = ""
+            self.last_resolver_error_message = ""
 
     def reset_for_testing(self) -> None:
         """Alias for reset_state() in test environments."""
@@ -324,6 +463,9 @@ class YouTubeStreamResolver:
             m = self._metrics.to_dict()
             m["cooldown_remaining_seconds"] = round(self.get_cooldown_remaining(), 2)
             m["current_backoff_level"] = self._policy.current_backoff_level
+            m["no_formats_count"] = self._metrics.no_formats_count
+            m["bot_challenge_count"] = self._metrics.bot_challenge_count
+            m["last_resolver_error_type"] = self.last_resolver_error_type
             return m
 
     def get_cached_url(self, url_or_id: str) -> str | None:
@@ -551,6 +693,10 @@ class YouTubeStreamResolver:
 
                     with self._lock:
                         self._metrics.resolver_success_count += 1
+                        self.last_resolver_error_type = ""
+                        self.last_resolver_error_message = ""
+                        self._metrics.last_resolver_error_type = ""
+                        self._metrics.last_resolver_error_message = ""
 
                     logger.info(
                         "[YT-RESOLVE] video_id=%s resolved in %.2fs (URL prefix=%s...)",
@@ -558,36 +704,20 @@ class YouTubeStreamResolver:
                     )
                     return selected_url
 
-                except DownloadError as exc:
-                    err_str = str(exc)
-                    is_429 = "429" in err_str or "Too Many Requests" in err_str
-                    is_403 = "403" in err_str or "Forbidden" in err_str
-                    if is_403:
-                        self.record_403(url_or_id=video_id, source="yt-dlp")
-                    if is_429:
-                        backoff = self.record_429(source="yt-dlp")
-                        logger.error(
-                            "[YT-429] HTTP 429 Too Many Requests detected for video_id=%s. Backing off for %.1fs (attempt %d/%d)",
-                            video_id, backoff, attempt, max_retries,
-                        )
-                        if attempt < max_retries:
-                            time.sleep(backoff)
-                            continue
-                        raise RuntimeError(f"HTTP 429 Too Many Requests from YouTube: {exc}") from exc
-
-                    err_prefix = "YouTube VOD extraction error: " if is_vod else "Failed extracting YouTube stream: "
-                    raise RuntimeError(f"{err_prefix}{exc}") from exc
-
                 except Exception as exc:
                     duration = time.perf_counter() - t_start
                     last_exception = exc
                     err_str = str(exc)
-                    is_429 = "429" in err_str or "Too Many Requests" in err_str
-                    is_403 = "403" in err_str or "Forbidden" in err_str
-                    if is_403:
-                        self.record_403(url_or_id=video_id, source="yt-dlp")
+                    cat = classify_youtube_error(err_str, default=ERROR_EXTRACTOR_ERROR)
+                    with self._lock:
+                        self.last_resolver_error_type = cat
+                        self.last_resolver_error_message = err_str
+                        self._metrics.last_resolver_error_type = cat
+                        self._metrics.last_resolver_error_message = err_str
 
-                    if is_429:
+                    err_prefix = "YouTube VOD extraction error: " if is_vod else "Failed extracting YouTube stream: "
+
+                    if cat == ERROR_HTTP_429:
                         backoff = self.record_429(source="yt-dlp")
                         logger.error(
                             "[YT-429] HTTP 429 Too Many Requests detected for video_id=%s. Backing off for %.1fs (attempt %d/%d)",
@@ -596,13 +726,51 @@ class YouTubeStreamResolver:
                         if attempt < max_retries:
                             time.sleep(backoff)
                             continue
+                        raise RuntimeError(f"{err_prefix}HTTP 429 Too Many Requests from YouTube: {exc}") from exc
+
+                    elif cat == ERROR_HTTP_403:
+                        self.record_403(url_or_id=video_id, source="yt-dlp")
+                        logger.warning(
+                            "[YT-403] HTTP 403 Forbidden detected for video_id=%s (attempt %d/%d)",
+                            video_id, attempt, max_retries,
+                        )
+                        if attempt < max_retries:
+                            time.sleep(min_interval)
+                            continue
+                        raise RuntimeError(f"{err_prefix}HTTP 403 Forbidden from YouTube: {exc}") from exc
+
+                    elif cat == ERROR_NO_FORMATS:
+                        with self._lock:
+                            self._metrics.no_formats_count += 1
+                        logger.warning(
+                            "[YT-NO-FORMATS] No video formats found for video_id=%s (attempt %d/%d)",
+                            video_id, attempt, max_retries,
+                        )
+                        if attempt < max_retries:
+                            time.sleep(min_interval)
+                            continue
+                        raise RuntimeError(f"{err_prefix}{exc}") from exc
+
+                    elif cat == ERROR_BOT_CHALLENGE:
+                        with self._lock:
+                            self._metrics.bot_challenge_count += 1
+                        logger.error(
+                            "[YT-BOT] YouTube bot challenge / sign-in required for video_id=%s: %s",
+                            video_id, exc,
+                        )
+                        raise RuntimeError(f"{err_prefix}YouTube bot challenge / sign-in required: {exc}") from exc
+
+                    elif cat == ERROR_VIDEO_UNAVAILABLE:
+                        logger.error("[YT-UNAVAILABLE] Video %s is unavailable: %s", video_id, exc)
+                        raise RuntimeError(f"{err_prefix}YouTube video unavailable: {exc}") from exc
+
                     else:
                         # Non-retryable validation errors re-raise directly
                         if "Failed to extract video info" in err_str or "No valid video stream URL" in err_str:
                             raise
                         logger.warning(
-                            "[YT-RESOLVE] Attempt %d/%d failed in %.2fs: %s",
-                            attempt, max_retries, duration, exc,
+                            "[YT-RESOLVE] Attempt %d/%d failed in %.2fs [%s]: %s",
+                            attempt, max_retries, duration, cat, exc,
                         )
                         if attempt < max_retries:
                             time.sleep(min_interval)

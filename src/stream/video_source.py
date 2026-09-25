@@ -27,8 +27,19 @@ import numpy as np
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
-import config
-from src.stream.youtube_resolver import stream_resolver
+from src.stream.youtube_resolver import (
+    ERROR_BOT_CHALLENGE,
+    ERROR_CLEAN_STOP,
+    ERROR_EXTRACTOR_ERROR,
+    ERROR_FFMPEG_ERROR,
+    ERROR_HTTP_403,
+    ERROR_HTTP_429,
+    ERROR_NETWORK_ERROR,
+    ERROR_NO_FORMATS,
+    ERROR_VIDEO_UNAVAILABLE,
+    classify_youtube_error,
+    stream_resolver,
+)
 from src.stream.youtube_stream import read_frame_bytes
 
 logger = logging.getLogger("datt.video_source")
@@ -399,6 +410,10 @@ class LocalVideoReader(BaseVideoReader):
                 "clean_eof_count": self.clean_eof_count,
                 "last_error_type": self.last_error_type,
                 "last_error_message": self.last_error_message,
+                "last_resolver_error_type": "",
+                "last_ffmpeg_error_type": "",
+                "no_formats_count": 0,
+                "bot_challenge_count": 0,
                 "file_path": str(self.file_path),
                 "fps": self.video_fps,
                 "stream_fps": self._stream_fps,
@@ -449,6 +464,8 @@ class YouTubeVODReader(BaseVideoReader):
         self._first_frame_received: bool = False
         self.last_error_type: str = ""
         self.last_error_message: str = ""
+        self.last_resolver_error_type: str = ""
+        self.last_ffmpeg_error_type: str = ""
 
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
@@ -546,6 +563,7 @@ class YouTubeVODReader(BaseVideoReader):
         if proc is not None:
             self._last_ffmpeg_exit_code = proc.poll()
             self._last_ffmpeg_stderr = "\n".join(self._stderr_lines)[-2000:]
+            self._stderr_lines.clear()
 
             # 1. Terminate FFmpeg first
             if proc.poll() is None:
@@ -657,15 +675,14 @@ class YouTubeVODReader(BaseVideoReader):
                 self._status = "ERROR"
                 self._error_reason = f"Failed to resolve YouTube VOD: {exc}"
                 err_str = str(exc)
-                if "429" in err_str:
-                    self.last_error_type = "HTTP_429"
-                    stream_resolver.record_429(source="vod_resolve_start")
-                elif "403" in err_str:
-                    self.last_error_type = "HTTP_403"
-                    stream_resolver.record_403(self.youtube_url, source="vod_resolve_start")
-                else:
-                    self.last_error_type = "RESOLVER_FAILURE"
+                cat = classify_youtube_error(err_str, default=ERROR_EXTRACTOR_ERROR)
+                self.last_resolver_error_type = cat
+                self.last_error_type = cat
                 self.last_error_message = err_str
+                if cat == ERROR_HTTP_429:
+                    stream_resolver.record_429(source="vod_resolve_start")
+                elif cat == ERROR_HTTP_403:
+                    stream_resolver.record_403(self.youtube_url, source="vod_resolve_start")
                 self.abnormal_exit_count += 1
                 logger.error("[YOUTUBE-VOD] %s", self._error_reason)
                 raise RuntimeError(self._error_reason) from exc
@@ -704,15 +721,14 @@ class YouTubeVODReader(BaseVideoReader):
                     self._read_errors += 1
                     self.abnormal_exit_count += 1
                     err_str = str(exc)
-                    if "429" in err_str:
-                        self.last_error_type = "HTTP_429"
-                        stream_resolver.record_429(source="vod_resolver")
-                    elif "403" in err_str:
-                        self.last_error_type = "HTTP_403"
-                        stream_resolver.record_403(self.youtube_url, source="vod_resolver")
-                    else:
-                        self.last_error_type = "RESOLVER_FAILURE"
+                    cat = classify_youtube_error(err_str, default=ERROR_EXTRACTOR_ERROR)
+                    self.last_resolver_error_type = cat
+                    self.last_error_type = cat
                     self.last_error_message = err_str
+                    if cat == ERROR_HTTP_429:
+                        stream_resolver.record_429(source="vod_resolver")
+                    elif cat == ERROR_HTTP_403:
+                        stream_resolver.record_403(self.youtube_url, source="vod_resolver")
 
                     with self._lock:
                         self._status = "ERROR"
@@ -738,13 +754,14 @@ class YouTubeVODReader(BaseVideoReader):
                 self._retries_used += 1
                 err_str = str(exc)
                 stderr_tail = "\n".join(self._stderr_lines)
-                if "429" in stderr_tail or "429" in err_str:
-                    self.last_error_type = "HTTP_429"
-                    self.last_error_message = f"FFmpeg 429 on spawn: {stderr_tail[-200:]}"
+                cat = classify_youtube_error(stderr_tail or err_str, default=ERROR_FFMPEG_ERROR)
+                self.last_ffmpeg_error_type = cat
+                self.last_error_type = cat
+                if cat == ERROR_HTTP_429:
+                    self.last_error_message = f"FFmpeg 429 on spawn: {stderr_tail[-200:] or err_str}"
                     stream_resolver.record_429(source="ffmpeg_vod_spawn")
-                elif "403" in stderr_tail or "403" in err_str:
-                    self.last_error_type = "HTTP_403"
-                    self.last_error_message = f"FFmpeg 403 on spawn: {stderr_tail[-200:]}"
+                elif cat == ERROR_HTTP_403:
+                    self.last_error_message = f"FFmpeg 403 on spawn: {stderr_tail[-200:] or err_str}"
                     stream_resolver.record_403(self.youtube_url, source="ffmpeg_vod_spawn")
                 else:
                     self.last_error_type = "SPAWN_FAILURE"
@@ -871,21 +888,24 @@ class YouTubeVODReader(BaseVideoReader):
                 # Abnormal exit: non-zero exit code, broken pipe, read exception, or HTTP error
                 self.abnormal_exit_count += 1
                 self._retries_used += 1
-                stderr_tail = "\n".join(self._stderr_lines)
+                stderr_tail = self._last_ffmpeg_stderr or "\n".join(self._stderr_lines)
                 exit_code = self._last_ffmpeg_exit_code
 
-                if "429" in stderr_tail or "Too Many Requests" in stderr_tail:
-                    self.last_error_type = "HTTP_429"
+                cat = classify_youtube_error(stderr_tail, default=ERROR_FFMPEG_ERROR)
+                self.last_ffmpeg_error_type = cat
+
+                if cat == ERROR_HTTP_429:
+                    self.last_error_type = ERROR_HTTP_429
                     self.last_error_message = f"HTTP 429 detected in FFmpeg stderr: {stderr_tail[-200:]}"
                     stream_resolver.record_429(source="ffmpeg_vod")
                     self._direct_url = None
-                elif "403" in stderr_tail or "Forbidden" in stderr_tail:
-                    self.last_error_type = "HTTP_403"
+                elif cat == ERROR_HTTP_403:
+                    self.last_error_type = ERROR_HTTP_403
                     self.last_error_message = f"HTTP 403 detected in FFmpeg stderr: {stderr_tail[-200:]}"
                     stream_resolver.record_403(self.youtube_url, source="ffmpeg_vod")
                     self._direct_url = None
                 else:
-                    self.last_error_type = "FFMPEG_ABNORMAL_EXIT" if not read_exception else "READ_EXCEPTION"
+                    self.last_error_type = cat if cat != ERROR_FFMPEG_ERROR else ("FFMPEG_ABNORMAL_EXIT" if not read_exception else "READ_EXCEPTION")
                     self.last_error_message = f"FFmpeg abnormal exit {exit_code}: {stderr_tail[-200:]}" if not read_exception else self.last_error_message
                     stream_resolver.invalidate_cache(self.youtube_url, reason="ffmpeg_abnormal_exit")
                     self._direct_url = None
@@ -992,7 +1012,7 @@ class YouTubeVODReader(BaseVideoReader):
                 "source_type": "youtube_vod",
                 "reader_alive": self._thread.is_alive() if self._thread else False,
                 "ffmpeg_alive": proc_alive,
-                "ffmpeg_pid": proc.pid if proc else self._last_ffmpeg_pid,
+                "ffmpeg_pid": proc.pid if proc_alive else None,
                 "ffmpeg_exit_code": proc.poll() if proc else self._last_ffmpeg_exit_code,
                 "process_generation": self.process_generation,
                 "frames_received": self._frames_received,
@@ -1006,11 +1026,15 @@ class YouTubeVODReader(BaseVideoReader):
                 "resolver_success_count": stream_resolver.metrics.resolver_success_count,
                 "http_429_count": stream_resolver.metrics.http_429_count,
                 "http_403_count": stream_resolver.metrics.http_403_count,
+                "no_formats_count": stream_resolver.metrics.no_formats_count,
+                "bot_challenge_count": stream_resolver.metrics.bot_challenge_count,
                 "cooldown_remaining_seconds": round(stream_resolver.get_cooldown_remaining(), 2),
                 "abnormal_exit_count": self.abnormal_exit_count,
                 "clean_eof_count": self.clean_eof_count,
                 "last_error_type": self.last_error_type,
                 "last_error_message": self.last_error_message,
+                "last_resolver_error_type": self.last_resolver_error_type,
+                "last_ffmpeg_error_type": self.last_ffmpeg_error_type,
                 "stream_fps": self._stream_fps,
                 "read_errors": self._read_errors,
                 "last_frame_time": self._last_frame_timestamp,
