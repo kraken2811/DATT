@@ -39,7 +39,8 @@ import httpx
 import numpy as np
 import uvicorn
 
-from src.recognition.target_matcher import target_manager
+from src.face.face_embedder import decode_face_image_bytes
+from src.recognition.target_matcher import TargetRegistrationError, target_manager
 from src.stream.caltrans_service import caltrans_service
 from src.stream.preview_manager import preview_manager
 from src.stream.seattle_sdot_service import seattle_service
@@ -88,6 +89,28 @@ def get_backend_url(request: Request) -> str:
     return getattr(request.app.state, "backend_url", "http://localhost:8000")
 
 
+_backend_client: httpx.AsyncClient | None = None
+
+
+def get_backend_http_client() -> httpx.AsyncClient:
+    """Return persistent, connection-pooled AsyncClient for low-latency backend requests (Phase D)."""
+    global _backend_client
+    if _backend_client is None or _backend_client.is_closed:
+        _backend_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=2.0, read=4.0, write=4.0, pool=4.0),
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+        )
+    return _backend_client
+
+
+@app.on_event("shutdown")
+async def shutdown_backend_client() -> None:
+    global _backend_client
+    if _backend_client is not None and not _backend_client.is_closed:
+        await _backend_client.aclose()
+        _backend_client = None
+
+
 # -----------------------------------------------------------------------------
 # Static & HTML Delivery
 # -----------------------------------------------------------------------------
@@ -131,22 +154,22 @@ async def serve_index() -> Response:
 @app.get("/telemetry")
 @app.get("/api/telemetry")
 async def get_telemetry(request: Request) -> JSONResponse:
-    """Fetch realtime AI telemetry or return disconnected fallback."""
+    """Fetch realtime AI telemetry or return disconnected fallback (Phase D: connection pooled)."""
     b_url = get_backend_url(request).rstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=1.5) as client:
-            resp = await client.get(f"{b_url}/telemetry")
-            if resp.status_code == 200:
-                data = resp.json()
-                if "camera_status" not in data:
-                    data["camera_status"] = data.get("status", "RUNNING")
-                if "stream_alive" not in data:
-                    data["stream_alive"] = data["camera_status"] in ("RUNNING", "WARNING")
-                if "last_frame_time" not in data:
-                    data["last_frame_time"] = data.get("timestamp", 0.0)
-                if "error_message" not in data or not data["error_message"]:
-                    data["error_message"] = None
-                return JSONResponse(content=data, status_code=200)
+        client = get_backend_http_client()
+        resp = await client.get(f"{b_url}/telemetry", timeout=1.5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if "camera_status" not in data:
+                data["camera_status"] = data.get("status", "RUNNING")
+            if "stream_alive" not in data:
+                data["stream_alive"] = data["camera_status"] in ("RUNNING", "WARNING")
+            if "last_frame_time" not in data:
+                data["last_frame_time"] = data.get("timestamp", 0.0)
+            if "error_message" not in data or not data["error_message"]:
+                data["error_message"] = None
+            return JSONResponse(content=data, status_code=200)
     except Exception as exc:
         logger.debug("Backend telemetry unreachable (%s): %s", b_url, exc)
 
@@ -193,10 +216,10 @@ async def get_cameras(request: Request) -> JSONResponse:
     """Fetch list of available cameras and active camera."""
     b_url = get_backend_url(request).rstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=2.5) as client:
-            resp = await client.get(f"{b_url}/cameras")
-            if resp.status_code == 200:
-                return JSONResponse(content=resp.json(), status_code=200)
+        client = get_backend_http_client()
+        resp = await client.get(f"{b_url}/cameras", timeout=2.5)
+        if resp.status_code == 200:
+            return JSONResponse(content=resp.json(), status_code=200)
     except Exception as exc:
         logger.debug("Backend cameras unreachable (%s): %s", b_url, exc)
 
@@ -669,6 +692,10 @@ async def register_target(request: Request) -> JSONResponse:
     color = None
     threshold = 0.45
     img = None
+    raw_img_bytes: bytes | None = None
+    upload_filename = ""
+    upload_mime = ""
+    upload_bytes_len = 0
 
     if "multipart/form-data" in content_type:
         form = await request.form()
@@ -685,10 +712,51 @@ async def register_target(request: Request) -> JSONResponse:
 
         file_obj = form.get("face_image")
         if file_obj is not None and hasattr(file_obj, "read"):
-            content = await file_obj.read()
-            if content:
-                nparr = np.frombuffer(content, np.uint8)
-                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            upload_filename = getattr(file_obj, "filename", "upload.jpg")
+            upload_mime = getattr(file_obj, "content_type", "application/octet-stream")
+            raw_img_bytes = await file_obj.read()
+            upload_bytes_len = len(raw_img_bytes)
+
+            logger.info(
+                "[TARGET_UPLOAD_A1] filename='%s' mime='%s' bytes=%d",
+                upload_filename, upload_mime, upload_bytes_len,
+            )
+
+            # Validate extension
+            ext = Path(upload_filename).suffix.lower()
+            if ext and ext not in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
+                logger.warning("[TARGET_UPLOAD_REJECTED] Unsupported image extension '%s'", ext)
+                return JSONResponse(
+                    content={
+                        "status": "error",
+                        "code": "IMAGE_DECODE_FAILED",
+                        "message": f"Unsupported image extension '{ext}'. Please upload JPG, PNG, or WEBP.",
+                    },
+                    status_code=400,
+                )
+
+            if raw_img_bytes:
+                img, decode_meta = decode_face_image_bytes(raw_img_bytes)
+                logger.info(
+                    "[TARGET_DECODE_A2] success=%s w=%s h=%s channels=%s dtype=%s orientation=%s debug_path=%s",
+                    decode_meta.get("success"),
+                    decode_meta.get("width"),
+                    decode_meta.get("height"),
+                    decode_meta.get("channels"),
+                    decode_meta.get("dtype"),
+                    decode_meta.get("orientation_tag"),
+                    decode_meta.get("debug_path"),
+                )
+                if not decode_meta.get("success"):
+                    return JSONResponse(
+                        content={
+                            "status": "error",
+                            "code": "IMAGE_DECODE_FAILED",
+                            "message": decode_meta.get("error") or "Failed to decode uploaded image",
+                            "details": decode_meta,
+                        },
+                        status_code=400,
+                    )
 
     else:
         try:
@@ -706,18 +774,31 @@ async def register_target(request: Request) -> JSONResponse:
                 import base64
                 if "," in b64_img:
                     b64_img = b64_img.split(",", 1)[1]
-                img_bytes = base64.b64decode(b64_img)
-                nparr = np.frombuffer(img_bytes, np.uint8)
-                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                raw_img_bytes = base64.b64decode(b64_img)
+                upload_bytes_len = len(raw_img_bytes)
+                img, decode_meta = decode_face_image_bytes(raw_img_bytes)
+                logger.info(
+                    "[TARGET_DECODE_A2_BASE64] success=%s w=%s h=%s dtype=%s",
+                    decode_meta.get("success"), decode_meta.get("width"), decode_meta.get("height"), decode_meta.get("dtype"),
+                )
+                if not decode_meta.get("success"):
+                    return JSONResponse(
+                        content={
+                            "status": "error",
+                            "code": "IMAGE_DECODE_FAILED",
+                            "message": decode_meta.get("error") or "Failed to decode base64 image",
+                        },
+                        status_code=400,
+                    )
             except Exception as exc:
                 return JSONResponse(
-                    content={"status": "error", "message": f"Invalid base64 image: {exc}"},
+                    content={"status": "error", "code": "IMAGE_DECODE_FAILED", "message": f"Invalid base64 image: {exc}"},
                     status_code=400,
                 )
 
     if not name:
         return JSONResponse(
-            content={"status": "error", "message": "Target name is required"},
+            content={"status": "error", "code": "INVALID_NAME", "message": "Target name is required"},
             status_code=400,
         )
 
@@ -728,6 +809,26 @@ async def register_target(request: Request) -> JSONResponse:
             clothing_color=color,
             face_threshold=threshold,
         )
+
+        # Notify backend AI server (:8000) if active so live AI pipeline has the target
+        b_url = get_backend_url(request).rstrip("/")
+        try:
+            import base64
+            sync_payload: dict[str, Any] = {
+                "id": target.id,
+                "name": target.name,
+                "color": target.clothing_color,
+                "threshold": target.face_threshold,
+            }
+            if raw_img_bytes:
+                sync_payload["face_image_base64"] = base64.b64encode(raw_img_bytes).decode("ascii")
+
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                await client.post(f"{b_url}/api/register_target", json=sync_payload)
+                logger.info("[TARGET_SYNC_BACKEND] Synced target '%s' (%s) with backend %s", target.name, target.id, b_url)
+        except Exception as sync_exc:
+            logger.debug("[TARGET_SYNC_BACKEND_NOTE] Backend sync note (backend may be offline or local): %s", sync_exc)
+
         return JSONResponse(
             content={
                 "status": "ok",
@@ -736,11 +837,25 @@ async def register_target(request: Request) -> JSONResponse:
             },
             status_code=200,
         )
-    except ValueError as exc:
-        return JSONResponse(content={"status": "error", "message": str(exc)}, status_code=400)
-    except Exception as exc:
+    except TargetRegistrationError as exc:
         return JSONResponse(
-            content={"status": "error", "message": f"Registration failed: {exc}"},
+            content={
+                "status": "error",
+                "code": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            },
+            status_code=400,
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            content={"status": "error", "code": "VALIDATION_ERROR", "message": str(exc)},
+            status_code=400,
+        )
+    except Exception as exc:
+        logger.error("[TARGET_REGISTER_ERROR] Unexpected error: %s", exc, exc_info=True)
+        return JSONResponse(
+            content={"status": "error", "code": "INTERNAL_ERROR", "message": f"Registration failed: {exc}"},
             status_code=500,
         )
 
@@ -1006,10 +1121,10 @@ async def get_status(request: Request) -> JSONResponse:
     """Operational status check."""
     b_url = get_backend_url(request).rstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=1.5) as client:
-            resp = await client.get(f"{b_url}/status")
-            if resp.status_code == 200:
-                return JSONResponse(content=resp.json(), status_code=200)
+        client = get_backend_http_client()
+        resp = await client.get(f"{b_url}/status", timeout=1.5)
+        if resp.status_code == 200:
+            return JSONResponse(content=resp.json(), status_code=200)
     except Exception:
         pass
     return JSONResponse(

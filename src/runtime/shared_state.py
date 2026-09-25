@@ -51,6 +51,25 @@ class TelemetrySnapshot:
     dropped_frames: int = 0
     buffer_age_ms: float = 0.0
 
+    # Stream Pacing & Black-Screen Diagnostics (Phase B & C)
+    source_generation: int = 1
+    mjpeg_clients: int = 0
+    mjpeg_connection_generation: int = 0
+    last_jpeg_success: bool = True
+    last_jpeg_error: str = ""
+    decoded_frames_total: int = 0
+    decoded_fps: float = 0.0
+    paced_frames_total: int = 0
+    paced_fps: float = 0.0
+    published_frames_total: int = 0
+    publish_fps: float = 0.0
+    frames_dropped_by_pacer: int = 0
+    jitter_buffer_frames: int = 0
+    jitter_buffer_ms: float = 0.0
+    last_decoded_frame_age: float = 0.0
+    last_paced_frame_age: float = 0.0
+    last_published_frame_age: float = 0.0
+
     def to_dict(self) -> dict[str, Any]:
         """Convert snapshot to standard Python dict."""
         d = asdict(self)
@@ -69,11 +88,38 @@ class SharedRuntimeState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
 
-        # Frames
+        # Frames & Source Generation
+        self._source_generation: int = 1
         self._latest_frame: np.ndarray | None = None
         self._annotated_frame: np.ndarray | None = None
+        self._last_good_annotated_frame: np.ndarray | None = None
+        self._last_good_source_generation: int = 0
         self._frame_id: int = 0
         self._timestamp: float = time.time()
+        self._last_processed_frame_time: float = 0.0
+        self._last_annotated_frame_time: float = 0.0
+
+        # MJPEG Publisher Diagnostics
+        self._last_jpeg_encode_time: float = 0.0
+        self._last_mjpeg_publish_time: float = 0.0
+        self._last_jpeg_success: bool = True
+        self._last_jpeg_error: str = ""
+        self._mjpeg_clients_count: int = 0
+        self._mjpeg_connection_generation: int = 0
+
+        # Pacer Diagnostics
+        self._decoded_frames_total: int = 0
+        self._decoded_fps: float = 0.0
+        self._paced_frames_total: int = 0
+        self._paced_fps: float = 0.0
+        self._published_frames_total: int = 0
+        self._publish_fps: float = 0.0
+        self._frames_dropped_by_pacer: int = 0
+        self._jitter_buffer_frames: int = 0
+        self._jitter_buffer_ms: float = 0.0
+        self._last_decoded_frame_age: float = 0.0
+        self._last_paced_frame_age: float = 0.0
+        self._last_published_frame_age: float = 0.0
 
         # Status: "STOPPED", "IDLE", "RUNNING", "ERROR"
         self._status: str = "STOPPED"
@@ -114,36 +160,28 @@ class SharedRuntimeState:
         self._buffer_age_ms = 0.0
 
     @property
-    def status(self) -> str:
-        """Thread-safe public status accessor."""
+    def source_generation(self) -> int:
         with self._lock:
-            return self._status
+            return self._source_generation
 
     @property
-    def is_idle(self) -> bool:
+    def mjpeg_clients_count(self) -> int:
         with self._lock:
-            return self._status == "IDLE"
+            return self._mjpeg_clients_count
 
-    @property
-    def is_running(self) -> bool:
-        with self._lock:
-            return self._status == "RUNNING"
+    def clear_frames(self, increment_generation: bool = True) -> None:
+        """Clear cached frames to avoid serving stale video on camera switch or idle.
 
-    @property
-    def people_count(self) -> int:
+        Requirement C3: Always clears last-good frame and increments source_generation
+        so a new source never renders leftover frames from a previous generation.
+        """
         with self._lock:
-            return self._people_count
-
-    @property
-    def car_count(self) -> int:
-        with self._lock:
-            return self._car_count
-
-    def clear_frames(self) -> None:
-        """Clear cached frames to avoid serving stale video on camera switch or idle."""
-        with self._lock:
+            if increment_generation:
+                self._source_generation += 1
             self._latest_frame = None
             self._annotated_frame = None
+            self._last_good_annotated_frame = None
+            self._last_good_source_generation = self._source_generation
 
     def update(
         self,
@@ -172,18 +210,34 @@ class SharedRuntimeState:
         last_event: str | None = None,
         event_count_today: int | None = None,
         last_saved_people_count: int | None = None,
+        decoded_frames_total: int | None = None,
+        decoded_fps: float | None = None,
+        paced_frames_total: int | None = None,
+        paced_fps: float | None = None,
+        published_frames_total: int | None = None,
+        publish_fps: float | None = None,
+        frames_dropped_by_pacer: int | None = None,
+        jitter_buffer_frames: int | None = None,
+        jitter_buffer_ms: float | None = None,
+        last_decoded_frame_age: float | None = None,
+        last_paced_frame_age: float | None = None,
     ) -> None:
         """Atomically update state with the newest frame and metrics.
 
         Overwrites any previous frame to enforce zero-queue latest-frame semantics.
         """
         with self._lock:
+            now = time.time()
             self._frame_id += 1
-            self._timestamp = time.time()
+            self._timestamp = now
+            self._last_processed_frame_time = now
             if latest_frame is not None:
                 self._latest_frame = latest_frame
             if annotated_frame is not None:
                 self._annotated_frame = annotated_frame
+                self._last_annotated_frame_time = now
+                self._last_good_annotated_frame = annotated_frame
+                self._last_good_source_generation = self._source_generation
 
             self._people_count = people_count
             self._car_count = car_count
@@ -203,6 +257,18 @@ class SharedRuntimeState:
             if display_fps is not None: self._display_fps = display_fps
             if dropped_frames is not None: self._dropped_frames = dropped_frames
             if buffer_age_ms is not None: self._buffer_age_ms = buffer_age_ms
+
+            if decoded_frames_total is not None: self._decoded_frames_total = decoded_frames_total
+            if decoded_fps is not None: self._decoded_fps = decoded_fps
+            if paced_frames_total is not None: self._paced_frames_total = paced_frames_total
+            if paced_fps is not None: self._paced_fps = paced_fps
+            if published_frames_total is not None: self._published_frames_total = published_frames_total
+            if publish_fps is not None: self._publish_fps = publish_fps
+            if frames_dropped_by_pacer is not None: self._frames_dropped_by_pacer = frames_dropped_by_pacer
+            if jitter_buffer_frames is not None: self._jitter_buffer_frames = jitter_buffer_frames
+            if jitter_buffer_ms is not None: self._jitter_buffer_ms = jitter_buffer_ms
+            if last_decoded_frame_age is not None: self._last_decoded_frame_age = last_decoded_frame_age
+            if last_paced_frame_age is not None: self._last_paced_frame_age = last_paced_frame_age
 
             if camera_id is not None:
                 self._camera_id = camera_id
@@ -275,6 +341,23 @@ class SharedRuntimeState:
         with self._lock:
             self._stream_health = dict(health)
 
+    def set_mjpeg_clients(self, count: int, generation: int) -> None:
+        """Track active MJPEG streaming client count and connection generation."""
+        with self._lock:
+            self._mjpeg_clients_count = count
+            self._mjpeg_connection_generation = generation
+
+    def record_mjpeg_publish(self, success: bool, error: str = "") -> None:
+        """Record MJPEG frame publish event and latency diagnostics."""
+        with self._lock:
+            now = time.time()
+            self._last_jpeg_encode_time = now
+            self._last_mjpeg_publish_time = now
+            self._last_jpeg_success = success
+            self._last_jpeg_error = error
+            if success:
+                self._published_frames_total += 1
+
     def update_telemetry(self, snapshot: TelemetrySnapshot) -> None:
         """Update telemetry fields from a TelemetrySnapshot."""
         with self._lock:
@@ -299,6 +382,29 @@ class SharedRuntimeState:
         """
         with self._lock:
             return self._frame_id, self._annotated_frame
+
+    def get_frame_for_stream(self) -> tuple[int, np.ndarray | None, bool, int]:
+        """Fetch frame for MJPEG streaming with same-source-generation fallback.
+
+        Requirement C3:
+        - If current annotated frame exists: return (frame_id, frame, False, source_generation).
+        - If temporary gap exists but same-generation last good frame is cached:
+          return (frame_id, last_good_frame, True, source_generation).
+        - If no frame exists for this generation (e.g. freshly switched or reset):
+          return (frame_id, None, True, source_generation).
+
+        Returns:
+            tuple[int, np.ndarray | None, bool, int]: (frame_id, frame, is_fallback, source_generation)
+        """
+        with self._lock:
+            if self._annotated_frame is not None:
+                return self._frame_id, self._annotated_frame, False, self._source_generation
+            if (
+                self._last_good_annotated_frame is not None
+                and self._last_good_source_generation == self._source_generation
+            ):
+                return self._frame_id, self._last_good_annotated_frame, True, self._source_generation
+            return self._frame_id, None, True, self._source_generation
 
     def get_raw_frame(self) -> tuple[int, np.ndarray | None]:
         """Fetch the newest raw frame and its frame ID."""
@@ -343,6 +449,8 @@ class SharedRuntimeState:
                 stream_alive = (camera_status == "RUNNING")
                 err = self._error_message
 
+            last_pub_age = max(0.0, now - self._last_mjpeg_publish_time) if self._last_mjpeg_publish_time > 0 else 0.0
+
             return TelemetrySnapshot(
                 frame_id=self._frame_id,
                 timestamp=self._timestamp,
@@ -372,9 +480,28 @@ class SharedRuntimeState:
                 last_event_time=self._last_event_time,
                 last_saved_people_count=self._last_saved_people_count,
                 stream_health=dict(self._stream_health),
-                capture_fps=self._capture_fps, inference_fps=self._inference_fps,
-                display_fps=self._display_fps, dropped_frames=self._dropped_frames,
+                capture_fps=self._capture_fps,
+                inference_fps=self._inference_fps,
+                display_fps=self._display_fps,
+                dropped_frames=self._dropped_frames,
                 buffer_age_ms=self._buffer_age_ms,
+                source_generation=self._source_generation,
+                mjpeg_clients=self._mjpeg_clients_count,
+                mjpeg_connection_generation=self._mjpeg_connection_generation,
+                last_jpeg_success=self._last_jpeg_success,
+                last_jpeg_error=self._last_jpeg_error,
+                decoded_frames_total=self._decoded_frames_total,
+                decoded_fps=self._decoded_fps,
+                paced_frames_total=self._paced_frames_total,
+                paced_fps=self._paced_fps,
+                published_frames_total=self._published_frames_total,
+                publish_fps=self._publish_fps,
+                frames_dropped_by_pacer=self._frames_dropped_by_pacer,
+                jitter_buffer_frames=self._jitter_buffer_frames,
+                jitter_buffer_ms=self._jitter_buffer_ms,
+                last_decoded_frame_age=self._last_decoded_frame_age,
+                last_paced_frame_age=self._last_paced_frame_age,
+                last_published_frame_age=round(last_pub_age, 2),
             )
 
     def reset(self) -> None:
@@ -382,6 +509,8 @@ class SharedRuntimeState:
         with self._lock:
             self._latest_frame = None
             self._annotated_frame = None
+            self._last_good_annotated_frame = None
+            self._last_good_source_generation = self._source_generation
             self._frame_id = 0
             self._status = "STOPPED"
             self._error_message = ""
@@ -394,3 +523,4 @@ class SharedRuntimeState:
 
 # Global shared singleton instance
 shared_state = SharedRuntimeState()
+

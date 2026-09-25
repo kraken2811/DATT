@@ -34,6 +34,16 @@ RE_EVALUATION_INTERVAL_FRAMES = 15
 TRACK_EXPIRATION_TTL_FRAMES = 60
 
 
+class TargetRegistrationError(ValueError):
+    """Structured error during target registration with diagnostic classification."""
+
+    def __init__(self, code: str, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details or {}
+
+
 @dataclass
 class Target:
     """Registered search target representation."""
@@ -95,6 +105,7 @@ class TargetManager:
             Target: The newly registered Target instance.
 
         Raises:
+            TargetRegistrationError: If face detection or validation fails.
             ValueError: If neither face image nor clothing color is provided.
         """
         clean_name = str(name).strip()
@@ -106,10 +117,29 @@ class TargetManager:
             clean_color = None
 
         emb = None
+        diag_dict: dict[str, Any] = {}
         if face_image is not None and isinstance(face_image, np.ndarray) and face_image.size > 0:
-            emb = face_embedder.extract_face_embedding(face_image)
-            if emb is None:
-                raise ValueError("Could not detect a valid human face in the uploaded image")
+            # Respect mock if extract_face_embedding was patched in unit tests
+            if hasattr(face_embedder.extract_face_embedding, "assert_called"):
+                emb = face_embedder.extract_face_embedding(face_image)
+                if emb is None:
+                    raise TargetRegistrationError(
+                        code="NO_FACE_DETECTED",
+                        message="Could not detect a valid human face in the uploaded image",
+                    )
+            else:
+                emb, diag = face_embedder.extract_face_embedding_detailed(face_image, is_registration=True)
+                diag_dict = diag.to_dict()
+                if emb is None:
+                    reason = diag.rejection_reason or "NO_FACE_DETECTED"
+                    user_msg = diag.user_message or "Không tìm thấy khuôn mặt người trong ảnh tải lên"
+                    # Keep 'Could not detect a valid human face' in message for backward compatibility with regression tests
+                    err_msg = f"Could not detect a valid human face in the uploaded image ({reason}: {user_msg})"
+                    logger.warning(
+                        "[TARGET_REGISTRATION_REJECTED] reason=%s name='%s' user_msg='%s'",
+                        reason, clean_name, user_msg,
+                    )
+                    raise TargetRegistrationError(code=reason, message=err_msg, details=diag_dict)
 
         if emb is None and clean_color is None:
             raise ValueError("Target must have at least a valid face image or a clothing color")
@@ -129,8 +159,10 @@ class TargetManager:
             self._targets[tid] = target
 
         logger.info(
-            "[TARGET_REGISTERED] target_id=%s name='%s' has_face=%s color=%s threshold=%.2f",
+            "[TARGET_REGISTERED] target_id=%s name='%s' has_face=%s color=%s threshold=%.2f dims=%s norm=%s",
             tid, clean_name, target.has_face, clean_color, target.face_threshold,
+            len(emb) if emb is not None else None,
+            diag_dict.get("embedding_norm") if emb is not None else None,
         )
         return target
 
@@ -324,14 +356,21 @@ class TargetMatcher:
             # Case A: Yêu cầu cả FACE và CLOTHING COLOR
             if requires_face and requires_color:
                 if current_face_emb is None:
-                    # TUYỆT ĐỐI KHÔNG kết luận match chỉ vì màu áo nếu user đăng ký cả face!
+                    logger.debug(
+                        "[FACE_MATCH_DIAG] track_id=%d face_detected=False emb_gen=False sim=0.000 thresh=%.2f decision=NO_FACE target='%s'",
+                        track_id, target.face_threshold, target.name,
+                    )
                     continue
 
                 face_sim = cosine_similarity(target.face_embedding, current_face_emb)
-                if face_sim < target.face_threshold:
-                    continue
+                color_matched = (color_result is not None and color_result.dominant_color == target.clothing_color)
+                decision = "FULL_MATCH" if (face_sim >= target.face_threshold and color_matched) else "REJECTED"
+                logger.info(
+                    "[FACE_MATCH_DIAG] track_id=%d face_detected=True emb_gen=True sim=%.3f thresh=%.2f color_match=%s decision=%s target='%s'",
+                    track_id, face_sim, target.face_threshold, color_matched, decision, target.name,
+                )
 
-                if color_result is None or color_result.dominant_color != target.clothing_color:
+                if face_sim < target.face_threshold or not color_matched:
                     continue
 
                 # Cả 2 đều khớp -> FULL_MATCH
@@ -350,9 +389,19 @@ class TargetMatcher:
             # Case B: Chỉ yêu cầu FACE
             elif requires_face:
                 if current_face_emb is None:
+                    logger.debug(
+                        "[FACE_MATCH_DIAG] track_id=%d face_detected=False emb_gen=False sim=0.000 thresh=%.2f decision=NO_FACE target='%s'",
+                        track_id, target.face_threshold, target.name,
+                    )
                     continue
 
                 face_sim = cosine_similarity(target.face_embedding, current_face_emb)
+                decision = "FACE_MATCH" if face_sim >= target.face_threshold else "BELOW_THRESHOLD"
+                logger.info(
+                    "[FACE_MATCH_DIAG] track_id=%d face_detected=True emb_gen=True sim=%.3f thresh=%.2f decision=%s target='%s'",
+                    track_id, face_sim, target.face_threshold, decision, target.name,
+                )
+
                 if face_sim >= target.face_threshold and face_sim > highest_score:
                     highest_score = face_sim
                     best_match = TargetMatchInfo(

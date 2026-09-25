@@ -78,6 +78,51 @@ class CameraManager:
             return self._reader.buffer_age_ms if self._reader else 0.0
 
     @property
+    def decoded_frames_total(self) -> int:
+        with self._lock:
+            return getattr(self._reader, "decoded_frames_total", 0) if self._reader else 0
+
+    @property
+    def decoded_fps(self) -> float:
+        with self._lock:
+            return getattr(self._reader, "decoded_fps", 0.0) if self._reader else 0.0
+
+    @property
+    def paced_frames_total(self) -> int:
+        with self._lock:
+            return getattr(self._reader, "paced_frames_total", 0) if self._reader else 0
+
+    @property
+    def paced_fps(self) -> float:
+        with self._lock:
+            return getattr(self._reader, "paced_fps", 0.0) if self._reader else 0.0
+
+    @property
+    def frames_dropped_by_pacer(self) -> int:
+        with self._lock:
+            return getattr(self._reader, "frames_dropped_by_pacer", 0) if self._reader else 0
+
+    @property
+    def jitter_buffer_frames(self) -> int:
+        with self._lock:
+            return getattr(self._reader, "jitter_buffer_frames", 0) if self._reader else 0
+
+    @property
+    def jitter_buffer_ms(self) -> float:
+        with self._lock:
+            return getattr(self._reader, "jitter_buffer_ms", 0.0) if self._reader else 0.0
+
+    @property
+    def last_decoded_frame_age(self) -> float:
+        with self._lock:
+            return getattr(self._reader, "last_decoded_frame_age", 999.0) if self._reader else 999.0
+
+    @property
+    def last_paced_frame_age(self) -> float:
+        with self._lock:
+            return getattr(self._reader, "last_paced_frame_age", 999.0) if self._reader else 999.0
+
+    @property
     def stream_alive(self) -> bool:
         """Whether the active stream is alive and publishing frames."""
         with self._lock:

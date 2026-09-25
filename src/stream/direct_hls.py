@@ -130,6 +130,7 @@ class DirectHLSReader:
         self._lock = threading.RLock()
         self.stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._pacer_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self._process: subprocess.Popen | None = None
 
@@ -140,6 +141,21 @@ class DirectHLSReader:
         self._started_at: float = 0.0
         self._stream_alive: bool = False
         self.finished: bool = False
+
+        # Phase B: Bounded Jitter Buffer & Pacer (B1-B5)
+        self._jitter_buffer: deque[tuple[int, float, np.ndarray]] = deque()
+        self._max_jitter_frames: int = 45  # ~1.5s at 30 FPS
+        self._max_jitter_age_seconds: float = 1.0  # 1000 ms drop threshold
+        self._target_cadence_seconds: float = 1.0 / 30.0  # ~33.3 ms (30 FPS)
+        self._decoded_frames_total: int = 0
+        self._decoded_fps: float = 0.0
+        self._decoded_timestamps: deque[float] = deque(maxlen=150)
+        self._paced_frames_total: int = 0
+        self._paced_fps: float = 0.0
+        self._paced_timestamps: deque[float] = deque(maxlen=150)
+        self._frames_dropped_by_pacer: int = 0
+        self._last_decoded_time: float = 0.0
+        self._last_paced_time: float = 0.0
 
         self._stream_fps: float = 0.0
         self._timestamps: deque[float] = deque(maxlen=150)
@@ -152,7 +168,7 @@ class DirectHLSReader:
     @property
     def stream_fps(self) -> float:
         with self._lock:
-            return self._stream_fps
+            return self._paced_fps if self._paced_fps > 0 else self._stream_fps
 
     @property
     def fps(self) -> float:
@@ -161,14 +177,63 @@ class DirectHLSReader:
 
     @property
     def capture_fps(self) -> float:
-        return self.stream_fps
+        with self._lock:
+            return self._decoded_fps if self._decoded_fps > 0 else self.stream_fps
+
+    @property
+    def decoded_frames_total(self) -> int:
+        with self._lock:
+            return self._decoded_frames_total
+
+    @property
+    def decoded_fps(self) -> float:
+        with self._lock:
+            return self._decoded_fps
+
+    @property
+    def paced_frames_total(self) -> int:
+        with self._lock:
+            return self._paced_frames_total
+
+    @property
+    def paced_fps(self) -> float:
+        with self._lock:
+            return self._paced_fps
+
+    @property
+    def frames_dropped_by_pacer(self) -> int:
+        with self._lock:
+            return self._frames_dropped_by_pacer
+
+    @property
+    def jitter_buffer_frames(self) -> int:
+        with self._lock:
+            return len(self._jitter_buffer)
+
+    @property
+    def jitter_buffer_ms(self) -> float:
+        with self._lock:
+            if not self._jitter_buffer:
+                return 0.0
+            return max(0.0, (time.time() - self._jitter_buffer[0][1]) * 1000.0)
+
+    @property
+    def last_decoded_frame_age(self) -> float:
+        with self._lock:
+            if self._last_decoded_time <= 0.0:
+                return 999.0
+            return max(0.0, time.time() - self._last_decoded_time)
+
+    @property
+    def last_paced_frame_age(self) -> float:
+        with self._lock:
+            if self._last_paced_time <= 0.0:
+                return 999.0
+            return max(0.0, time.time() - self._last_paced_time)
 
     @property
     def buffer_age_ms(self) -> float:
-        with self._lock:
-            if self._last_frame_timestamp <= 0.0:
-                return 0.0
-            return max(0.0, (time.time() - self._last_frame_timestamp) * 1000.0)
+        return self.jitter_buffer_ms
 
     @property
     def last_frame_time(self) -> float:
@@ -220,13 +285,22 @@ class DirectHLSReader:
                 "frames_received": self._frames_received,
                 "frame_age_seconds": round(self.frame_age_seconds, 2),
                 "stream_fps": round(self.stream_fps, 1),
+                "decoded_frames_total": self._decoded_frames_total,
+                "decoded_fps": round(self._decoded_fps, 1),
+                "paced_frames_total": self._paced_frames_total,
+                "paced_fps": round(self._paced_fps, 1),
+                "frames_dropped_by_pacer": self._frames_dropped_by_pacer,
+                "jitter_buffer_frames": len(self._jitter_buffer),
+                "jitter_buffer_ms": round(self.jitter_buffer_ms, 1),
+                "last_decoded_frame_age": round(self.last_decoded_frame_age, 2),
+                "last_paced_frame_age": round(self.last_paced_frame_age, 2),
                 "status": self.status,
                 "last_error": self._last_error_message,
                 "stream_url": self.url,
             }
 
     def start(self) -> None:
-        """Start background FFmpeg reader thread."""
+        """Start background FFmpeg reader and pacer threads."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
@@ -242,19 +316,30 @@ class DirectHLSReader:
             )
             self._thread.start()
 
+            self._pacer_thread = threading.Thread(
+                target=self._pacer_loop,
+                name="DirectHLSPacerThread",
+                daemon=True,
+            )
+            self._pacer_thread.start()
+
     def stop(self) -> None:
-        """Cleanly terminate FFmpeg process and join worker thread."""
+        """Cleanly terminate FFmpeg process and join worker and pacer threads."""
         self.stop_event.set()
         self._cleanup_process()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2.0)
             self._thread = None
+        if self._pacer_thread is not None and self._pacer_thread.is_alive():
+            self._pacer_thread.join(timeout=2.0)
+            self._pacer_thread = None
         with self._lock:
             self._stream_alive = False
             self.finished = True
+            self._jitter_buffer.clear()
 
     def read(self, timeout: float = 2.0) -> np.ndarray | None:
-        """Return the newest decoded BGR24 frame."""
+        """Return the newest paced BGR24 frame (Requirement B1-B3)."""
         t0 = time.time()
         while time.time() - t0 < timeout:
             if self.stop_event.is_set():
@@ -360,7 +445,7 @@ class DirectHLSReader:
                     pass
 
     def _worker_loop(self) -> None:
-        """Read stdout pipe frames continuously and auto-reconnect if dropped."""
+        """Read stdout pipe frames continuously and append to bounded jitter buffer."""
         sequence = 0
         consecutive_errors = 0
 
@@ -400,22 +485,34 @@ class DirectHLSReader:
                 with self._lock:
                     sequence += 1
                     self._frames_received += 1
-                    self._last_frame_timestamp = now
+                    self._decoded_frames_total += 1
+                    self._last_decoded_time = now
                     self._stream_alive = True
-                    self._latest = HLSFrame(
-                        sequence=sequence,
-                        captured_at=now,
-                        capture_latency_ms=0.0,
-                        frame=frame_arr,
-                    )
-                    self._timestamps.append(now)
+                    self._decoded_timestamps.append(now)
                     cutoff = now - 3.0
-                    while len(self._timestamps) > 2 and self._timestamps[0] < cutoff:
-                        self._timestamps.popleft()
-                    if len(self._timestamps) >= 2:
-                        dt = self._timestamps[-1] - self._timestamps[0]
+                    while len(self._decoded_timestamps) > 2 and self._decoded_timestamps[0] < cutoff:
+                        self._decoded_timestamps.popleft()
+                    if len(self._decoded_timestamps) >= 2:
+                        dt = self._decoded_timestamps[-1] - self._decoded_timestamps[0]
                         if dt >= 1.0:
-                            self._stream_fps = (len(self._timestamps) - 1) / dt
+                            self._decoded_fps = (len(self._decoded_timestamps) - 1) / dt
+                            self._stream_fps = self._decoded_fps
+
+                    # Push decoded frame into Bounded Jitter Buffer (Requirement B4)
+                    self._jitter_buffer.append((sequence, now, frame_arr))
+
+                    # Drop Policy for obsolete backlog (Requirement B5):
+                    # 1. Drop if buffer frame count exceeds max capacity (45 frames)
+                    while len(self._jitter_buffer) > self._max_jitter_frames:
+                        self._jitter_buffer.popleft()
+                        self._frames_dropped_by_pacer += 1
+                        self.dropped_frames += 1
+
+                    # 2. Drop if oldest frame age exceeds max age (1.0 second)
+                    while len(self._jitter_buffer) > 5 and (now - self._jitter_buffer[0][1]) > self._max_jitter_age_seconds:
+                        self._jitter_buffer.popleft()
+                        self._frames_dropped_by_pacer += 1
+                        self.dropped_frames += 1
 
             except Exception as exc:
                 self._last_error_message = str(exc)
@@ -428,3 +525,46 @@ class DirectHLSReader:
         with self._lock:
             self._stream_alive = False
             self.finished = True
+
+    def _pacer_loop(self) -> None:
+        """Cadence-aware frame pacer loop (Requirement B2, B3).
+
+        Releases frames from jitter buffer at stable ~30 FPS cadence (~33.3ms),
+        smoothing out FFmpeg decode bursts into stable realtime presentation.
+        """
+        while not self.stop_event.is_set():
+            packet_handled = False
+            now = time.time()
+            with self._lock:
+                if self._jitter_buffer:
+                    elapsed = now - self._last_paced_time
+                    if elapsed >= self._target_cadence_seconds or self._last_paced_time == 0.0:
+                        seq, dec_time, frame_arr = self._jitter_buffer.popleft()
+                        self._paced_frames_total += 1
+                        self._last_paced_time = now
+                        self._last_frame_timestamp = now
+                        self._latest = HLSFrame(
+                            sequence=seq,
+                            captured_at=dec_time,
+                            capture_latency_ms=max(0.0, (now - dec_time) * 1000.0),
+                            frame=frame_arr,
+                        )
+                        self._paced_timestamps.append(now)
+                        cutoff = now - 3.0
+                        while len(self._paced_timestamps) > 2 and self._paced_timestamps[0] < cutoff:
+                            self._paced_timestamps.popleft()
+                        if len(self._paced_timestamps) >= 2:
+                            dt = self._paced_timestamps[-1] - self._paced_timestamps[0]
+                            if dt >= 1.0:
+                                self._paced_fps = (len(self._paced_timestamps) - 1) / dt
+                        packet_handled = True
+
+            if packet_handled:
+                # Sleep remaining cadence slice
+                spent = time.time() - now
+                rem = self._target_cadence_seconds - spent
+                if rem > 0.002:
+                    time.sleep(rem)
+            else:
+                time.sleep(0.005)
+

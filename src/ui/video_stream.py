@@ -25,12 +25,60 @@ import numpy as np
 
 from src.config.camera_config import list_cameras
 from src.events.event_storage import event_storage
-from src.recognition.target_matcher import target_manager
+from src.face.face_embedder import decode_face_image_bytes
+from src.recognition.target_matcher import TargetRegistrationError, target_manager
 from src.runtime.shared_state import SharedRuntimeState, shared_state
 from src.stream.caltrans_service import caltrans_service
 from src.stream.camera_manager import CameraManager
 from src.stream.preview_manager import preview_manager
 from src.stream.seattle_sdot_service import SEATTLE_STREAM_HEADERS, seattle_service
+
+
+def create_status_placeholder(
+    width: int = 1280,
+    height: int = 720,
+    title: str = "CONNECTING TO CAMERA...",
+    subtitle: str = "Waiting for video stream...",
+) -> bytes:
+    """Render high-contrast, clean status placeholder (Requirement C4).
+
+    Eliminates unexplained black screens with explicit operational state indication.
+    """
+    img = np.full((height, width, 3), (26, 17, 14), dtype=np.uint8)  # Deep slate #0e111a
+    cx = width // 2
+    cy = height // 2
+
+    # Draw camera aperture symbol
+    cv2.circle(img, (cx, cy - 60), 38, (48, 32, 26), -1)
+    cv2.circle(img, (cx, cy - 60), 38, (80, 60, 50), 2, cv2.LINE_AA)
+    cv2.circle(img, (cx, cy - 60), 16, (240, 160, 56), -1)  # Cyan center dot
+
+    # Title & Subtitle text rendering
+    (tw, th), _ = cv2.getTextSize(title, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+    cv2.putText(
+        img,
+        title,
+        (cx - tw // 2, cy + 20),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (240, 240, 245),
+        2,
+        cv2.LINE_AA,
+    )
+    (sw, sh), _ = cv2.getTextSize(subtitle, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+    cv2.putText(
+        img,
+        subtitle,
+        (cx - sw // 2, cy + 55),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (160, 170, 185),
+        1,
+        cv2.LINE_AA,
+    )
+
+    _, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    return enc.tobytes()
 
 
 class StreamRequestHandler(BaseHTTPRequestHandler):
@@ -147,7 +195,15 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def handle_video_feed(self) -> None:
-        """Stream MJPEG multipart video feed using latest-frame semantics."""
+        """Stream MJPEG multipart video feed using latest-frame semantics and stable pacing.
+
+        Requirements C1-C5:
+        - Maintains socket connection alive across temporary source gaps (C2).
+        - Renders same-source-generation last good frame with buffering indicator during stalls (C3).
+        - Prevents cross-generation leaks on source switch (C3).
+        - Displays explicit status placeholder instead of black rectangle when initializing (C4).
+        - Supports concurrent clients without violent socket eviction (C5).
+        """
         self._video_session = self.server.owner.claim_video_client(self)
         if self._video_session is None:
             self.send_response(503)
@@ -157,56 +213,84 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Age", "0")
-        self.send_header("Cache-Control", "no-cache, private")
+        self.send_header("Cache-Control", "no-cache, private, no-store, must-revalidate")
         self.send_header("Pragma", "no-cache")
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.end_headers()
 
-        last_frame_id = -1
-        # Blank placeholder frame while pipeline warms up
-        blank_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-        cv2.putText(
-            blank_frame,
-            "WAITING FOR CAMERA STREAM...",
-            (320, 360),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.0,
-            (0, 200, 255),
-            2,
-            cv2.LINE_AA,
+        last_sent_frame_id = -1
+        last_sent_time = 0.0
+        current_stream_gen = self.state.source_generation
+        placeholder_bytes = create_status_placeholder(
+            title="CONNECTING TO CAMERA...",
+            subtitle="Waiting for video stream...",
         )
-        _, blank_jpeg = cv2.imencode(".jpg", blank_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-        blank_bytes = blank_jpeg.tobytes()
 
         try:
-            while getattr(self.server, "running", True):
-                frame_id, frame = self.state.get_annotated_frame()
+            while getattr(self.server, "running", True) and not getattr(self, "close_connection", False):
+                now = time.time()
+                frame_id, frame, is_fallback, gen = self.state.get_frame_for_stream()
 
-                if frame is None:
-                    # Serve blank placeholder once, then wait
-                    if last_frame_id == -1:
-                        self._write_frame(blank_bytes)
-                        last_frame_id = 0
+                # Source generation change (camera switch)
+                if gen != current_stream_gen:
+                    current_stream_gen = gen
+                    last_sent_frame_id = -1
+                    last_sent_time = 0.0
+                    switch_placeholder = create_status_placeholder(
+                        title="SWITCHING CAMERA...",
+                        subtitle="Connecting to new video source...",
+                    )
+                    self._write_frame(switch_placeholder)
+                    last_sent_time = now
                     time.sleep(0.05)
                     continue
 
-                # If no new frame has been processed by AI yet, sleep briefly
-                if frame_id == last_frame_id:
-                    time.sleep(0.015)  # ~60 Hz poll, avoiding CPU spin
+                # Case A: Fresh new frame available
+                if frame is not None and frame_id != last_sent_frame_id and not is_fallback:
+                    success, encoded_jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    if success:
+                        self._write_frame(encoded_jpg.tobytes())
+                        last_sent_frame_id = frame_id
+                        last_sent_time = now
+                        self.state.record_mjpeg_publish(success=True)
+                    else:
+                        self.state.record_mjpeg_publish(success=False, error="cv2.imencode failed")
+                    time.sleep(0.01)
                     continue
 
-                # New frame available: drop any intermediate frames, encode latest
-                last_frame_id = frame_id
-                success, encoded_jpg = cv2.imencode(
-                    ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80]
-                )
-                if not success:
-                    continue
+                # Case B: Gap or stall in incoming frames (keep MJPEG alive, C2, C3, C4)
+                elapsed_since_sent = now - last_sent_time
+                if elapsed_since_sent >= 0.5:  # Heartbeat cadence (~2 FPS) to keep socket and proxy alive
+                    if frame is not None:
+                        # Same-generation frame available: draw subtle warning banner if gap persists
+                        display_frame = frame.copy()
+                        h, w = display_frame.shape[:2]
+                        cv2.rectangle(display_frame, (0, 0), (w, 36), (15, 23, 42), -1)
+                        banner_text = "● TEMPORARY SOURCE DELAY - BUFFERING..." if not is_fallback else "● BUFFERING NEXT CHUNK..."
+                        cv2.putText(
+                            display_frame,
+                            banner_text,
+                            (20, 24),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.65,
+                            (0, 215, 255),
+                            2,
+                            cv2.LINE_AA,
+                        )
+                        success, encoded_jpg = cv2.imencode(".jpg", display_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                        if success:
+                            self._write_frame(encoded_jpg.tobytes())
+                            last_sent_time = now
+                            self.state.record_mjpeg_publish(success=True)
+                    else:
+                        # No valid frame for this generation yet: send explicit placeholder (C4)
+                        self._write_frame(placeholder_bytes)
+                        last_sent_time = now
+                        self.state.record_mjpeg_publish(success=True)
 
-                self._write_frame(encoded_jpg.tobytes())
+                time.sleep(0.015)
 
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, socket.timeout, EOFError):
-            # Client closed browser tab or proxy stopped reading.
             pass
         finally:
             self.server.owner.release_video_client(self, self._video_session)
@@ -302,6 +386,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
+            self.state.clear_frames(increment_generation=True)
             cam_info = self.camera_manager.switch_camera(camera_id)
             self.state.set_camera(cam_info.id, cam_info.name)
             self._send_json_response(
@@ -347,6 +432,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
+            self.state.clear_frames(increment_generation=True)
             cam_info = self.camera_manager.set_video_source(source_type=stype, source=src, loop=loop, name=name)
             self.state.set_camera(cam_info.id, cam_info.name)
             self._send_json_response({
@@ -364,6 +450,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         name = data.get("name", "")
         color = data.get("color") or data.get("clothing_color")
         threshold = float(data.get("threshold", data.get("face_threshold", 0.45)))
+        target_id = data.get("id") or data.get("target_id")
         b64_img = data.get("face_image") or data.get("face_image_base64")
 
         img = None
@@ -372,10 +459,16 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                 if "," in b64_img:
                     b64_img = b64_img.split(",", 1)[1]
                 img_bytes = base64.b64decode(b64_img)
-                nparr = np.frombuffer(img_bytes, np.uint8)
-                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                img, decode_meta = decode_face_image_bytes(img_bytes)
+                if not decode_meta.get("success"):
+                    self._send_json_response({
+                        "status": "error",
+                        "code": "IMAGE_DECODE_FAILED",
+                        "message": decode_meta.get("error") or "Failed to decode image bytes",
+                    }, code=400)
+                    return
             except Exception as exc:
-                self._send_json_response({"status": "error", "message": f"Invalid base64 image: {exc}"}, code=400)
+                self._send_json_response({"status": "error", "code": "IMAGE_DECODE_FAILED", "message": f"Invalid base64 image: {exc}"}, code=400)
                 return
 
         try:
@@ -384,14 +477,22 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                 face_image=img,
                 clothing_color=color,
                 face_threshold=threshold,
+                target_id=target_id,
             )
             self._send_json_response({
                 "status": "ok",
                 "target": target.to_dict(),
                 "message": f"Target '{target.name}' registered successfully",
             })
+        except TargetRegistrationError as exc:
+            self._send_json_response({
+                "status": "error",
+                "code": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            }, code=400)
         except Exception as exc:
-            self._send_json_response({"status": "error", "message": str(exc)}, code=400)
+            self._send_json_response({"status": "error", "code": "VALIDATION_ERROR", "message": str(exc)}, code=400)
 
     def handle_public_cameras(self, query: dict[str, list[str]]) -> None:
         """Return public CCTV camera catalog for Caltrans and/or Seattle SDOT."""
@@ -564,6 +665,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         # Enter switching mode: suppress spurious ERROR status from AI pipeline
         # during the brief frame gap while the source is being replaced.
         self.state.set_switching()
+        self.state.clear_frames(increment_generation=True)
 
         try:
             cam_info = self.camera_manager.set_video_source(
@@ -769,30 +871,29 @@ class MJPEGServer:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._client_lock = threading.Lock()
-        self._active_video_client: tuple[StreamRequestHandler, int] | None = None
+        self._active_clients: dict[int, StreamRequestHandler] = {}
+        self._max_clients = 8
         self._client_generation = 0
 
     def claim_video_client(self, handler: StreamRequestHandler) -> int:
-        """Keep at most one stream; a reconnect evicts the previous socket."""
+        """Allow concurrent streams without violent eviction (Requirement C5)."""
         with self._client_lock:
-            old = self._active_video_client
-            if old is not None:
-                old_handler, _ = old
-                try:
-                    old_handler.close_connection = True
-                    old_handler.connection.shutdown(socket.SHUT_RDWR)
-                    old_handler.connection.close()
-                except (OSError, AttributeError):
-                    pass
             self._client_generation += 1
             token = self._client_generation
-            self._active_video_client = (handler, token)
+            if len(self._active_clients) >= self._max_clients:
+                oldest_token = min(self._active_clients.keys())
+                old_handler = self._active_clients.pop(oldest_token, None)
+                if old_handler is not None:
+                    old_handler.close_connection = True
+            self._active_clients[token] = handler
+            self.state.set_mjpeg_clients(len(self._active_clients), self._client_generation)
             return token
 
     def release_video_client(self, handler: StreamRequestHandler, token: int | None) -> None:
         with self._client_lock:
-            if self._active_video_client == (handler, token):
-                self._active_video_client = None
+            if token is not None:
+                self._active_clients.pop(token, None)
+            self.state.set_mjpeg_clients(len(self._active_clients), self._client_generation)
 
     def start(self) -> None:
         """Start the MJPEG HTTP server in a daemon thread."""
