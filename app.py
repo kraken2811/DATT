@@ -14,13 +14,13 @@ import threading
 import time
 
 import config
-from src.counter.zone_counter import ZoneCounter
-from src.detector.yolo_detector import YOLODetector
+from src.counter.zone_counter import CarCounter, ZoneCounter
+from src.detector.yolo_detector import DetectionsData, YOLODetector
 from src.events.event_manager import event_manager
 from src.recognition.target_matcher import target_matcher
 from src.runtime.shared_state import shared_state
 from src.stream.camera_manager import CameraManager
-from src.tracker.bytetrack_tracker import PersonTracker
+from src.tracker.bytetrack_tracker import CarTracker, PersonTracker
 from src.ui.frame_renderer import render_frame
 from src.ui.video_stream import start_stream_server
 from src.utils.fps import FPSMeter
@@ -38,6 +38,7 @@ def log_realtime_hud(
     detection_count: int,
     track_count: int,
     people_in_view: int,
+    car_in_view: int = 0,
     camera_name: str = "",
     input_res: str = "1280x720",
     inference_res: str = "960x960",
@@ -59,6 +60,7 @@ def log_realtime_hud(
         "Detection count:  %d\n"
         "Track count:      %d\n"
         "People in view:   %d\n"
+        "Cars in view:     %d\n"
         "========================================================",
         cam_str,
         input_res,
@@ -73,6 +75,7 @@ def log_realtime_hud(
         detection_count,
         track_count,
         people_in_view,
+        car_in_view,
     )
 
 
@@ -95,7 +98,7 @@ def run_pipeline(
 
     logger.info("==================================================")
     mode_desc = "Phase 4 Version 3 Camera & Event System" if ui_mode else "Phase 3.2 Colab CUDA"
-    logger.info("Starting DATT - AI People Counter (%s)", mode_desc)
+    logger.info("Starting DATT - AI Vision Monitor (%s)", mode_desc)
     logger.info("Inference resolution: %dx%d", config.IMG_SIZE, config.IMG_SIZE)
     logger.info("==================================================")
 
@@ -109,13 +112,18 @@ def run_pipeline(
         detector.device_name,
     )
 
-    logger.info("Initializing PersonTracker (ByteTrack)...")
+    logger.info("Initializing PersonTracker & CarTracker (ByteTrack)...")
     tracker = PersonTracker(config)
+    car_tracker = CarTracker(config)
 
-    logger.info("Initializing ZoneCounter...")
+    logger.info("Initializing ZoneCounter & CarCounter...")
     counter = ZoneCounter(
         polygon=config.ZONE_POLYGON,
         person_class_id=config.PERSON_CLASS_ID,
+    )
+    car_counter = CarCounter(
+        polygon=config.ZONE_POLYGON,
+        car_class_id=getattr(config, "CAR_CLASS_ID", 2),
     )
 
     logger.info("Initializing CameraManager...")
@@ -153,6 +161,7 @@ def run_pipeline(
     last_det_count = 0
     last_track_count = 0
     last_people_in_view = 0
+    last_car_in_view = 0
 
     try:
         while True:
@@ -165,6 +174,7 @@ def run_pipeline(
                 if active_cam is not None:
                     active_cam = None
                     shared_state.set_camera("", "")
+                    shared_state.clear_frames()
                     if shared_state.status != "ERROR":
                         shared_state.set_status("IDLE")
                 time.sleep(0.05)
@@ -173,17 +183,22 @@ def run_pipeline(
             # Check if camera was switched externally (via Dashboard / HTTP endpoint)
             if active_cam is None or current_cam.id != active_cam.id:
                 logger.info(
-                    "Detected runtime camera activation/switch: '%s' -> '%s'. Resetting tracker.",
+                    "Detected runtime camera activation/switch: '%s' -> '%s'. Resetting trackers.",
                     active_cam.id if active_cam else "None",
                     current_cam.id,
                 )
                 active_cam = current_cam
                 tracker.reset()
+                car_tracker.reset()
                 target_matcher.reset_tracks()
                 counter.people_count = 0
+                car_counter.car_count = 0
                 event_manager.reset()
+                shared_state.clear_frames()
                 shared_state.set_camera(active_cam.id, active_cam.name)
                 shared_state.set_status("RUNNING")
+                # Pipeline has caught up with the switch; allow ERROR propagation again
+                shared_state.clear_switching()
 
             # 1. Read newest frame from CameraManager
             frame = camera_mgr.read(timeout=2.0)
@@ -199,18 +214,35 @@ def run_pipeline(
             # Start total pipeline timer
             pipeline_t0 = time.perf_counter()
 
-            # 2. Detect with YOLO (PyTorch CUDA)
+            # 2. Detect with YOLO (PyTorch CUDA) - exactly 1 inference pass
             detections = detector.detect(frame)
             last_yolo_ms = detector.last_yolo_ms
 
-            # 3. Update ByteTrack
-            tracks = tracker.update(detections)
+            # Split detections by class for independent ByteTrack trackers
+            person_mask = detections.class_id == config.PERSON_CLASS_ID
+            car_mask = detections.class_id == getattr(config, "CAR_CLASS_ID", 2)
 
-            # 4. Target Matcher (Associates registered targets with active ByteTrack tracks)
+            person_dets = DetectionsData({
+                "xyxy": detections.xyxy[person_mask],
+                "confidence": detections.confidence[person_mask],
+                "class_id": detections.class_id[person_mask],
+            })
+            car_dets = DetectionsData({
+                "xyxy": detections.xyxy[car_mask],
+                "confidence": detections.confidence[car_mask],
+                "class_id": detections.class_id[car_mask],
+            })
+
+            # 3. Update independent ByteTrack trackers
+            tracks = tracker.update(person_dets)
+            car_tracks = car_tracker.update(car_dets)
+
+            # 4. Target Matcher (Associates registered targets with active ByteTrack person tracks)
             target_matches = target_matcher.match_tracks(frame, tracks, frame_id=total_frames)
 
-            # 5. Update Zone Occupancy Counter
+            # 5. Update Occupancy Counters
             people_in_view = counter.update(tracks, frame_shape=frame.shape)
+            car_in_view = car_counter.update(car_tracks, frame_shape=frame.shape)
 
             # Measure total pipeline latency (detection + tracking + matching + counting)
             last_pipeline_ms = (time.perf_counter() - pipeline_t0) * 1000
@@ -220,8 +252,9 @@ def run_pipeline(
             pipeline_latencies.append(last_pipeline_ms)
 
             last_det_count = len(detections)
-            last_track_count = len(tracks)
+            last_track_count = len(tracks) + len(car_tracks)
             last_people_in_view = people_in_view
+            last_car_in_view = car_in_view
 
             # 6. UI Observation & Event Layer (Non-blocking latest-frame update)
             if ui_mode:
@@ -229,6 +262,8 @@ def run_pipeline(
                     frame=frame,
                     tracks=tracks,
                     people_count=last_people_in_view,
+                    car_tracks=car_tracks,
+                    car_count=last_car_in_view,
                     zone_polygon=config.ZONE_POLYGON,
                     target_matches=target_matches,
                 )
@@ -242,6 +277,7 @@ def run_pipeline(
                     latest_frame=frame,
                     annotated_frame=annotated_frame,
                     people_count=last_people_in_view,
+                    car_count=last_car_in_view,
                     detection_count=last_det_count,
                     track_count=last_track_count,
                     stream_fps=camera_mgr.stream_fps,
@@ -261,7 +297,7 @@ def run_pipeline(
                     camera_name=active_cam.name,
                 )
 
-            # 6. Measure Processing FPS & Output Realtime HUD Log
+            # 7. Measure Processing FPS & Output Realtime HUD Log
             fps_updated = fps_meter.tick()
             if fps_updated or total_frames == 1:
                 log_realtime_hud(
@@ -275,6 +311,7 @@ def run_pipeline(
                     detection_count=last_det_count,
                     track_count=last_track_count,
                     people_in_view=last_people_in_view,
+                    car_in_view=last_car_in_view,
                     camera_name=active_cam.name,
                     input_res=f"{active_cam.width}x{active_cam.height}",
                     inference_res=f"{config.IMG_SIZE}x{config.IMG_SIZE}",

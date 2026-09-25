@@ -1,0 +1,54 @@
+{
+  "step_a": {
+    "status": "PASSED",
+    "time_to_ports": 5.73,
+    "time_to_ui_shell": 0.026,
+    "time_to_state": 0.542,
+    "time_to_catalog": 1.331,
+    "initial_state": "IDLE"
+  },
+  "step_b": {
+    "status": "PASSED",
+    "camera": "2_Pike_NS",
+    "time_to_running": 7.25,
+    "ffmpeg_pid_1": 16324,
+    "people_count": 0,
+    "car_count": 0,
+    "frames_received": null
+  },
+  "step_c": {
+    "status": "PASSED",
+    "old_ffmpeg_killed": true,
+    "state_after_stop": "IDLE",
+    "port_8000_alive": true
+  },
+  "step_d": {
+    "status": "PASSED",
+    "camera": "3_Spring_EW",
+    "ffmpeg_pid_2": 16968,
+    "time_to_running": 7.32,
+    "people_count": 0,
+    "car_count": 0
+  },
+  "step_e": {
+    "status": "PASSED",
+    "camera": "3_Stewart_NS",
+    "ffmpeg_pid_3": 10396,
+    "old_pid_2_cleaned": true,
+    "time_to_running": 22.65,
+    "people_count": 0,
+    "car_count": 0
+  },
+  "step_f": {
+    "status": "PASSED",
+    "time_to_upload": 0.015,
+    "uploaded_path": "C:\\Users\\User\\Music\\datt\\data\\uploads\\46d07f8a_local.mp4",
+    "time_to_running": 1.08,
+    "people_count": 0,
+    "car_count": 0,
+    "frame_id": 22,
+    "frames_received": 75
+  },
+  "overall": "FAILED",
+  "error": ""
+}

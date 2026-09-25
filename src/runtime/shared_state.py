@@ -25,6 +25,7 @@ class TelemetrySnapshot:
     last_frame_time: float = 0.0
     error_message: str = ""
     people_count: int = 0
+    car_count: int = 0
     detection_count: int = 0
     track_count: int = 0
     stream_fps: float = 0.0
@@ -74,9 +75,11 @@ class SharedRuntimeState:
         self._frame_id: int = 0
         self._timestamp: float = time.time()
 
-        # Status
-        self._status: str = "STOPPED"  # "STOPPED", "RUNNING", "ERROR"
+        # Status: "STOPPED", "IDLE", "RUNNING", "ERROR"
+        self._status: str = "STOPPED"
         self._error_message: str = ""
+        # Camera-switch guard: suppresses AI pipeline ERROR writes during switch
+        self._switching: bool = False
 
         # Camera & Events
         self._camera_id: str = "camera_01"
@@ -89,6 +92,7 @@ class SharedRuntimeState:
 
         # Telemetry
         self._people_count: int = 0
+        self._car_count: int = 0
         self._detection_count: int = 0
         self._track_count: int = 0
         self._stream_fps: float = 0.0
@@ -109,11 +113,44 @@ class SharedRuntimeState:
         self._dropped_frames = 0
         self._buffer_age_ms = 0.0
 
+    @property
+    def status(self) -> str:
+        """Thread-safe public status accessor."""
+        with self._lock:
+            return self._status
+
+    @property
+    def is_idle(self) -> bool:
+        with self._lock:
+            return self._status == "IDLE"
+
+    @property
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._status == "RUNNING"
+
+    @property
+    def people_count(self) -> int:
+        with self._lock:
+            return self._people_count
+
+    @property
+    def car_count(self) -> int:
+        with self._lock:
+            return self._car_count
+
+    def clear_frames(self) -> None:
+        """Clear cached frames to avoid serving stale video on camera switch or idle."""
+        with self._lock:
+            self._latest_frame = None
+            self._annotated_frame = None
+
     def update(
         self,
         latest_frame: np.ndarray | None = None,
         annotated_frame: np.ndarray | None = None,
         people_count: int = 0,
+        car_count: int = 0,
         detection_count: int = 0,
         track_count: int = 0,
         stream_fps: float = 0.0,
@@ -149,6 +186,7 @@ class SharedRuntimeState:
                 self._annotated_frame = annotated_frame
 
             self._people_count = people_count
+            self._car_count = car_count
             self._detection_count = detection_count
             self._track_count = track_count
             self._stream_fps = stream_fps
@@ -207,15 +245,51 @@ class SharedRuntimeState:
             self._event_count_today = count_today
 
     def set_status(self, status: str, error_message: str = "") -> None:
-        """Update the operational status of the pipeline."""
+        """Update the operational status of the pipeline.
+
+        During a camera switch (_switching=True), ERROR writes from the AI pipeline
+        loop are suppressed to prevent the race condition where a brief frame gap
+        during source switching causes a spurious ERROR status.
+        STOPPED, IDLE, RUNNING, and WARNING writes always pass through.
+        """
         with self._lock:
+            if status == "ERROR" and self._switching:
+                return  # Suppress transient error during source switch
             self._status = status
             self._error_message = error_message
+
+    def set_switching(self) -> None:
+        """Enter camera-switching mode — suppresses transient ERROR from AI pipeline."""
+        with self._lock:
+            self._switching = True
+            self._status = "RUNNING"
+            self._error_message = ""
+
+    def clear_switching(self) -> None:
+        """Exit camera-switching mode — allows ERROR status writes again."""
+        with self._lock:
+            self._switching = False
 
     def set_stream_health(self, health: dict[str, Any]) -> None:
         """Publish runtime stream diagnostics for the telemetry endpoint."""
         with self._lock:
             self._stream_health = dict(health)
+
+    def update_telemetry(self, snapshot: TelemetrySnapshot) -> None:
+        """Update telemetry fields from a TelemetrySnapshot."""
+        with self._lock:
+            self._people_count = snapshot.people_count
+            self._car_count = snapshot.car_count
+            self._detection_count = snapshot.detection_count
+            self._track_count = snapshot.track_count
+            self._stream_fps = snapshot.stream_fps
+            self._processing_fps = snapshot.processing_fps
+            self._yolo_latency_ms = snapshot.yolo_latency_ms
+            self._pipeline_latency_ms = snapshot.pipeline_latency_ms
+            if snapshot.status:
+                self._status = snapshot.status
+            if snapshot.camera_status:
+                self._status = snapshot.camera_status
 
     def get_annotated_frame(self) -> tuple[int, np.ndarray | None]:
         """Fetch the newest annotated frame and its frame ID.
@@ -242,6 +316,10 @@ class SharedRuntimeState:
                 camera_status = "STOPPED"
                 stream_alive = False
                 err = self._error_message
+            elif self._status == "IDLE":
+                camera_status = "IDLE"
+                stream_alive = False
+                err = ""
             elif self._status == "ERROR":
                 camera_status = "ERROR"
                 stream_alive = False
@@ -274,6 +352,7 @@ class SharedRuntimeState:
                 last_frame_time=last_frame_time,
                 error_message=err,
                 people_count=self._people_count,
+                car_count=self._car_count,
                 detection_count=self._detection_count,
                 track_count=self._track_count,
                 stream_fps=self._stream_fps,
@@ -307,6 +386,7 @@ class SharedRuntimeState:
             self._status = "STOPPED"
             self._error_message = ""
             self._people_count = 0
+            self._car_count = 0
             self._detection_count = 0
             self._track_count = 0
 

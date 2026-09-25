@@ -85,6 +85,8 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self.handle_source_status()
         elif path in ("/camera_snapshot", "/api/camera_snapshot"):
             self.handle_camera_snapshot(query)
+        elif path in ("/camera_thumbnail", "/api/camera_thumbnail"):
+            self.handle_camera_thumbnail(query)
         elif path in ("/preview_feed", "/api/preview_feed"):
             self.handle_preview_feed(query)
         elif path in ("/video_source", "/api/video_source"):
@@ -446,6 +448,8 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             "frame_age_seconds": round(age, 2),
             "stream_alive": alive,
             "error_reason": self.camera_manager.error_reason,
+            "ffmpeg_pid": diag.get("ffmpeg_pid"),
+            "diagnostics": diag,
             "camera": {
                 "id": source_info.get("id"),
                 "name": source_info.get("name"),
@@ -473,6 +477,29 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "image/jpeg")
         self.send_header("Content-Length", str(len(img_bytes)))
         self.send_header("Cache-Control", "public, max-age=30")
+        self.end_headers()
+        self.wfile.write(img_bytes)
+
+    def handle_camera_thumbnail(self, query: dict[str, list[str]]) -> None:
+        """Serve representative camera thumbnail via ThumbnailService."""
+        from src.stream.thumbnail_service import thumbnail_service
+        cam_id = query.get("camera_id", [""])[0]
+        stream_url = query.get("stream_url", [""])[0]
+        snapshot_url = query.get("snapshot_url", [""])[0]
+        provider = query.get("provider", [""])[0]
+
+        img_bytes, content_type = thumbnail_service.get_thumbnail(
+            camera_id=cam_id,
+            stream_url=stream_url,
+            snapshot_url=snapshot_url,
+            provider=provider,
+        )
+
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(img_bytes)))
+        self.send_header("Cache-Control", "public, max-age=90")
         self.end_headers()
         self.wfile.write(img_bytes)
 
@@ -534,6 +561,10 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self._send_json_response({"status": "error", "message": "Source cannot be empty"}, code=400)
             return
 
+        # Enter switching mode: suppress spurious ERROR status from AI pipeline
+        # during the brief frame gap while the source is being replaced.
+        self.state.set_switching()
+
         try:
             cam_info = self.camera_manager.set_video_source(
                 source_type=stype,
@@ -544,12 +575,22 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             )
             self.state.set_camera(cam_info.id, cam_info.name)
             self.state.set_status("RUNNING")
+            # Start a background timer to clear switching guard after 5s
+            # (handles the case where no frame arrives and ERROR needs to propagate)
+            import threading
+            def _clear_switching_after_delay():
+                import time as _time
+                _time.sleep(5.0)
+                self.state.clear_switching()
+            t = threading.Thread(target=_clear_switching_after_delay, daemon=True, name="ClearSwitching")
+            t.start()
             self._send_json_response({
                 "status": "ok",
                 "message": f"Connecting to {cam_info.name}...",
                 "camera": cam_info.to_dict(),
             })
         except Exception as exc:
+            self.state.clear_switching()
             self.state.set_status("ERROR", str(exc))
             self._send_json_response({"status": "error", "message": str(exc)}, code=500)
 
@@ -559,6 +600,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         if self.camera_manager is not None:
             self.camera_manager.stop_camera()
         self.state.set_camera("", "")
+        self.state.clear_frames()
         self.state.set_status("IDLE")
         self._send_json_response({"status": "ok", "message": "Camera stopped successfully"})
 
