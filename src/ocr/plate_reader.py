@@ -2,8 +2,8 @@
 
 Decoupled, modular OCR pipeline for vehicles:
 1. Receives vehicle crop (never full frame).
-2. Localizes license plate candidate ROI inside vehicle boundaries.
-3. Crops and enhances the license plate (contrast, denoising, adaptive thresholding).
+2. Stage 0: Dedicated YOLO plate detector localizes plate bbox within vehicle crop.
+3. Crops and enhances the tight plate region (contrast, denoising, adaptive thresholding).
 4. Runs OCR (EasyOCR with fallback support) to extract plate text and confidence.
 5. Emits structured PlateCandidate diagnostics and bounded visual proof in scratch/plate_debug/.
 """
@@ -19,6 +19,24 @@ import cv2
 import numpy as np
 
 logger = logging.getLogger("datt.ocr.plate_reader")
+
+# Lazy import – avoids circular imports at module load time
+_plate_detector_module = None
+
+
+def _get_plate_detector():
+    """Return the global PlateDetector singleton (lazy import)."""
+    global _plate_detector_module
+    if _plate_detector_module is None:
+        try:
+            from src.ocr.plate_detector import PlateDetector  # noqa: PLC0415
+            _plate_detector_module = PlateDetector.get_instance()
+        except Exception as exc:
+            logger.warning("[PLATE_MODEL] Could not load PlateDetector: %s", exc)
+            _plate_detector_module = False  # sentinel – don't retry
+    if _plate_detector_module is False:
+        return None
+    return _plate_detector_module
 
 
 @dataclass
@@ -99,6 +117,16 @@ class LicensePlateReader:
         self._debug_dir = Path("scratch/plate_debug")
         self._debug_sample_count = 0
         self._max_debug_samples = 15
+
+        # Stage 0: dedicated plate detector (loaded once at init)
+        self._plate_detector = _get_plate_detector()
+        if self._plate_detector is not None and self._plate_detector.is_available:
+            logger.info(
+                "[PLATE_MODEL] PlateDetector ready: model=%s",
+                self._plate_detector.model_name,
+            )
+        else:
+            logger.info("[PLATE_MODEL] PlateDetector unavailable – will use ROI heuristic fallback.")
 
     @classmethod
     def get_instance(cls) -> "LicensePlateReader":
@@ -346,6 +374,8 @@ class LicensePlateReader:
         variants: dict[str, np.ndarray],
         baseline_text: str = "",
         baseline_conf: float = 0.0,
+        track_id: int = -1,
+        frame_id: int = -1,
     ) -> tuple[str, str, float, np.ndarray]:
         """Run EasyOCR on variants and select the best candidate.
 
@@ -380,6 +410,10 @@ class LicensePlateReader:
                 "score": base_score,
                 "img": default_img,
             })
+            logger.info(
+                "[PLATE_OCR] track_id=%d frame_id=%d baseline_text='%s' cleaned='%s' conf=%.3f valid=%s score=%.2f",
+                track_id, frame_id, baseline_text, cleaned_base, baseline_conf, is_valid_base, base_score,
+            )
 
         for vname in ["ORIGINAL/RESIZED", "ENHANCED_GRAY", "BINARIZED"]:
             img = variants.get(vname)
@@ -394,6 +428,10 @@ class LicensePlateReader:
 
             text, conf = self._parse_plate_text_from_ocr_boxes(ocr_res)
             if not text:
+                logger.info(
+                    "[PLATE_OCR] track_id=%d frame_id=%d variant=%s raw_boxes=%d text='' (empty)",
+                    track_id, frame_id, vname, len(ocr_res),
+                )
                 continue
 
             is_valid = is_valid_plate_format(text)
@@ -401,6 +439,11 @@ class LicensePlateReader:
             comp = min(alnum_cnt / 8.0, 1.0)
             bonus = 0.5 if (any(c.isalpha() for c in text) and any(c.isdigit() for c in text) and alnum_cnt >= 6) else 0.0
             score = (conf * 1.0) + (2.0 if is_valid else 0.0) + (comp * 0.8) + bonus
+
+            logger.info(
+                "[PLATE_OCR] track_id=%d frame_id=%d variant=%s raw_boxes=%d text='%s' conf=%.3f valid=%s score=%.2f",
+                track_id, frame_id, vname, len(ocr_res), text, conf, is_valid, score,
+            )
 
             candidates.append({
                 "variant": vname,
@@ -416,6 +459,10 @@ class LicensePlateReader:
         # Sort candidates by score descending
         candidates.sort(key=lambda c: c["score"], reverse=True)
         winner = candidates[0]
+        logger.info(
+            "[PLATE_OCR] track_id=%d frame_id=%d WINNER variant=%s text='%s' conf=%.3f score=%.2f",
+            track_id, frame_id, winner["variant"], winner["text"], winner["conf"], winner["score"],
+        )
         return winner["variant"], winner["text"], winner["conf"], winner["img"]
 
     def _save_debug_sample(
@@ -484,17 +531,18 @@ class LicensePlateReader:
         vy1: int,
         vw: int,
         vh: int,
+        track_id: int = -1,
+        frame_id: int = -1,
     ) -> list[PlateCandidate]:
         """Group and assemble OCR text boxes into 1-line or 2-tier plate candidates."""
+        logger.info(
+            "[PLATE_DET] track_id=%d frame_id=%d raw_boxes_count=%d in search_roi",
+            track_id, frame_id, len(ocr_results) if ocr_results else 0,
+        )
         parsed_boxes = []
         for poly, raw_text, conf in ocr_results:
             conf = float(conf)
-            if conf < self.min_confidence:
-                continue
             cleaned = clean_plate_text(raw_text)
-            if not cleaned:
-                continue
-
             pxs = [pt[0] for pt in poly]
             pys = [pt[1] for pt in poly]
             x1 = max(0, int(min(pxs)))
@@ -503,7 +551,15 @@ class LicensePlateReader:
             y2 = min(vh - roi_y1, int(max(pys)))
             pw = x2 - x1
             ph = y2 - y1
-            if pw < 8 or ph < 6:
+
+            passed_min_conf = (conf >= self.min_confidence)
+            passed_size = (pw >= 8 and ph >= 6)
+            logger.info(
+                "[PLATE_DET] track_id=%d frame_id=%d raw_box: text='%s' cleaned='%s' conf=%.3f box=[%d,%d,%d,%d] size=%dx%d pass_conf=%s pass_size=%s",
+                track_id, frame_id, raw_text, cleaned, conf, x1, y1, x2, y2, pw, ph, passed_min_conf, passed_size,
+            )
+
+            if not passed_min_conf or not cleaned or not passed_size:
                 continue
 
             parsed_boxes.append({
@@ -679,7 +735,68 @@ class LicensePlateReader:
                 quality_score=round(quality, 2),
             ))
 
+        logger.info(
+            "[PLATE_DET] track_id=%d frame_id=%d assembled_candidates_count=%d",
+            track_id, frame_id, len(candidates),
+        )
+        for c in candidates:
+            logger.info(
+                "[PLATE_DET] track_id=%d frame_id=%d candidate: text='%s' conf=%.3f bbox_veh=%s plate_size=%dx%d quality=%.2f",
+                track_id, frame_id, c.plate_text, c.confidence, c.bbox_vehicle, c.raw_crop.shape[1], c.raw_crop.shape[0], c.quality_score,
+            )
+
         return candidates
+
+    # ------------------------------------------------------------------
+    # Stage 0 helpers
+    # ------------------------------------------------------------------
+
+    def _detect_plate_bbox(
+        self,
+        vehicle_crop: np.ndarray,
+        track_id: int = -1,
+        frame_id: int = -1,
+    ) -> "tuple[int, int, int, int] | None":
+        """Run the dedicated YOLO plate detector on the vehicle crop.
+
+        Returns the best (highest-conf) plate (x1, y1, x2, y2) in vehicle-crop
+        coordinates, or None if the detector is unavailable / finds nothing.
+        """
+        detector = self._plate_detector
+        if detector is None or not detector.is_available:
+            return None
+
+        boxes = detector.detect(vehicle_crop)
+        if not boxes:
+            logger.info(
+                "[PLATE_DET] track_id=%d frame_id=%d yolo_plate_boxes=0 (no plate found by detector)",
+                track_id, frame_id,
+            )
+            return None
+
+        best = boxes[0]  # sorted by conf desc
+        logger.info(
+            "[PLATE_DET] track_id=%d frame_id=%d yolo_plate_boxes=%d best_conf=%.3f bbox=[%d,%d,%d,%d] size=%dx%d",
+            track_id, frame_id, len(boxes),
+            best.confidence, best.x1, best.y1, best.x2, best.y2,
+            best.x2 - best.x1, best.y2 - best.y1,
+        )
+        return (best.x1, best.y1, best.x2, best.y2)
+
+    @staticmethod
+    def _adaptive_upscale_plate(crop: np.ndarray, target_h: int = 80) -> np.ndarray:
+        """Upscale a small plate crop to at least target_h pixels tall (aspect-ratio preserved)."""
+        h, w = crop.shape[:2]
+        if h >= target_h:
+            return crop
+        scale = target_h / float(h)
+        new_w = max(32, int(round(w * scale)))
+        new_h = max(target_h, int(round(h * scale)))
+        return cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+
+    # ------------------------------------------------------------------
+    # Main extraction entry point
+    # ------------------------------------------------------------------
 
     def extract_license_plate(
         self,
@@ -689,6 +806,11 @@ class LicensePlateReader:
         frame_id: int = -1,
     ) -> PlateCandidate | None:
         """Localize and recognize license plate within vehicle crop.
+
+        Pipeline:
+          Stage 0  – Dedicated YOLO plate detector → tight plate crop.
+          Stage 1  – EasyOCR on tight plate crop (or ROI heuristic fallback).
+          Stage 2  – Multi-variant evaluation and refinement.
 
         Args:
             vehicle_crop: BGR crop of the vehicle from native frame.
@@ -706,17 +828,6 @@ class LicensePlateReader:
         if vh < 15 or vw < 15:
             return None
 
-        # Focus plate search: if already a tight plate crop or small vehicle crop, search full crop
-        if vh < 180 or (vw / float(max(1, vh))) >= 2.0:
-            roi_y1 = 0
-            search_roi = vehicle_crop
-        else:
-            roi_y1 = int(vh * 0.25)
-            search_roi = vehicle_crop[roi_y1:, :]
-            if search_roi.size == 0:
-                search_roi = vehicle_crop
-                roi_y1 = 0
-
         # Lazy initialize EasyOCR reader
         if not self._reader_initialized:
             self.initialize()
@@ -726,8 +837,133 @@ class LicensePlateReader:
         best_meta: dict[str, Any] = {}
         variant_selected = "ORIGINAL/RESIZED"
 
-        # 1. OCR-driven detection on search ROI
-        if self._reader is not None:
+        # ----------------------------------------------------------------
+        # Stage 0: Dedicated YOLO plate detector
+        # ----------------------------------------------------------------
+        plate_bbox_in_vehicle = self._detect_plate_bbox(vehicle_crop, track_id, frame_id)
+
+        if plate_bbox_in_vehicle is not None:
+            px1, py1, px2, py2 = plate_bbox_in_vehicle
+            # Small padding to avoid cutting off plate edges
+            pad = 4
+            px1 = max(0, px1 - pad)
+            py1 = max(0, py1 - pad)
+            px2 = min(vw, px2 + pad)
+            py2 = min(vh, py2 + pad)
+
+            tight_crop = vehicle_crop[py1:py2, px1:px2]
+            if tight_crop.size == 0:
+                plate_bbox_in_vehicle = None  # fall through to heuristic
+            else:
+                # Adaptive upscale for small plates
+                tight_crop = self._adaptive_upscale_plate(tight_crop, target_h=80)
+
+                logger.info(
+                    "[PLATE_CROP] track_id=%d frame_id=%d tight_plate_size=%dx%d (after upscale)",
+                    track_id, frame_id, tight_crop.shape[1], tight_crop.shape[0],
+                )
+
+                # Save raw plate crop for debug
+                if self._debug_sample_count < self._max_debug_samples:
+                    try:
+                        self._debug_dir.mkdir(parents=True, exist_ok=True)
+                        cv2.imwrite(
+                            str(self._debug_dir / f"f{frame_id}_v{track_id}_plate_tight.jpg"),
+                            tight_crop,
+                        )
+                        cv2.imwrite(
+                            str(self._debug_dir / f"f{frame_id}_v{track_id}_vehicle.jpg"),
+                            vehicle_crop,
+                        )
+                    except Exception:
+                        pass
+
+                # Run EasyOCR on the tight plate crop directly (Stage 1)
+                if self._reader is not None:
+                    logger.info(
+                        "[PLATE_OCR] track_id=%d frame_id=%d running EasyOCR on tight_crop %dx%d",
+                        track_id, frame_id, tight_crop.shape[1], tight_crop.shape[0],
+                    )
+                    with self._infer_lock:
+                        try:
+                            ocr_results = self._reader.readtext(tight_crop)
+                        except Exception as exc:
+                            logger.debug("[OCR] Inference error on tight plate crop: %s", exc)
+                            ocr_results = []
+
+                    text, conf = self._parse_plate_text_from_ocr_boxes(ocr_results)
+                    logger.info(
+                        "[PLATE_OCR] track_id=%d frame_id=%d tight_crop raw_boxes=%d text='%s' conf=%.3f",
+                        track_id, frame_id, len(ocr_results), text, conf,
+                    )
+
+                    if text and conf >= self.min_confidence:
+                        # Build PlateCandidate from the YOLO-detected plate bbox
+                        raw_plate_crop = vehicle_crop[py1:py2, px1:px2]
+                        preprocessed = self.preprocess_plate_crop(raw_plate_crop)
+                        gray = cv2.cvtColor(raw_plate_crop, cv2.COLOR_BGR2GRAY) if len(raw_plate_crop.shape) == 3 else raw_plate_crop
+                        sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                        pw = px2 - px1
+                        ph_px = py2 - py1
+                        quality = conf * 50.0 + min(sharpness, 200.0) * 0.3 + min(pw, 150.0) * 0.2 + 30.0  # +30 YOLO-detected bonus
+
+                        best_cand = PlateCandidate(
+                            plate_text=text,
+                            confidence=round(conf, 3),
+                            bbox_vehicle=(px1, py1, px2, py2),
+                            bbox_native=(
+                                int(round(vx1 + px1)),
+                                int(round(vy1 + py1)),
+                                int(round(vx1 + px2)),
+                                int(round(vy1 + py2)),
+                            ),
+                            raw_crop=raw_plate_crop,
+                            preprocessed_crop=preprocessed,
+                            sharpness=round(sharpness, 1),
+                            quality_score=round(quality, 2),
+                        )
+
+                        # Stage 2: multi-variant refinement on the tight crop
+                        variants, meta = self.generate_preprocessing_variants(raw_plate_crop)
+                        best_meta = meta
+                        v_name, v_text, v_conf, v_img = self.evaluate_variants(
+                            variants=variants,
+                            baseline_text=best_cand.plate_text,
+                            baseline_conf=best_cand.confidence,
+                            track_id=track_id,
+                            frame_id=frame_id,
+                        )
+                        variant_selected = v_name
+                        if v_text:
+                            best_cand.plate_text = v_text
+                            best_cand.confidence = round(v_conf, 3)
+                            best_cand.preprocessed_crop = v_img
+
+                        logger.info(
+                            "[PLATE_DET] track_id=%d frame_id=%d YOLO+OCR RESULT: plate='%s' conf=%.3f quality=%.2f",
+                            track_id, frame_id, best_cand.plate_text, best_cand.confidence, best_cand.quality_score,
+                        )
+
+        # ----------------------------------------------------------------
+        # Stage 1 (fallback): ROI heuristic + EasyOCR on vehicle crop
+        # when YOLO detector is unavailable or found nothing useful
+        # ----------------------------------------------------------------
+        if best_cand is None and self._reader is not None:
+            # Focus plate search: if already a tight plate crop or small vehicle crop, search full crop
+            if vh < 180 or (vw / float(max(1, vh))) >= 2.0:
+                roi_y1 = 0
+                search_roi = vehicle_crop
+            else:
+                roi_y1 = int(vh * 0.25)
+                search_roi = vehicle_crop[roi_y1:, :]
+                if search_roi.size == 0:
+                    search_roi = vehicle_crop
+                    roi_y1 = 0
+
+            logger.info(
+                "[PLATE_DET] track_id=%d frame_id=%d fallback search_roi_size=%dx%d (vehicle_crop=%dx%d, roi_y1=%d)",
+                track_id, frame_id, search_roi.shape[1], search_roi.shape[0], vw, vh, roi_y1,
+            )
             with self._infer_lock:
                 try:
                     ocr_results = self._reader.readtext(search_roi)
@@ -743,20 +979,28 @@ class LicensePlateReader:
                 vy1=vy1,
                 vw=vw,
                 vh=vh,
+                track_id=track_id,
+                frame_id=frame_id,
             )
 
             for cand in candidates:
                 if best_cand is None or cand.quality_score > best_cand.quality_score:
                     best_cand = cand
 
-            # 2. Multi-variant evaluation and refinement
+            # Stage 2: Multi-variant evaluation and refinement
             if best_cand is not None:
+                logger.info(
+                    "[PLATE_DET] track_id=%d frame_id=%d selected candidate for variant eval: text='%s' conf=%.3f size=%dx%d",
+                    track_id, frame_id, best_cand.plate_text, best_cand.confidence, best_cand.raw_crop.shape[1], best_cand.raw_crop.shape[0],
+                )
                 variants, meta = self.generate_preprocessing_variants(best_cand.raw_crop)
                 best_meta = meta
                 v_name, v_text, v_conf, v_img = self.evaluate_variants(
                     variants=variants,
                     baseline_text=best_cand.plate_text,
                     baseline_conf=best_cand.confidence,
+                    track_id=track_id,
+                    frame_id=frame_id,
                 )
                 variant_selected = v_name
                 if v_text:
@@ -765,10 +1009,21 @@ class LicensePlateReader:
                     best_cand.preprocessed_crop = v_img
             else:
                 # Direct crop fallback (for isolated plate crops or challenging tilt/lighting)
+                logger.info(
+                    "[PLATE_DET] track_id=%d frame_id=%d no ROI candidate -> running direct crop fallback on vehicle crop (%dx%d)",
+                    track_id, frame_id, vw, vh,
+                )
                 variants, meta = self.generate_preprocessing_variants(vehicle_crop)
                 best_meta = meta
-                v_name, v_text, v_conf, v_img = self.evaluate_variants(variants)
-                if is_valid_plate_format(v_text) and v_conf >= self.min_confidence:
+                v_name, v_text, v_conf, v_img = self.evaluate_variants(
+                    variants, track_id=track_id, frame_id=frame_id,
+                )
+                valid = is_valid_plate_format(v_text)
+                logger.info(
+                    "[PLATE_OCR] track_id=%d frame_id=%d direct_fallback result: text='%s' conf=%.3f valid=%s pass_conf=%s",
+                    track_id, frame_id, v_text, v_conf, valid, (v_conf >= self.min_confidence),
+                )
+                if valid and v_conf >= self.min_confidence:
                     gray = cv2.cvtColor(vehicle_crop, cv2.COLOR_BGR2GRAY) if len(vehicle_crop.shape) == 3 else vehicle_crop
                     sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
                     quality = v_conf * 50.0 + min(sharpness, 200.0) * 0.3 + 20.0
@@ -783,6 +1038,17 @@ class LicensePlateReader:
                         sharpness=round(sharpness, 1),
                         quality_score=round(quality, 2),
                     )
+
+            if best_cand is not None:
+                logger.info(
+                    "[PLATE_DET] track_id=%d frame_id=%d RESULT: FOUND plate='%s' conf=%.3f plate_bbox=%s quality=%.2f",
+                    track_id, frame_id, best_cand.plate_text, best_cand.confidence, best_cand.bbox_vehicle, best_cand.quality_score,
+                )
+            else:
+                logger.info(
+                    "[PLATE_DET] track_id=%d frame_id=%d RESULT: NO_PLATE_DETECTED",
+                    track_id, frame_id,
+                )
 
         # 3. Emit structured diagnostic log and save bounded debug artifacts
         if best_cand is not None:

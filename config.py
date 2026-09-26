@@ -22,6 +22,11 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parent
 MODEL_PATH: str = str(PROJECT_ROOT / "models" / "yolo11s.pt")
 IMG_SIZE: int = 960
 
+# Dedicated license-plate YOLO detector model (.pt file).
+# Set to empty string to auto-download keremberke/yolov8n-license-plate-detection from hub.
+PLATE_MODEL_PATH: str = str(PROJECT_ROOT / "models" / "yolov8n-license-plate.pt")
+PLATE_DET_CONF: float = 0.25   # Confidence threshold for plate bbox detection
+
 # Target device: "cuda:0" on Google Colab GPU runtime, fallback to "cpu" if CUDA unavailable
 DEVICE: str = "cuda:0"
 
@@ -36,7 +41,25 @@ PROVIDERS: list[Any] = [
 # ==============================================================================
 PERSON_CLASS_ID: int = 0
 CAR_CLASS_ID: int = 2
-TARGET_CLASSES: list[int] = [0, 2]
+MOTORCYCLE_CLASS_ID: int = 3
+BUS_CLASS_ID: int = 5
+TRUCK_CLASS_ID: int = 7
+
+VEHICLE_CLASSES: dict[int, str] = {
+    CAR_CLASS_ID: "car",
+    TRUCK_CLASS_ID: "truck",
+    BUS_CLASS_ID: "bus",
+    MOTORCYCLE_CLASS_ID: "motorcycle",
+}
+VEHICLE_CLASS_IDS: list[int] = [CAR_CLASS_ID, TRUCK_CLASS_ID, BUS_CLASS_ID, MOTORCYCLE_CLASS_ID]
+PLATE_ELIGIBLE_CLASSES: list[int] = [CAR_CLASS_ID, TRUCK_CLASS_ID, BUS_CLASS_ID]
+TARGET_CLASSES: list[int] = [
+    PERSON_CLASS_ID,
+    CAR_CLASS_ID,
+    MOTORCYCLE_CLASS_ID,
+    BUS_CLASS_ID,
+    TRUCK_CLASS_ID,
+]
 CONF_THRESHOLD: float = 0.35
 NMS_THRESHOLD: float = 0.45
 MAX_DETECTIONS: int = 100
