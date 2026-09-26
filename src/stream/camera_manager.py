@@ -17,7 +17,12 @@ from src.config.camera_config import CameraInfo, get_camera, get_default_camera
 from src.stream.direct_hls import DirectHLSReader
 from src.stream.preview_manager import preview_manager
 from src.stream.video_source import LocalVideoReader, YouTubeVODReader
-from src.stream.youtube_resolver import stream_resolver
+from src.stream.youtube_resolver import (
+    ERROR_BOT_CHALLENGE,
+    classify_youtube_error,
+    is_youtube_url,
+    stream_resolver,
+)
 from src.stream.youtube_stream import CameraReader
 from src.utils.logger import logger
 
@@ -204,6 +209,29 @@ class CameraManager:
                         width=cam_info.width,
                         height=cam_info.height,
                     )
+                elif cam_info.type in ("youtube_vod", "vod"):
+                    reader = YouTubeVODReader(
+                        youtube_url=cam_info.url,
+                        loop=False,
+                        width=cam_info.width,
+                        height=cam_info.height,
+                    )
+                elif is_youtube_url(cam_info.url):
+                    is_live = stream_resolver.is_live_stream(cam_info.url)
+                    if is_live:
+                        reader = CameraReader(
+                            url=cam_info.url,
+                            width=cam_info.width,
+                            height=cam_info.height,
+                            is_vod=False,
+                        )
+                    else:
+                        reader = YouTubeVODReader(
+                            youtube_url=cam_info.url,
+                            loop=False,
+                            width=cam_info.width,
+                            height=cam_info.height,
+                        )
                 else:
                     reader = CameraReader(
                         url=cam_info.url,
@@ -375,19 +403,36 @@ class CameraManager:
                     )
 
                 elif stype in ("youtube", "live"):
-                    reader = CameraReader(url=src_str)
-                    reader.start()
+                    # Distinguish YouTube Live vs VOD before creating reader
+                    is_live = stream_resolver.is_live_stream(src_str)
+                    if is_live:
+                        reader = CameraReader(url=src_str, is_vod=False)
+                        reader.start()
 
-                    cam_name = name or "YouTube Stream"
-                    cam_info = CameraInfo(
-                        id=f"youtube_{time.time()}",
-                        name=cam_name,
-                        type="youtube",
-                        url=src_str,
-                        width=1280,
-                        height=720,
-                        description="YouTube Live/HLS stream",
-                    )
+                        cam_name = name or "YouTube Stream"
+                        cam_info = CameraInfo(
+                            id=f"youtube_{time.time()}",
+                            name=cam_name,
+                            type="youtube",
+                            url=src_str,
+                            width=1280,
+                            height=720,
+                            description="YouTube Live/HLS stream",
+                        )
+                    else:
+                        reader = YouTubeVODReader(youtube_url=src_str, loop=loop)
+                        reader.start()
+
+                        cam_name = name or "YouTube VOD"
+                        cam_info = CameraInfo(
+                            id=f"vod_{time.time()}",
+                            name=cam_name,
+                            type="youtube_vod",
+                            url=src_str,
+                            width=reader.width or 1280,
+                            height=reader.height or 720,
+                            description=f"YouTube VOD stream (loop={loop})",
+                        )
                 else:
                     raise ValueError(
                         f"Unsupported source type: '{source_type}'. "
@@ -413,7 +458,11 @@ class CameraManager:
 
             except Exception as exc:
                 self._status = "ERROR"
-                self._error_reason = f"Failed to set video source: {exc}"
+                err_str = str(exc)
+                if "AUTH/ANTI_BOT" in err_str or classify_youtube_error(err_str) == ERROR_BOT_CHALLENGE:
+                    self._error_reason = f"AUTH/ANTI_BOT: {exc}"
+                else:
+                    self._error_reason = f"Failed to set video source: {exc}"
                 logger.error("CameraManager Error: %s", self._error_reason, exc_info=True)
                 raise RuntimeError(self._error_reason) from exc
 
@@ -469,7 +518,10 @@ class CameraManager:
             with self._lock:
                 previous = self._status
                 reader_status = reader.status
-                if reader_status in ("ERROR", "WARNING"):
+                if reader_status == "VIDEO_FINISHED" or (reader.finished and getattr(reader, "clean_eof_count", 0) > 0 and not getattr(reader, "loop", False)):
+                    self._status = "VIDEO_FINISHED"
+                    self._error_reason = ""
+                elif reader_status in ("ERROR", "WARNING"):
                     self._status = reader_status
                     if reader_status == "WARNING":
                         self._error_reason = "Stream delay detected: no new frame for >5s"

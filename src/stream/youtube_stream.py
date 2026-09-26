@@ -122,17 +122,17 @@ from src.stream.youtube_resolver import (
 )
 
 
-def get_stream_url(url: str) -> str:
+def get_stream_url(url: str, is_vod: bool = False) -> str:
     """Extract direct video stream URL using yt-dlp if it is a YouTube URL.
 
-    Robustly selects HLS / H264 <=720p video format for YouTube Live.
+    Robustly selects HLS / H264 <=720p video format for YouTube Live, or MP4 for VOD.
     Delegates to centralized stream_resolver for caching, single-flight deduplication,
     global rate limiting, and HTTP 429 backoff.
     """
     if not ("youtube.com" in url or "youtu.be" in url or (len(url) == 11 and "/" not in url)):
         return url
 
-    return stream_resolver.resolve_stream_url(url, is_vod=False)
+    return stream_resolver.resolve_stream_url(url, is_vod=is_vod)
 
 
 
@@ -188,13 +188,16 @@ class CameraReader:
     - Rolling 30-frame sliding window FPS measurement.
     """
 
-    def __init__(self, url: str, width: int = 1280, height: int = 720):
+    def __init__(self, url: str, width: int = 1280, height: int = 720, is_vod: bool = False):
         self.url = url
         self.width = width
         self.height = height
         self.frame_size = width * height * 3
+        self.is_vod = is_vod
 
-        self.source_type = "youtube"
+        self.source_type = "youtube_vod" if is_vod else "youtube"
+        self._status: str = "STOPPED"
+        self.error_reason: str = ""
         self.process_generation: int = 0
         self._process_started_at: float = 0.0
         self._first_frame_received: bool = False
@@ -293,7 +296,11 @@ class CameraReader:
         if self.stop_event.is_set():
             return "STOPPED"
         with self.lock:
+            if getattr(self, "_status", None) == "VIDEO_FINISHED":
+                return "VIDEO_FINISHED"
             if self.finished and not self._stream_alive:
+                if self.is_vod and self.clean_eof_count > 0:
+                    return "VIDEO_FINISHED"
                 return "ERROR"
             age = 999.0 if self._last_frame_timestamp <= 0.0 else max(0.0, time.time() - self._last_frame_timestamp)
             if age <= 5.0 and self._stream_alive:
@@ -470,7 +477,7 @@ class CameraReader:
             self.reconnect_attempts += 1
             self.reconnect_count = self.reconnect_attempts
             delay_idx = min(self.reconnect_attempts - 1, len(self.reconnect_delays) - 1)
-            delay = 0 if self.reconnect_attempts == 1 and self._stream_url is None and not self._force_url_refresh else self.reconnect_delays[delay_idx]
+            delay = 0 if self.reconnect_attempts == 1 and self._stream_url is None else self.reconnect_delays[delay_idx]
 
             # Decide whether to retry direct URL or refresh from resolver
             use_cached = (
@@ -488,12 +495,13 @@ class CameraReader:
                 logger.info("[STREAM] camera=%s requesting new URL from resolver", self.url)
 
             delay = max(0, delay)
-            delay += random.uniform(0, min(5, delay * 0.1))
-            logger.warning(
-                "[DATT-STREAM] Reconnect attempt %d (waiting %.1fs)...",
-                self.reconnect_attempts,
-                delay,
-            )
+            if delay > 0:
+                delay += random.uniform(0, min(5, delay * 0.1))
+                logger.warning(
+                    "[DATT-STREAM] Reconnect attempt %d (waiting %.1fs)...",
+                    self.reconnect_attempts,
+                    delay,
+                )
             # Sleep with stop_event check
             if self.stop_event.wait(delay):
                 return False
@@ -509,10 +517,6 @@ class CameraReader:
                 else:
                     strategy = "refresh_url"
                     stream_resolver.invalidate_cache(self.url, reason="direct_reconnect_exhausted")
-
-                    if self.stop_event.is_set():
-                        return False
-
                     target_url = self._get_stream_url_with_diagnostics("recovery")
                     self._direct_reconnect_attempts = 0
 
@@ -564,11 +568,17 @@ class CameraReader:
                     self._stream_url = None
                     self.abnormal_exit_count += 1
                     logger.warning("[YT-RECONNECT] No video formats found for %s, will retry with bounded backoff", self.url)
-                elif cat == ERROR_BOT_CHALLENGE:
-                    self._force_url_refresh = True
-                    self._stream_url = None
-                    self.abnormal_exit_count += 1
-                    logger.error("[YT-BOT] Bot challenge detected during reconnect on %s", self.url)
+                elif cat == ERROR_BOT_CHALLENGE or "AUTH/ANTI_BOT" in err_str or "confirm you're not a bot" in err_str.lower():
+                    self.last_error_type = ERROR_BOT_CHALLENGE
+                    self.last_error_message = f"AUTH/ANTI_BOT: YouTube bot challenge / sign-in required: {err_str}"
+                    self.error = exc
+                    self.finished = True
+                    with self.lock:
+                        self._status = "ERROR"
+                        self.error_reason = self.last_error_message
+                    logger.error("[YT-BOT] Bot challenge detected on %s, stopping reconnect immediately", self.url)
+                    self._cleanup_process()
+                    return False
                 elif cat == ERROR_VIDEO_UNAVAILABLE:
                     self._force_url_refresh = True
                     self._stream_url = None
@@ -601,7 +611,7 @@ class CameraReader:
             time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), reason, self._ytdlp_attempt,
         )
         try:
-            result = get_stream_url(self.url)
+            result = get_stream_url(self.url, is_vod=self.is_vod)
             logger.info("[DATT-YTDLP RESULT] success=True error=")
             return result
         except Exception as exc:
@@ -728,6 +738,14 @@ class CameraReader:
                 self.clean_eof_count += 1
                 self.last_error_type = "CLEAN_EOF"
                 self.last_ffmpeg_error_type = "CLEAN_EOF"
+                if self.is_vod:
+                    logger.info("[DATT-STREAM] Clean EOF on YouTube VOD reached, stopping with VIDEO_FINISHED")
+                    with self.lock:
+                        self.finished = True
+                        self._stream_alive = False
+                        self._status = "VIDEO_FINISHED"
+                    self._cleanup_process()
+                    break
             else:
                 self.abnormal_exit_count += 1
                 cat = classify_youtube_error(stderr_tail, default=ERROR_FFMPEG_ERROR)

@@ -247,7 +247,7 @@ class TestErrorClassificationRegression(unittest.TestCase):
         ytdlp_mock = MagicMock(side_effect=RuntimeError("ERROR: [youtube] Cp4RRAEgpeU: No video formats found!"))
         reader._get_stream_url_with_diagnostics = ytdlp_mock
 
-        with patch.object(reader.stop_event, "wait", return_value=True):
+        with patch.object(reader.stop_event, "wait", side_effect=[False, True]):
             result = reader._reconnect()
 
         self.assertFalse(result)

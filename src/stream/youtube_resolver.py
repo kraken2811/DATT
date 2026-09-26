@@ -389,11 +389,12 @@ class YouTubeStreamResolver:
         with self._lock:
             return self._policy
 
-    def record_429(self, source: str = "general", retry_after: float | None = None) -> float:
+    def record_429(self, source: str = "general", retry_after: float | None = None, count: bool = True) -> float:
         """Record an HTTP 429 event from yt-dlp or FFmpeg and calculate shared cooldown."""
         with self._lock:
-            self._metrics.http_429_count += 1
-            self._policy.http_429_count += 1
+            if count:
+                self._metrics.http_429_count += 1
+                self._policy.http_429_count += 1
             self._policy.last_429_timestamp = time.time()
             self._policy.current_backoff_level += 1
             level = self._policy.current_backoff_level
@@ -505,6 +506,110 @@ class YouTubeStreamResolver:
                 return entry.failure_count
             return 1
 
+    def is_live_stream(self, url_or_id: str) -> bool:
+        """Determine whether a YouTube URL is a Live stream (True) or VOD (False).
+
+        Checks internal cache first. If not cached, executes yt-dlp metadata probe,
+        pre-caches the resolved direct URL to optimize subsequent resolve_stream_url calls,
+        and accurately classifies live vs VOD based on yt-dlp extraction metadata.
+        """
+        if not is_youtube_url(url_or_id):
+            return False
+
+        video_id = extract_video_id(url_or_id)
+        with self._lock:
+            entry = self._cache.get(video_id)
+            if entry is not None and entry.is_valid:
+                return entry.is_live
+
+        # Probe using yt-dlp
+        acquired = self._resolve_semaphore.acquire(timeout=60.0)
+        if not acquired:
+            raise RuntimeError("Timeout acquiring global YouTube resolve lock")
+
+        try:
+            # Enforce 429 cooldown & spacing
+            cooldown_rem = self.get_cooldown_remaining()
+            if cooldown_rem > 0:
+                time.sleep(cooldown_rem)
+
+            with self._lock:
+                elapsed = time.time() - self._last_extraction_finished_at
+                min_interval = getattr(config, "YOUTUBE_RESOLVE_MIN_INTERVAL", 3.0)
+                wait_s = max(0.0, min_interval - elapsed)
+            if wait_s > 0:
+                time.sleep(wait_s)
+
+            target_url = url_or_id
+            if not target_url.startswith("http://") and not target_url.startswith("https://"):
+                target_url = f"https://www.youtube.com/watch?v={video_id}"
+
+            ydl_opts: dict[str, Any] = {
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "nocheckcertificate": True,
+                "skip_download": True,
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["android", "web"]
+                    }
+                },
+            }
+
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(target_url, download=False)
+            except Exception as exc:
+                cat = classify_youtube_error(exc)
+                if cat == ERROR_BOT_CHALLENGE:
+                    with self._lock:
+                        self._metrics.bot_challenge_count += 1
+                        self.last_resolver_error_type = ERROR_BOT_CHALLENGE
+                        self.last_resolver_error_message = str(exc)
+                    raise RuntimeError(
+                        f"AUTH/ANTI_BOT: YouTube bot challenge / sign-in required (Sign in to confirm you're not a bot): {exc}"
+                    ) from exc
+                elif cat == ERROR_HTTP_429:
+                    self.record_429(source="is_live_probe")
+                    raise RuntimeError(f"HTTP 429 Too Many Requests from YouTube: {exc}") from exc
+                raise RuntimeError(f"Failed to probe YouTube stream type for {video_id}: {exc}") from exc
+
+            if not info or not isinstance(info, dict):
+                raise RuntimeError(f"Failed to extract video info from YouTube for {video_id}")
+
+            is_live = bool(info.get("is_live") or info.get("live_status") == "is_live")
+            duration = info.get("duration") or 0
+            live_status = str(info.get("live_status") or "").lower()
+            if duration > 0 or live_status in ("was_live", "not_live"):
+                is_live = False
+
+            # Pre-cache direct URL with matching format to make subsequent resolve instant
+            formats = info.get("formats", [])
+            is_vod = not is_live
+            selected_url = None
+            if isinstance(formats, list) and formats:
+                selected_url = select_best_stream_format(formats, is_vod=is_vod)
+            if not selected_url:
+                selected_url = info.get("url")
+
+            if selected_url and isinstance(selected_url, str):
+                with self._lock:
+                    ttl = getattr(config, "YOUTUBE_URL_TTL_SECONDS", 14400.0)
+                    self._cache[video_id] = StreamCacheEntry(
+                        video_id=video_id,
+                        stream_url=selected_url,
+                        created_at=time.time(),
+                        last_success=time.time(),
+                        is_live=is_live,
+                        ttl_seconds=ttl,
+                    )
+            return is_live
+        finally:
+            with self._lock:
+                self._last_extraction_finished_at = time.time()
+            self._resolve_semaphore.release()
+
     def resolve_stream_url(
         self,
         url_or_id: str,
@@ -534,11 +639,11 @@ class YouTubeStreamResolver:
         if not force_refresh:
             with self._lock:
                 entry = self._cache.get(video_id)
-                if entry is not None and entry.is_valid:
+                if entry is not None and entry.is_valid and (entry.is_live == (not is_vod)):
                     self._metrics.cache_hits += 1
                     logger.info(
-                        "[YT-CACHE] video_id=%s cache hit (age=%.1fs, ttl=%.1fs)",
-                        video_id, time.time() - entry.created_at, entry.ttl_seconds,
+                        "[YT-CACHE] video_id=%s cache hit (is_vod=%s, age=%.1fs, ttl=%.1fs)",
+                        video_id, is_vod, time.time() - entry.created_at, entry.ttl_seconds,
                     )
                     return entry.stream_url
 
@@ -718,7 +823,7 @@ class YouTubeStreamResolver:
                     err_prefix = "YouTube VOD extraction error: " if is_vod else "Failed extracting YouTube stream: "
 
                     if cat == ERROR_HTTP_429:
-                        backoff = self.record_429(source="yt-dlp")
+                        backoff = self.record_429(source="yt-dlp", count=(attempt == 1))
                         logger.error(
                             "[YT-429] HTTP 429 Too Many Requests detected for video_id=%s. Backing off for %.1fs (attempt %d/%d)",
                             video_id, backoff, attempt, max_retries,
@@ -758,7 +863,9 @@ class YouTubeStreamResolver:
                             "[YT-BOT] YouTube bot challenge / sign-in required for video_id=%s: %s",
                             video_id, exc,
                         )
-                        raise RuntimeError(f"{err_prefix}YouTube bot challenge / sign-in required: {exc}") from exc
+                        raise RuntimeError(
+                            f"{err_prefix}AUTH/ANTI_BOT: YouTube bot challenge / sign-in required (Sign in to confirm you're not a bot): {exc}"
+                        ) from exc
 
                     elif cat == ERROR_VIDEO_UNAVAILABLE:
                         logger.error("[YT-UNAVAILABLE] Video %s is unavailable: %s", video_id, exc)

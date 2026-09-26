@@ -697,11 +697,25 @@
                         return;
                     }
 
+                    if (data.status === "VIDEO_FINISHED") {
+                        stopConnectionPolling();
+                        setUiState(UI_STATE.MONITORING, {
+                            name: sourceData.name,
+                            provider: sourceData.provider,
+                            source_type: sourceData.source_type
+                        });
+                        return;
+                    }
+
                     if (data.status === "ERROR") {
                         stopConnectionPolling();
+                        const reason = data.error_reason || "Mất kết nối luồng";
+                        const isAuth = reason.includes("AUTH/ANTI_BOT") || reason.toLowerCase().includes("not a bot");
                         setUiState(UI_STATE.ERROR, {
-                            message: `Camera báo lỗi: ${data.error_reason || "Mất kết nối luồng"}`,
-                            debug: data.error_reason
+                            message: isAuth
+                                ? `YouTube yêu cầu xác minh bot ("Sign in to confirm you're not a bot"). Đã dừng kết nối và không retry.`
+                                : `Camera báo lỗi: ${reason}`,
+                            debug: reason
                         });
                         return;
                     }
@@ -1135,7 +1149,16 @@
         if (cleanStatus === "ERROR") {
             DOM.alertBanner.style.display = "block";
             DOM.alertBanner.className = "alert-banner alert-error";
-            DOM.alertBanner.innerHTML = `⚠️ <strong>Camera Status: ERROR</strong> — ${errorMessage || "Stream ended or camera disconnected unexpectedly."}`;
+            const isAuth = (errorMessage || "").includes("AUTH/ANTI_BOT") || (errorMessage || "").toLowerCase().includes("not a bot");
+            if (isAuth) {
+                DOM.alertBanner.innerHTML = `⛔ <strong>Lỗi AUTH/ANTI_BOT:</strong> YouTube yêu cầu xác minh bot ("Sign in to confirm you're not a bot"). Đã dừng kết nối.`;
+            } else {
+                DOM.alertBanner.innerHTML = `⚠️ <strong>Camera Status: ERROR</strong> — ${errorMessage || "Stream ended or camera disconnected unexpectedly."}`;
+            }
+        } else if (cleanStatus === "VIDEO_FINISHED") {
+            DOM.alertBanner.style.display = "block";
+            DOM.alertBanner.className = "alert-banner alert-info";
+            DOM.alertBanner.innerHTML = `🏁 <strong>Video đã phát xong (VIDEO_FINISHED).</strong>`;
         } else if (cleanStatus === "WARNING") {
             DOM.alertBanner.style.display = "block";
             DOM.alertBanner.className = "alert-banner alert-warning";

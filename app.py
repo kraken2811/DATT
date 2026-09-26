@@ -207,6 +207,8 @@ def run_pipeline(
             if frame is None:
                 if camera_mgr.status == "ERROR":
                     shared_state.set_status("ERROR", camera_mgr.error_reason)
+                elif camera_mgr.status == "VIDEO_FINISHED":
+                    shared_state.set_status("VIDEO_FINISHED")
                 if camera_mgr.finished:
                     time.sleep(0.01)
                     continue

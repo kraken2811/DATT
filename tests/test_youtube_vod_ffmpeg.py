@@ -276,7 +276,7 @@ class TestYouTubeVODRegression(unittest.TestCase):
 
                     self.assertTrue(reader.finished)
                     self.assertFalse(reader.stream_alive)
-                    self.assertEqual(reader.status, "STOPPED")
+                    self.assertEqual(reader.status, "VIDEO_FINISHED")
                     # FFmpeg should only have been spawned once, not restarted
                     self.assertEqual(mock_popen.call_count, 1)
                 finally:

@@ -71,6 +71,10 @@ class BaseVideoReader:
         return "STOPPED"
 
     @property
+    def error_reason(self) -> str:
+        return getattr(self, "_error_reason", "")
+
+    @property
     def stream_fps(self) -> float:
         return 0.0
 
@@ -350,6 +354,11 @@ class LocalVideoReader(BaseVideoReader):
     def status(self) -> str:
         with self._lock:
             return self._status
+
+    @property
+    def error_reason(self) -> str:
+        with self._lock:
+            return self._error_reason
 
     @property
     def stream_fps(self) -> float:
@@ -676,16 +685,23 @@ class YouTubeVODReader(BaseVideoReader):
                 logger.info("[YOUTUBE-VOD] URL resolved successfully")
             except Exception as exc:
                 self._status = "ERROR"
-                self._error_reason = f"Failed to resolve YouTube VOD: {exc}"
                 err_str = str(exc)
                 cat = classify_youtube_error(err_str, default=ERROR_EXTRACTOR_ERROR)
                 self.last_resolver_error_type = cat
                 self.last_error_type = cat
                 self.last_error_message = err_str
-                if cat == ERROR_HTTP_429:
+                if cat == ERROR_BOT_CHALLENGE or "AUTH/ANTI_BOT" in err_str:
+                    self._error_reason = f"AUTH/ANTI_BOT: YouTube bot challenge / sign-in required: {exc}"
+                elif cat == ERROR_HTTP_429:
+                    self._error_reason = f"Failed to resolve YouTube VOD: {exc}"
                     stream_resolver.record_429(source="vod_resolve_start")
                 elif cat == ERROR_HTTP_403:
+                    self._error_reason = f"Failed to resolve YouTube VOD: {exc}"
                     stream_resolver.record_403(self.youtube_url, source="vod_resolve_start")
+                else:
+                    self._error_reason = f"Failed to resolve YouTube VOD: {exc}"
+                self._finished = True
+                self._stream_alive = False
                 self.abnormal_exit_count += 1
                 logger.error("[YOUTUBE-VOD] %s", self._error_reason)
                 raise RuntimeError(self._error_reason) from exc
@@ -728,14 +744,19 @@ class YouTubeVODReader(BaseVideoReader):
                     self.last_resolver_error_type = cat
                     self.last_error_type = cat
                     self.last_error_message = err_str
-                    if cat == ERROR_HTTP_429:
+                    if cat == ERROR_BOT_CHALLENGE or "AUTH/ANTI_BOT" in err_str:
+                        self._error_reason = f"AUTH/ANTI_BOT: YouTube bot challenge / sign-in required: {exc}"
+                    elif cat == ERROR_HTTP_429:
+                        self._error_reason = f"Failed to resolve YouTube VOD: {exc}"
                         stream_resolver.record_429(source="vod_resolver")
                     elif cat == ERROR_HTTP_403:
+                        self._error_reason = f"Failed to resolve YouTube VOD: {exc}"
                         stream_resolver.record_403(self.youtube_url, source="vod_resolver")
+                    else:
+                        self._error_reason = f"Failed to resolve YouTube VOD: {exc}"
 
                     with self._lock:
                         self._status = "ERROR"
-                        self._error_reason = f"Failed to resolve YouTube VOD: {exc}"
                         self._finished = True
                         self._stream_alive = False
                     logger.error("[YOUTUBE-VOD] %s", self._error_reason)
@@ -883,7 +904,7 @@ class YouTubeVODReader(BaseVideoReader):
                     with self._lock:
                         self._finished = True
                         self._stream_alive = False
-                        self._status = "STOPPED"
+                        self._status = "VIDEO_FINISHED"
                     break
                 else:
                     logger.info("[YOUTUBE-VOD] Looping enabled, restarting stream cleanly...")
@@ -900,7 +921,18 @@ class YouTubeVODReader(BaseVideoReader):
                 cat = classify_youtube_error(stderr_tail, default=ERROR_FFMPEG_ERROR)
                 self.last_ffmpeg_error_type = cat
 
-                if cat == ERROR_HTTP_429:
+                if cat == ERROR_BOT_CHALLENGE or "AUTH/ANTI_BOT" in stderr_tail:
+                    self.last_error_type = ERROR_BOT_CHALLENGE
+                    self.last_error_message = "AUTH/ANTI_BOT: YouTube bot challenge / sign-in required"
+                    with self._lock:
+                        self._finished = True
+                        self._stream_alive = False
+                        self._status = "ERROR"
+                        self._error_reason = self.last_error_message
+                    logger.error("[YOUTUBE-VOD] Bot challenge detected in stderr, stopping retries immediately")
+                    break
+
+                elif cat == ERROR_HTTP_429:
                     self.last_error_type = ERROR_HTTP_429
                     self.last_error_message = f"HTTP 429 detected in FFmpeg stderr: {stderr_tail[-200:]}"
                     stream_resolver.record_429(source="ffmpeg_vod")
@@ -936,7 +968,7 @@ class YouTubeVODReader(BaseVideoReader):
         with self._lock:
             self._stream_alive = False
             self._finished = True
-            if self._status != "ERROR":
+            if self._status not in ("ERROR", "VIDEO_FINISHED"):
                 self._status = "STOPPED"
 
     def read(self, timeout: float = 1.0) -> np.ndarray | None:
@@ -972,6 +1004,11 @@ class YouTubeVODReader(BaseVideoReader):
     def status(self) -> str:
         with self._lock:
             return self._status
+
+    @property
+    def error_reason(self) -> str:
+        with self._lock:
+            return self._error_reason
 
     @property
     def stream_fps(self) -> float:

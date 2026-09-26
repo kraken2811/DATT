@@ -141,14 +141,14 @@ class TestYouTubeStream(unittest.TestCase):
         from src.utils.fps import FPSMeter
 
         meter = FPSMeter(window_size=30)
-        # Simulate 10 frames at 30 FPS (delta = 1/30 = ~0.0333s)
+        # Simulate 20 frames at 30 FPS (delta = 1/30 = ~0.0333s, total > 0.5s window)
         base_time = 100.0
         with patch("time.perf_counter") as mock_time:
-            for i in range(10):
+            for i in range(20):
                 mock_time.return_value = base_time + (i * (1.0 / 30.0))
                 meter.tick()
 
-            self.assertEqual(len(meter.timestamps), 10)
+            self.assertEqual(len(meter.timestamps), 20)
             self.assertAlmostEqual(meter.fps, 30.0, places=2)
 
     def test_camera_reader_stale_frame_status(self) -> None:
