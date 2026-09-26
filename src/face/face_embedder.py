@@ -289,81 +289,154 @@ class FaceEmbedder:
     def detect_faces_in_roi(
         self,
         roi: np.ndarray,
-        illumination: str,
+        illumination: str = "NORMAL",
         enhanced_roi: np.ndarray | None = None,
-    ) -> list[dict[str, Any]]:
+        return_diag: bool = False,
+    ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], dict[str, Any]]:
         """Detect faces within upper-body/head ROI using SCRFD.
 
-        Supports upscaling for small ROIs (2x-4x) and enhancement fallback for backlit/dark scenes.
+        Two-pass detection architecture:
+        - Pass 1: Original ROI (1.0x) with det_thresh=0.35.
+        - Pass 2: Fallback small-face adaptive upscale (2x-4x) with det_thresh=0.30/0.26.
+          Illumination enhancement and geometric upscale are independent.
+          NORMAL lighting never prevents the upscaled pass.
 
         Returns:
-            list[dict[str, Any]]: List of dicts with 'bbox' [x1, y1, x2, y2], 'score', 'kps' in unscaled ROI coords.
+            list[dict[str, Any]] or tuple[list[dict[str, Any]], dict[str, Any]]:
+                List of dicts with 'bbox' [x1, y1, x2, y2], 'score', 'kps' in unscaled ROI coords.
         """
+        empty_diag = {
+            "upper_roi_size": (0, 0),
+            "upscale_factor": 1.0,
+            "detector_input_size": (0, 0),
+            "illumination_state": illumination,
+            "original_face_count": 0,
+            "enhanced_face_count": 0,
+            "best_face_confidence": 0.0,
+            "best_face_bbox": None,
+            "eval_roi": None,
+        }
         if roi is None or roi.size == 0:
-            return []
+            return ([], empty_diag) if return_diag else []
 
         if not self._initialized:
             if not self.initialize():
-                return []
+                return ([], empty_diag) if return_diag else []
 
         det_model = getattr(self, "_det_model", None)
         if det_model is None and self._app is not None:
             det_model = self._app.models.get("detection")
         if det_model is None:
-            return []
+            return ([], empty_diag) if return_diag else []
 
         rh, rw = roi.shape[:2]
         min_dim = min(rh, rw)
 
-        # Upscaling factor to aid detection on small ROIs
-        scale_factor = 1.0
-        if min_dim < 64:
+        # Adaptive 2x-4x enlargement for small ROIs (Point 3)
+        if min_dim <= 80:
             scale_factor = 4.0
-        elif min_dim < 160:
+        elif min_dim <= 125:  # e.g. 109x175 -> 3.0x -> 327x525
+            scale_factor = 3.0
+        elif min_dim <= 220:  # e.g. 159x193 -> 2.0x -> 318x386
             scale_factor = 2.0
+        elif min_dim <= 320:
+            scale_factor = 1.5
+        else:
+            scale_factor = 1.0
+
+        # Always record original ROI detection count at 1.0x with det_thresh=0.35 (Point 1)
+        with self._infer_lock:
+            bboxes_orig, kpss_orig = det_model.detect(roi, max_num=0, det_thresh=0.35)
+
+        orig_count = len(bboxes_orig) if bboxes_orig is not None else 0
+        enh_count = 0
+
+        # Point 3 & 6: Adaptive upscale executes for small ROIs (around 109x175 or 159x193)
+        # Illumination enhancement and geometric upscale are independent.
+        # NORMAL lighting never prevents upscale.
+        if illumination in ("DARK", "BACKLIT") and enhanced_roi is not None:
+            source_img = enhanced_roi
+        else:
+            source_img = roi
 
         if scale_factor > 1.0:
-            eval_roi = cv2.resize(roi, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
+            eval_roi = cv2.resize(source_img, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
+            logger.info(
+                "[FACE_UPSCALE] roi_original=%dx%d upscale=%.1f detector_input=%dx%d",
+                rw, rh, scale_factor, eval_roi.shape[1], eval_roi.shape[0]
+            )
+
+            with self._infer_lock:
+                # Sensitive detection on upscaled ROI (0.30 threshold for small CCTV faces)
+                bboxes_fallback, kpss_fallback = det_model.detect(eval_roi, max_num=0, det_thresh=0.30)
+                # If still 0 faces and upscaled, sensitive retry at 0.26
+                if (bboxes_fallback is None or len(bboxes_fallback) == 0):
+                    bboxes_fallback, kpss_fallback = det_model.detect(eval_roi, max_num=0, det_thresh=0.26)
+
+            enh_count = len(bboxes_fallback) if bboxes_fallback is not None else 0
+            used_scale = scale_factor
+            if enh_count > 0:
+                bboxes = bboxes_fallback
+                kpss = kpss_fallback
+            else:
+                bboxes = bboxes_orig
+                kpss = kpss_orig
+                if orig_count > 0:
+                    used_scale = 1.0
+                    eval_roi = roi
         else:
-            eval_roi = roi
-
-        with self._infer_lock:
-            bboxes, kpss = det_model.detect(eval_roi, max_num=0, det_thresh=0.35)
-
-            # Fallback to enhanced ROI if no face found and scene is dark or backlit
-            if (bboxes is None or len(bboxes) == 0) and illumination in ("DARK", "BACKLIT") and enhanced_roi is not None:
-                if scale_factor > 1.0:
-                    eval_enhanced = cv2.resize(
-                        enhanced_roi, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC
-                    )
-                else:
-                    eval_enhanced = enhanced_roi
-                bboxes, kpss = det_model.detect(eval_enhanced, max_num=0, det_thresh=0.30)
-
-        if bboxes is None or len(bboxes) == 0:
-            return []
+            eval_roi = source_img
+            used_scale = 1.0
+            bboxes = bboxes_orig
+            kpss = kpss_orig
+            if orig_count == 0 and illumination in ("DARK", "BACKLIT") and enhanced_roi is not None:
+                with self._infer_lock:
+                    bboxes_enh, kpss_enh = det_model.detect(eval_roi, max_num=0, det_thresh=0.30)
+                enh_count = len(bboxes_enh) if bboxes_enh is not None else 0
+                if enh_count > 0:
+                    bboxes = bboxes_enh
+                    kpss = kpss_enh
 
         results = []
-        for i in range(len(bboxes)):
-            b = bboxes[i].copy()
-            k = kpss[i].copy() if kpss is not None and i < len(kpss) else None
+        if bboxes is not None and len(bboxes) > 0:
+            for i in range(len(bboxes)):
+                b = bboxes[i].copy()
+                k = kpss[i].copy() if kpss is not None and i < len(kpss) else None
 
-            if scale_factor > 1.0:
-                b[:4] /= scale_factor
-                if k is not None:
-                    k /= scale_factor
+                if used_scale > 1.0:
+                    b[:4] /= used_scale
+                    if k is not None:
+                        k /= used_scale
 
-            results.append({
-                "bbox": b[:4],
-                "score": float(b[4]),
-                "kps": k,
-            })
+                results.append({
+                    "bbox": b[:4],
+                    "score": float(b[4]),
+                    "kps": k,
+                })
 
-        # Sort by bounding box area descending
-        results.sort(
-            key=lambda item: (item["bbox"][2] - item["bbox"][0]) * (item["bbox"][3] - item["bbox"][1]),
-            reverse=True,
-        )
+            # Sort by bounding box area descending
+            results.sort(
+                key=lambda item: (item["bbox"][2] - item["bbox"][0]) * (item["bbox"][3] - item["bbox"][1]),
+                reverse=True,
+            )
+
+        best_conf = float(results[0]["score"]) if results else 0.0
+        best_box = [round(float(v), 1) for v in results[0]["bbox"][:4]] if results else None
+        diag = {
+            "upper_roi_size": (rw, rh),
+            "upscale_factor": used_scale,
+            "detector_input_size": (eval_roi.shape[1], eval_roi.shape[0]),
+            "illumination_state": illumination,
+            "original_face_count": orig_count,
+            "enhanced_face_count": enh_count,
+            "best_face_confidence": best_conf,
+            "best_face_bbox": best_box,
+            "eval_roi": eval_roi,
+        }
+        self.last_detection_diag = diag
+
+        if return_diag:
+            return results, diag
         return results
 
     def calculate_face_quality(
@@ -400,17 +473,13 @@ class FaceEmbedder:
         gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
         sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
-        # Quality Gate (Point 5):
-        # <32 px  -> FACE_TOO_SMALL
-        # 32–48px -> WAIT_FOR_BETTER_FACE
-        # >=48px  -> can embedding
-        # >=64px  -> ưu tiên
+        # Quality Gate:
+        # <32 px  -> FACE_TOO_SMALL (protects against noise/blobs)
+        # >=32 px -> CAN_EMBED if confidence and sharpness satisfy quality floor
         if face_size < 32.0:
             gate_decision = "FACE_TOO_SMALL"
-        elif face_size < 48.0:
-            gate_decision = "WAIT_FOR_BETTER_FACE"
         else:
-            if conf < 0.40 or sharpness < 20.0:
+            if conf < 0.30 or sharpness < 12.0:
                 gate_decision = "WAIT_FOR_BETTER_FACE"
             else:
                 gate_decision = "CAN_EMBED"

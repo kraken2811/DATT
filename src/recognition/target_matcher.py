@@ -17,11 +17,13 @@ Features:
 from dataclasses import dataclass, field
 from datetime import datetime
 import logging
+from pathlib import Path
 import threading
 import time
 from typing import Any, Sequence
 import uuid
 
+import cv2
 import numpy as np
 
 from src.face.face_embedder import cosine_similarity, face_embedder
@@ -239,6 +241,63 @@ class TargetMatcher:
         self._best_faces: dict[int, BestFaceState] = {}
         # track_id -> (last_logged_frame, decision, similarity, best_replaced)
         self._last_logs: dict[int, tuple[int, str, float, bool]] = {}
+
+        # Point 2: Bounded debug sample tracking
+        self._debug_sample_dir = Path("scratch/face_debug")
+        self._debug_sample_count = 0
+        self._max_debug_samples = 15
+
+    def _save_face_debug_sample(
+        self,
+        source_native: np.ndarray,
+        person_bbox: Sequence[int],
+        roi_bbox: Sequence[int],
+        roi_before: np.ndarray,
+        roi_after: np.ndarray | None,
+        enhanced_roi: np.ndarray | None,
+        track_id: int,
+        frame_id: int,
+        face_bbox_native: Sequence[float] | None = None,
+    ) -> None:
+        """Save visual proof of face acquisition in scratch/face_debug/ (bounded)."""
+        try:
+            self._debug_sample_dir.mkdir(parents=True, exist_ok=True)
+            self._debug_sample_count += 1
+            prefix = f"f{frame_id}_t{track_id}"
+
+            # 1. Full native frame with person and ROI bboxes
+            vis = source_native.copy()
+            px1, py1, px2, py2 = [int(v) for v in person_bbox[:4]]
+            rx1, ry1, rx2, ry2 = [int(v) for v in roi_bbox[:4]]
+            cv2.rectangle(vis, (px1, py1), (px2, py2), (0, 255, 0), 2)
+            cv2.rectangle(vis, (rx1, ry1), (rx2, ry2), (255, 255, 0), 2)
+            if face_bbox_native is not None:
+                fx1, fy1, fx2, fy2 = [int(round(v)) for v in face_bbox_native[:4]]
+                cv2.rectangle(vis, (fx1, fy1), (fx2, fy2), (0, 0, 255), 2)
+            cv2.putText(
+                vis, f"Track {track_id} F{frame_id}",
+                (px1, max(20, py1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2
+            )
+            cv2.imwrite(str(self._debug_sample_dir / f"{prefix}_full_native.jpg"), vis)
+
+            # 2. Upper-body ROI before upscale
+            if roi_before is not None and roi_before.size > 0:
+                cv2.imwrite(str(self._debug_sample_dir / f"{prefix}_roi_before_upscale.jpg"), roi_before)
+
+            # 3. ROI after upscale
+            if roi_after is not None and roi_after.size > 0:
+                cv2.imwrite(str(self._debug_sample_dir / f"{prefix}_roi_after_upscale.jpg"), roi_after)
+
+            # 4. Enhanced ROI if used
+            if enhanced_roi is not None and enhanced_roi.size > 0:
+                cv2.imwrite(str(self._debug_sample_dir / f"{prefix}_roi_enhanced.jpg"), enhanced_roi)
+
+            logger.info(
+                "[FACE_DEBUG] Saved bounded debug sample %d/%d to %s",
+                self._debug_sample_count, self._max_debug_samples, self._debug_sample_dir
+            )
+        except Exception as exc:
+            logger.warning("[FACE_DEBUG] Error saving debug sample: %s", exc)
 
     def get_track_state(self, track_id: int) -> BestFaceState | None:
         """Retrieve the BestFaceState for a specific track."""
@@ -464,24 +523,25 @@ class TargetMatcher:
         ph = py2 - py1
 
         # Point 2: Head/Upper-body ROI (50-60% upper half with head/shoulder padding)
-        head_h = int(ph * 0.58)
-        pad_x = int(pw * 0.12)
-        pad_top = int(ph * 0.08)
+        # ROI A: standard upper 58% ROI
+        head_h_A = int(ph * 0.58)
+        pad_x_A = int(pw * 0.12)
+        pad_top_A = int(ph * 0.08)
 
-        roi_x1 = max(0, px1 - pad_x)
-        roi_y1 = max(0, py1 - pad_top)
-        roi_x2 = min(nw, px2 + pad_x)
-        roi_y2 = min(nh, py1 + head_h)
+        roi_A_x1 = max(0, px1 - pad_x_A)
+        roi_A_y1 = max(0, py1 - pad_top_A)
+        roi_A_x2 = min(nw, px2 + pad_x_A)
+        roi_A_y2 = min(nh, py1 + head_h_A)
 
-        rw = roi_x2 - roi_x1
-        rh = roi_y2 - roi_y1
+        rw = roi_A_x2 - roi_A_x1
+        rh = roi_A_y2 - roi_A_y1
 
         if rw < 10 or rh < 10:
             state.last_eval_frame = frame_id
             state.last_bbox_area = bbox_area
             return None
 
-        head_roi = source_native[roi_y1:roi_y2, roi_x1:roi_x2]
+        head_roi = source_native[roi_A_y1:roi_A_y2, roi_A_x1:roi_A_x2]
         if head_roi.size == 0:
             state.last_eval_frame = frame_id
             state.last_bbox_area = bbox_area
@@ -490,10 +550,85 @@ class TargetMatcher:
         # Point 3: Illumination check with LAB-L (NORMAL, DARK, BACKLIT)
         illumination, enhancement_applied, enhanced_roi = face_embedder.check_illumination(head_roi)
 
-        # Point 4: Face Detection with SCRFD on head ROI
-        detected_faces = face_embedder.detect_faces_in_roi(
-            head_roi, illumination=illumination, enhanced_roi=enhanced_roi
+        # Point 4: Face Detection with SCRFD on head ROI (Pass 1 & Pass 2 adaptive upscale)
+        detected_faces, diag = face_embedder.detect_faces_in_roi(
+            head_roi, illumination=illumination, enhanced_roi=enhanced_roi, return_diag=True
         )
+        chosen_roi_bbox = [roi_A_x1, roi_A_y1, roi_A_x2, roi_A_y2]
+
+        # Point 4 Comparison: If ROI A (58%) found 0 faces, evaluate broader ROI B (upper 70%)
+        if not detected_faces:
+            head_h_B = int(ph * 0.70)
+            pad_x_B = int(pw * 0.15)
+            pad_top_B = int(ph * 0.10)
+            roi_B_x1 = max(0, px1 - pad_x_B)
+            roi_B_y1 = max(0, py1 - pad_top_B)
+            roi_B_x2 = min(nw, px2 + pad_x_B)
+            roi_B_y2 = min(nh, py1 + head_h_B)
+            head_roi_B = source_native[roi_B_y1:roi_B_y2, roi_B_x1:roi_B_x2]
+
+            if head_roi_B.size > 0:
+                illum_B, enh_app_B, enh_roi_B = face_embedder.check_illumination(head_roi_B)
+                faces_B, diag_B = face_embedder.detect_faces_in_roi(
+                    head_roi_B, illumination=illum_B, enhanced_roi=enh_roi_B, return_diag=True
+                )
+                if faces_B:
+                    logger.info(
+                        "[ROI_COMPARE] track=%d f=%d 58%% ROI had 0 faces, broader 70%% ROI found %d face(s)",
+                        track_id, frame_id, len(faces_B)
+                    )
+                    detected_faces = faces_B
+                    diag = diag_B
+                    head_roi = head_roi_B
+                    chosen_roi_bbox = [roi_B_x1, roi_B_y1, roi_B_x2, roi_B_y2]
+                    rw = roi_B_x2 - roi_B_x1
+                    rh = roi_B_y2 - roi_B_y1
+                    illumination = illum_B
+                    enhancement_applied = enh_app_B
+                    enhanced_roi = enh_roi_B
+
+        # Point 1: Diagnostics for every meaningful face acquisition
+        best_conf = diag.get("best_face_confidence", 0.0)
+        best_box_roi = diag.get("best_face_bbox")
+        if best_box_roi is not None:
+            best_box_native = [
+                round(best_box_roi[0] + chosen_roi_bbox[0], 1),
+                round(best_box_roi[1] + chosen_roi_bbox[1], 1),
+                round(best_box_roi[2] + chosen_roi_bbox[0], 1),
+                round(best_box_roi[3] + chosen_roi_bbox[1], 1),
+            ]
+        else:
+            best_box_native = None
+
+        logger.info(
+            "[FACE_ACQ] track_id=%d frame_id=%d person_bbox_native=[%d,%d,%d,%d] upper_roi_bbox_native=[%d,%d,%d,%d] upper_roi_size=%dx%d upscale_factor=%.1f detector_input_size=%dx%d illumination_state=%s original_face_count=%d enhanced_face_count=%d best_face_confidence=%.3f best_face_bbox=%s",
+            track_id,
+            frame_id,
+            px1, py1, px2, py2,
+            chosen_roi_bbox[0], chosen_roi_bbox[1], chosen_roi_bbox[2], chosen_roi_bbox[3],
+            rw, rh,
+            diag.get("upscale_factor", 1.0),
+            diag.get("detector_input_size", (0, 0))[0], diag.get("detector_input_size", (0, 0))[1],
+            illumination,
+            diag.get("original_face_count", 0),
+            diag.get("enhanced_face_count", 0),
+            best_conf,
+            best_box_native,
+        )
+
+        # Point 2: Bounded debug sample saving (visual proof in scratch/face_debug/)
+        if self._debug_sample_count < self._max_debug_samples:
+            self._save_face_debug_sample(
+                source_native=source_native,
+                person_bbox=[px1, py1, px2, py2],
+                roi_bbox=chosen_roi_bbox,
+                roi_before=head_roi,
+                roi_after=diag.get("eval_roi"),
+                enhanced_roi=enhanced_roi if illumination in ("DARK", "BACKLIT") else None,
+                track_id=track_id,
+                frame_id=frame_id,
+                face_bbox_native=best_box_native,
+            )
 
         # Fallback for unit tests mocking extract_face_embedding
         mock_embedding = None
@@ -547,23 +682,24 @@ class TargetMatcher:
 
             # Map coordinates to native frame
             face_bbox_native = [
-                det_box[0] + roi_x1,
-                det_box[1] + roi_y1,
-                det_box[2] + roi_x1,
-                det_box[3] + roi_y1,
+                det_box[0] + chosen_roi_bbox[0],
+                det_box[1] + chosen_roi_bbox[1],
+                det_box[2] + chosen_roi_bbox[0],
+                det_box[3] + chosen_roi_bbox[1],
             ]
-            kps_native = det_kps + np.array([roi_x1, roi_y1]) if det_kps is not None else None
+            kps_native = det_kps + np.array([chosen_roi_bbox[0], chosen_roi_bbox[1]]) if det_kps is not None else None
 
             # Point 5: Quality Gate
             face_size, sharpness, quality_score, gate_decision = face_embedder.calculate_face_quality(
                 source_native, face_bbox_native, det_score, illumination
             )
-            face_conf = det_score
-
             if gate_decision in ("FACE_TOO_SMALL", "WAIT_FOR_BETTER_FACE"):
                 # Do NOT generate ArcFace embedding for poor face!
                 if state.embedding is None:
                     state.decision = "WAIT_FOR_BETTER_FACE"
+                state.face_size = face_size
+                state.confidence = det_score
+                state.sharpness = sharpness
                 state.last_eval_frame = frame_id
                 state.last_bbox_area = bbox_area
 
