@@ -78,6 +78,7 @@ class BestFaceState:
     sharpness: float = 0.0
     lighting: str = "NORMAL"  # "NORMAL", "DARK", "BACKLIT"
     quality_score: float = 0.0
+    frontality: float = 0.0
     frame_id: int = -1
     embedding: np.ndarray | None = None
     similarity: float = 0.0
@@ -89,6 +90,38 @@ class BestFaceState:
     last_bbox_area: float = 0.0
     attempts_count: int = 0
     consecutive_below_thresh: int = 0
+    candidate_face_size: float = 0.0
+    candidate_confidence: float = 0.0
+    candidate_sharpness: float = 0.0
+    candidate_quality_score: float = 0.0
+
+
+def calculate_face_frontality(kps: np.ndarray | None) -> float:
+    """Calculate face frontality score in [0.0, 1.0] from 5 facial landmarks.
+
+    Landmarks order (InsightFace SCRFD):
+    0: left eye, 1: right eye, 2: nose, 3: left mouth corner, 4: right mouth corner.
+    Returns 1.0 for perfectly frontal, lower values as head yaw/pitch increases.
+    """
+    if kps is None or len(kps) < 5:
+        return 0.5
+    try:
+        lx = float(kps[0][0])
+        rx = float(kps[1][0])
+        nx = float(kps[2][0])
+
+        eye_dist = abs(rx - lx)
+        if eye_dist < 2.0:
+            return 0.2
+
+        # Horizontal distance from nose to each eye
+        d_left = abs(nx - lx)
+        d_right = abs(rx - nx)
+        asymmetry = abs(d_left - d_right) / max(1.0, d_left + d_right)
+        frontality = max(0.0, min(1.0, 1.0 - asymmetry * 2.0))
+        return round(float(frontality), 2)
+    except Exception:
+        return 0.5
 
 
 @dataclass(frozen=True)
@@ -644,14 +677,28 @@ class TargetMatcher:
         face_conf = 0.0
         sharpness = 0.0
 
+        replacement_reason = "NOT_EVALUATED"
+        cand_face_size = 0.0
+        cand_conf = 0.0
+        cand_sharpness = 0.0
+        cand_quality = 0.0
+
         if not detected_faces and mock_embedding is None:
             if not has_color_only_targets:
                 # No face detected in this frame: maintain state or wait for better face
                 if state.embedding is None:
                     state.decision = "WAIT_FOR_BETTER_FACE"
+                elif state.face_size < 48.0 and state.decision == "CHECKING":
+                    # Requirement 1: Small face < 48px returns to WAIT_FOR_BETTER_FACE
+                    state.decision = "WAIT_FOR_BETTER_FACE"
                 state.last_eval_frame = frame_id
                 state.last_bbox_area = bbox_area
 
+                best_size = state.face_size if state.embedding is not None else 0.0
+                logger.info(
+                    "[BEST_FACE] best_face_size=%.1f candidate_size=0.0 quality=0.0 best_replaced=NO replacement_reason=NO_FACE_DETECTED sim=%.3f failed_match_count=%d decision=%s",
+                    best_size, state.similarity, state.consecutive_below_thresh, state.decision
+                )
                 self._log_face_rec(
                     track_id=track_id,
                     frame_id=frame_id,
@@ -661,9 +708,9 @@ class TargetMatcher:
                     roi_size=(rw, rh),
                     illumination=illumination,
                     enhancement_applied=enhancement_applied,
-                    face_size=0,
-                    face_conf=0.0,
-                    sharpness=0.0,
+                    face_size=int(best_size),
+                    face_conf=state.confidence if state.embedding is not None else 0.0,
+                    sharpness=state.sharpness if state.embedding is not None else 0.0,
                     best_replaced=False,
                     emb_recomputed=False,
                     similarity=state.similarity,
@@ -677,7 +724,7 @@ class TargetMatcher:
         if detected_faces:
             best_det = detected_faces[0]
             det_box = best_det["bbox"]
-            det_score = best_det["score"]
+            det_score = float(best_det["score"])
             det_kps = best_det["kps"]
 
             # Map coordinates to native frame
@@ -690,18 +737,35 @@ class TargetMatcher:
             kps_native = det_kps + np.array([chosen_roi_bbox[0], chosen_roi_bbox[1]]) if det_kps is not None else None
 
             # Point 5: Quality Gate
-            face_size, sharpness, quality_score, gate_decision = face_embedder.calculate_face_quality(
+            cand_face_size, cand_sharpness, cand_quality, gate_decision = face_embedder.calculate_face_quality(
                 source_native, face_bbox_native, det_score, illumination
             )
+            cand_conf = det_score
+
+            # Requirement 4: Record candidate metrics separately from BestFace
+            state.candidate_face_size = cand_face_size
+            state.candidate_confidence = cand_conf
+            state.candidate_sharpness = cand_sharpness
+            state.candidate_quality_score = cand_quality
+
             if gate_decision in ("FACE_TOO_SMALL", "WAIT_FOR_BETTER_FACE"):
                 # Do NOT generate ArcFace embedding for poor face!
+                replacement_reason = "QUALITY_GATE_REJECTED"
                 if state.embedding is None:
                     state.decision = "WAIT_FOR_BETTER_FACE"
-                state.face_size = face_size
-                state.confidence = det_score
-                state.sharpness = sharpness
+                elif state.face_size < 48.0 and state.decision == "CHECKING":
+                    # Requirement 1: Small face returns to WAIT_FOR_BETTER_FACE
+                    state.decision = "WAIT_FOR_BETTER_FACE"
+
+                # Requirement 4: DO NOT overwrite state.face_size, state.confidence, state.sharpness!
                 state.last_eval_frame = frame_id
                 state.last_bbox_area = bbox_area
+
+                best_size = state.face_size if state.embedding is not None else 0.0
+                logger.info(
+                    "[BEST_FACE] best_face_size=%.1f candidate_size=%.1f quality=%.1f best_replaced=NO replacement_reason=%s sim=%.3f failed_match_count=%d decision=%s",
+                    best_size, cand_face_size, cand_quality, replacement_reason, state.similarity, state.consecutive_below_thresh, state.decision
+                )
 
                 if not has_color_only_targets:
                     self._log_face_rec(
@@ -713,9 +777,9 @@ class TargetMatcher:
                         roi_size=(rw, rh),
                         illumination=illumination,
                         enhancement_applied=enhancement_applied,
-                        face_size=int(face_size),
-                        face_conf=det_score,
-                        sharpness=sharpness,
+                        face_size=int(best_size),
+                        face_conf=state.confidence if state.embedding is not None else cand_conf,
+                        sharpness=state.sharpness if state.embedding is not None else cand_sharpness,
                         best_replaced=False,
                         emb_recomputed=False,
                         similarity=state.similarity,
@@ -725,20 +789,43 @@ class TargetMatcher:
                     )
                     return None
             else:
-                # Point 6: Best Face per Track
-                is_better = (state.embedding is None) or (quality_score > state.quality_score * 1.10)
+                # Requirement 5: Easier replacement when candidate is clearer, larger, more frontal, or better quality.
+                # No longer requires strictly quality > state.quality_score * 1.10.
+                cand_frontality = calculate_face_frontality(kps_native)
+
+                is_better = False
+                if state.embedding is None:
+                    is_better = True
+                    replacement_reason = "FIRST_EMBEDDING"
+                elif cand_quality > state.quality_score:
+                    is_better = True
+                    replacement_reason = "BETTER_QUALITY"
+                elif cand_frontality > getattr(state, "frontality", 0.0) + 0.15 and cand_face_size >= state.face_size * 0.85:
+                    is_better = True
+                    replacement_reason = "MORE_FRONTAL"
+                elif cand_sharpness >= state.sharpness * 1.10 and cand_face_size >= state.face_size * 0.90:
+                    is_better = True
+                    replacement_reason = "HIGHER_SHARPNESS"
+                elif cand_face_size >= state.face_size * 1.08 and cand_sharpness >= state.sharpness * 0.75:
+                    is_better = True
+                    replacement_reason = "LARGER_SIZE"
+                else:
+                    is_better = False
+                    replacement_reason = "NOT_BETTER"
+
                 if is_better and kps_native is not None:
-                    # Point 8: Landmark alignment + ArcFace embedding
                     new_emb = face_embedder.align_and_embed(
                         source_native, kps_native, illumination=illumination
                     )
                     if new_emb is not None:
+                        # Requirement 4: Best face metadata updated ONLY upon successful replacement
                         state.embedding = new_emb
-                        state.face_size = face_size
-                        state.confidence = det_score
-                        state.sharpness = sharpness
+                        state.face_size = cand_face_size
+                        state.confidence = cand_conf
+                        state.sharpness = cand_sharpness
                         state.lighting = illumination
-                        state.quality_score = quality_score
+                        state.quality_score = cand_quality
+                        state.frontality = cand_frontality
                         state.frame_id = frame_id
                         state.attempts_count += 1
                         best_replaced = True
@@ -750,11 +837,14 @@ class TargetMatcher:
             state.face_size = 64.0
             state.confidence = 0.90
             state.sharpness = 100.0
+            state.quality_score = 100.0
             best_replaced = True
             emb_recomputed = True
-            face_size = 64.0
-            face_conf = 0.90
-            sharpness = 100.0
+            cand_face_size = 64.0
+            cand_conf = 0.90
+            cand_sharpness = 100.0
+            cand_quality = 100.0
+            replacement_reason = "MOCK_EMBEDDING"
             self._track_face_cache[track_id] = mock_embedding
 
         # Clothing Color Extraction if any target requires color
@@ -840,13 +930,14 @@ class TargetMatcher:
                             face_size=state.face_size,
                         )
 
-        # Update BestFaceState decision (Point 9)
+        # Update BestFaceState decision (Requirements 1, 2, 3)
         state.similarity = round(float(max_face_sim), 3) if max_face_sim > -1.0 else 0.0
         state.threshold = target_thresh
         state.last_eval_frame = frame_id
         state.last_bbox_area = bbox_area
 
         if best_match is not None:
+            # Requirement 3: Sim >= threshold -> FACE_MATCH ngay
             state.decision = "FACE_MATCH"
             state.matched_target_id = best_match.target_id
             state.matched_target_name = best_match.target_name
@@ -854,15 +945,37 @@ class TargetMatcher:
         else:
             state.matched_target_id = None
             state.matched_target_name = None
-            if state.face_size >= 48.0 and state.sharpness >= 25.0:
+
+            # Requirement 2: Face >= 48px + sim thấp đủ 3 lần hợp lệ -> UNKNOWN
+            # Counter only increments for clear, valid face >= 48px
+            is_valid_face_for_unknown = (state.face_size >= 48.0 and state.sharpness >= 20.0)
+
+            if is_valid_face_for_unknown and state.similarity < (target_thresh - 0.05):
                 state.consecutive_below_thresh += 1
 
-            if state.consecutive_below_thresh >= 3 and state.similarity < (target_thresh - 0.05):
+            if state.consecutive_below_thresh >= 3:
+                # 3 valid evaluations >= 48px with low similarity -> UNKNOWN
                 state.decision = "UNKNOWN"
-            elif state.embedding is None:
+            elif state.face_size < 48.0 or state.embedding is None:
+                # Requirement 1: Face 32–48px + sim thấp -> quay về WAIT_FOR_BETTER_FACE, không giữ CHECKING vô hạn
                 state.decision = "WAIT_FOR_BETTER_FACE"
             else:
+                # Face >= 48px, but failed_match_count is 1 or 2 -> CHECKING
                 state.decision = "CHECKING"
+
+        # Short log (Points 1-5 summary)
+        best_size = state.face_size if state.embedding is not None else 0.0
+        logger.info(
+            "[BEST_FACE] best_face_size=%.1f candidate_size=%.1f quality=%.1f best_replaced=%s replacement_reason=%s sim=%.3f failed_match_count=%d decision=%s",
+            best_size,
+            cand_face_size,
+            cand_quality,
+            "YES" if best_replaced else "NO",
+            replacement_reason,
+            state.similarity,
+            state.consecutive_below_thresh,
+            state.decision,
+        )
 
         # Structured single-line log (Point 11)
         self._log_face_rec(
@@ -874,9 +987,9 @@ class TargetMatcher:
             roi_size=(rw, rh),
             illumination=illumination,
             enhancement_applied=enhancement_applied,
-            face_size=int(state.face_size),
-            face_conf=state.confidence,
-            sharpness=state.sharpness,
+            face_size=int(best_size),
+            face_conf=state.confidence if state.embedding is not None else cand_conf,
+            sharpness=state.sharpness if state.embedding is not None else cand_sharpness,
             best_replaced=best_replaced,
             emb_recomputed=emb_recomputed,
             similarity=state.similarity,
