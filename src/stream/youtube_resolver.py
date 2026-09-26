@@ -10,9 +10,11 @@ Provides:
 
 from dataclasses import dataclass, field
 import logging
+import os
 from pathlib import Path
 import random
 import re
+import shutil
 import sys
 import threading
 import time
@@ -348,6 +350,133 @@ def select_best_stream_format(formats: list[dict[str, Any]], is_vod: bool = Fals
     return best_format.get("url")
 
 
+def get_cookie_config() -> tuple[bool, str | None]:
+    """Retrieve and validate yt-dlp cookie configuration from env or auto-discovery.
+
+    Returns:
+        tuple[bool, str | None]: (cookie_enabled, resolved_cookie_path)
+
+    Raises:
+        FileNotFoundError: If an explicit cookie path is configured but does not exist.
+    """
+    raw_path = os.getenv("YTDLP_COOKIE_FILE")
+    if raw_path is None:
+        raw_path = getattr(config, "YTDLP_COOKIE_FILE", None)
+
+    if raw_path is not None:
+        raw_path = str(raw_path).strip()
+
+    if raw_path:
+        p = Path(raw_path).expanduser().resolve()
+        if not p.is_file():
+            raise FileNotFoundError(
+                f"[YT-CONFIG] YTDLP_COOKIE_FILE specified at '{raw_path}' does not exist or is not a file."
+            )
+        return True, str(p)
+
+    # Auto-discovery fallback for standard locations (e.g. Colab / project root)
+    auto_candidates = [
+        Path("/content/DATT/www.youtube.com_cookies.txt"),
+        PROJECT_ROOT / "www.youtube.com_cookies.txt",
+        PROJECT_ROOT / "cookies.txt",
+        Path("www.youtube.com_cookies.txt"),
+        Path("cookies.txt"),
+    ]
+    for cand in auto_candidates:
+        if cand.is_file():
+            return True, str(cand.resolve())
+
+    return False, None
+
+
+def get_js_runtime_config() -> tuple[dict[str, Any], list[str], str]:
+    """Discover available JavaScript runtime (Deno/Node) and remote components (EJS) for yt-dlp.
+
+    Returns:
+        tuple[dict[str, Any], list[str], str]: (js_runtimes_dict, remote_components_list, runtime_label)
+    """
+    deno_env = os.getenv("DENO_PATH")
+    if deno_env and Path(deno_env).is_file():
+        deno_bin = str(Path(deno_env).resolve())
+    else:
+        deno_bin = shutil.which("deno")
+        if not deno_bin:
+            for cand in [
+                Path("/root/.deno/bin/deno"),
+                Path.home() / ".deno" / "bin" / "deno",
+                Path("/usr/local/bin/deno"),
+                Path("/usr/bin/deno"),
+            ]:
+                if cand.is_file():
+                    deno_bin = str(cand.resolve())
+                    break
+
+    remote_components = ["ejs:github", "ejs:npm"]
+
+    if deno_bin:
+        js_runtimes = {"deno": {"path": deno_bin}}
+        js_runtime_label = f"deno ({deno_bin})"
+        return js_runtimes, remote_components, js_runtime_label
+
+    node_bin = shutil.which("node")
+    if node_bin:
+        js_runtimes = {"node": {"path": node_bin}}
+        js_runtime_label = f"node ({node_bin})"
+        return js_runtimes, remote_components, js_runtime_label
+
+    return {"deno": {"path": None}}, remote_components, "deno (default)"
+
+
+def build_ydl_opts(
+    is_vod: bool = False,
+    is_probe: bool = False,
+    extra_opts: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build unified, standardized yt-dlp options for both probe and resolve operations.
+
+    Ensures identical cookie, JS runtime (Deno/EJS), network, and extractor settings
+    across is_live_stream() and resolve_stream_url().
+
+    Logs:
+        cookie_enabled=True/False, cookie_path=<path>, js_runtime=<label>
+        (Never logs cookie contents).
+    """
+    cookie_enabled, cookie_path = get_cookie_config()
+    js_runtimes, remote_components, js_runtime_label = get_js_runtime_config()
+
+    logger.info(
+        "[YT-CONFIG] cookie_enabled=%s cookie_path=%s js_runtime=%s",
+        cookie_enabled,
+        cookie_path,
+        js_runtime_label,
+    )
+
+    opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "nocheckcertificate": True,
+        "skip_download": True,
+        "js_runtimes": js_runtimes,
+        "remote_components": remote_components,
+    }
+
+    if cookie_enabled and cookie_path:
+        opts["cookiefile"] = cookie_path
+
+    if not is_probe:
+        opts["format"] = (
+            "best[ext=mp4]/bestvideo[height<=720][ext=mp4]+bestaudio/best"
+            if is_vod
+            else "bestvideo[height<=720]/best[height<=720]/bestvideo/best"
+        )
+
+    if extra_opts:
+        opts.update(extra_opts)
+
+    return opts
+
+
 class YouTubeStreamResolver:
     """Centralized, thread-safe resolver for YouTube live and VOD stream URLs.
 
@@ -506,23 +635,28 @@ class YouTubeStreamResolver:
                 return entry.failure_count
             return 1
 
-    def is_live_stream(self, url_or_id: str) -> bool:
-        """Determine whether a YouTube URL is a Live stream (True) or VOD (False).
+    def probe_stream_metadata(self, url_or_id: str) -> dict[str, Any]:
+        """Probe YouTube video/stream metadata without downloading.
 
-        Checks internal cache first. If not cached, executes yt-dlp metadata probe,
-        pre-caches the resolved direct URL to optimize subsequent resolve_stream_url calls,
-        and accurately classifies live vs VOD based on yt-dlp extraction metadata.
+        Returns:
+            dict[str, Any]: {
+                "video_id": str,
+                "is_live": bool,
+                "status": str ("not_live", "is_live", "was_live"),
+                "duration": int | float,
+                "title": str,
+            }
         """
         if not is_youtube_url(url_or_id):
-            return False
+            return {
+                "video_id": url_or_id,
+                "is_live": False,
+                "status": "not_live",
+                "duration": 0,
+                "title": "",
+            }
 
         video_id = extract_video_id(url_or_id)
-        with self._lock:
-            entry = self._cache.get(video_id)
-            if entry is not None and entry.is_valid:
-                return entry.is_live
-
-        # Probe using yt-dlp
         acquired = self._resolve_semaphore.acquire(timeout=60.0)
         if not acquired:
             raise RuntimeError("Timeout acquiring global YouTube resolve lock")
@@ -544,18 +678,7 @@ class YouTubeStreamResolver:
             if not target_url.startswith("http://") and not target_url.startswith("https://"):
                 target_url = f"https://www.youtube.com/watch?v={video_id}"
 
-            ydl_opts: dict[str, Any] = {
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "nocheckcertificate": True,
-                "skip_download": True,
-                "extractor_args": {
-                    "youtube": {
-                        "player_client": ["android", "web"]
-                    }
-                },
-            }
+            ydl_opts = build_ydl_opts(is_vod=False, is_probe=True)
 
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -584,6 +707,14 @@ class YouTubeStreamResolver:
             if duration > 0 or live_status in ("was_live", "not_live"):
                 is_live = False
 
+            logger.info(
+                "[YT-PROBE] video_id=%s is_live=%s status=%s duration=%s",
+                video_id,
+                is_live,
+                live_status,
+                duration,
+            )
+
             # Pre-cache direct URL with matching format to make subsequent resolve instant
             formats = info.get("formats", [])
             is_vod = not is_live
@@ -604,11 +735,37 @@ class YouTubeStreamResolver:
                         is_live=is_live,
                         ttl_seconds=ttl,
                     )
-            return is_live
+
+            return {
+                "video_id": video_id,
+                "is_live": is_live,
+                "status": live_status or ("is_live" if is_live else "not_live"),
+                "duration": duration,
+                "title": str(info.get("title") or ""),
+            }
         finally:
             with self._lock:
                 self._last_extraction_finished_at = time.time()
             self._resolve_semaphore.release()
+
+    def is_live_stream(self, url_or_id: str) -> bool:
+        """Determine whether a YouTube URL is a Live stream (True) or VOD (False).
+
+        Checks internal cache first. If not cached, executes yt-dlp metadata probe via probe_stream_metadata(),
+        pre-caches the resolved direct URL to optimize subsequent resolve_stream_url calls,
+        and accurately classifies live vs VOD based on yt-dlp extraction metadata.
+        """
+        if not is_youtube_url(url_or_id):
+            return False
+
+        video_id = extract_video_id(url_or_id)
+        with self._lock:
+            entry = self._cache.get(video_id)
+            if entry is not None and entry.is_valid:
+                return entry.is_live
+
+        metadata = self.probe_stream_metadata(url_or_id)
+        return metadata["is_live"]
 
     def resolve_stream_url(
         self,
@@ -746,23 +903,7 @@ class YouTubeStreamResolver:
             if not target_url.startswith("http://") and not target_url.startswith("https://"):
                 target_url = f"https://www.youtube.com/watch?v=video_id" if video_id == original_url else f"https://www.youtube.com/watch?v={video_id}"
 
-            ydl_opts: dict[str, Any] = {
-                "format": (
-                    "best[ext=mp4]/bestvideo[height<=720][ext=mp4]+bestaudio/best"
-                    if is_vod
-                    else "bestvideo[height<=720]/best[height<=720]/bestvideo/best"
-                ),
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "nocheckcertificate": True,
-                "skip_download": True,
-                "extractor_args": {
-                    "youtube": {
-                        "player_client": ["android", "web"]
-                    }
-                },
-            }
+            ydl_opts = build_ydl_opts(is_vod=is_vod, is_probe=False)
 
             last_exception: Exception | None = None
 

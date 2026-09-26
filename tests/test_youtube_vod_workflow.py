@@ -225,6 +225,83 @@ class TestYouTubeVODWorkflow(unittest.TestCase):
             self.assertEqual(reader.status, "ERROR")
             self.assertIn("AUTH/ANTI_BOT", reader.error_reason)
 
+    def test_build_ydl_opts_unified_cookie_and_js_runtime(self) -> None:
+        """Unified ydl_opts helper configures cookie, Deno/EJS, and logs configuration."""
+        import tempfile
+        import os
+        from src.stream.youtube_resolver import build_ydl_opts
+
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(b"# Netscape HTTP Cookie File\n")
+            temp_cookie = f.name
+
+        try:
+            with patch.dict(os.environ, {"YTDLP_COOKIE_FILE": temp_cookie}):
+                opts_probe = build_ydl_opts(is_vod=False, is_probe=True)
+                opts_resolve = build_ydl_opts(is_vod=True, is_probe=False)
+
+                # Cookiefile used in both
+                self.assertEqual(opts_probe.get("cookiefile"), str(Path(temp_cookie).resolve()))
+                self.assertEqual(opts_resolve.get("cookiefile"), str(Path(temp_cookie).resolve()))
+
+                # JS runtime and EJS components enabled in both
+                self.assertIn("deno", opts_probe.get("js_runtimes", {}))
+                self.assertIn("ejs:github", opts_probe.get("remote_components", []))
+                self.assertIn("deno", opts_resolve.get("js_runtimes", {}))
+                self.assertIn("ejs:github", opts_resolve.get("remote_components", []))
+
+                # Shared baseline options
+                self.assertTrue(opts_probe.get("skip_download"))
+                self.assertTrue(opts_resolve.get("skip_download"))
+                self.assertTrue(opts_probe.get("quiet"))
+                self.assertTrue(opts_resolve.get("quiet"))
+        finally:
+            if os.path.exists(temp_cookie):
+                os.unlink(temp_cookie)
+
+    def test_build_ydl_opts_raises_if_cookie_path_not_found(self) -> None:
+        """Requirement 7: If configured cookie path does not exist, raise clear FileNotFoundError."""
+        import os
+        from src.stream.youtube_resolver import build_ydl_opts
+
+        with patch.dict(os.environ, {"YTDLP_COOKIE_FILE": "C:/invalid/path/cookies_xyz.txt"}):
+            with self.assertRaises(FileNotFoundError) as ctx:
+                build_ydl_opts()
+            self.assertIn("YTDLP_COOKIE_FILE specified at", str(ctx.exception))
+            self.assertIn("does not exist", str(ctx.exception))
+
+    def test_target_url_3zTBsryvZjQ_probe_and_camera_manager_selection(self) -> None:
+        """Target URL https://youtu.be/3zTBsryvZjQ returns is_live=False, status=not_live, duration=61, selects YouTubeVODReader."""
+        url = "https://youtu.be/3zTBsryvZjQ"
+        mock_info = {
+            "id": "3zTBsryvZjQ",
+            "is_live": False,
+            "live_status": "not_live",
+            "duration": 61,
+            "title": "Short Test Video",
+            "formats": [
+                {"format_id": "18", "url": "https://googlevideo.com/video_3zT.mp4", "vcodec": "avc1", "ext": "mp4", "height": 360}
+            ],
+        }
+
+        with patch("yt_dlp.YoutubeDL") as mock_ydl_cls:
+            mock_ydl = MagicMock()
+            mock_ydl.extract_info.return_value = mock_info
+            mock_ydl_cls.return_value.__enter__.return_value = mock_ydl
+
+            meta = stream_resolver.probe_stream_metadata(url)
+            self.assertFalse(meta["is_live"])
+            self.assertEqual(meta["status"], "not_live")
+            self.assertEqual(meta["duration"], 61)
+
+            # Test CameraManager routes to YouTubeVODReader
+            from src.stream.camera_manager import CameraManager
+            cm = CameraManager()
+            with patch("src.stream.video_source.YouTubeVODReader.start"):
+                cam_info = cm.set_video_source("youtube", url)
+                self.assertEqual(cam_info.type, "youtube_vod")
+                self.assertEqual(type(cm._reader).__name__, "YouTubeVODReader")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

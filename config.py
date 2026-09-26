@@ -4,6 +4,7 @@ All hyperparameters and runtime settings are centralized here.
 No other module should hard-code these values.
 """
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -80,4 +81,5 @@ YOUTUBE_URL_TTL_SECONDS: float = 14400.0     # Stream cache TTL in seconds (4 ho
 STREAM_READ_FAILURE_THRESHOLD: int = 10      # Consecutive frame read failures before reconnecting
 STREAM_DIRECT_RECONNECT_RETRIES: int = 3     # Attempts to reconnect using current direct URL before re-resolving
 CAMERA_STARTUP_STAGGER: float = 2.0          # Startup delay between initializing multiple cameras
+YTDLP_COOKIE_FILE: str | None = os.getenv("YTDLP_COOKIE_FILE", None)  # Path to yt-dlp Netscape cookies.txt
 
