@@ -17,6 +17,7 @@ import config
 from src.counter.zone_counter import CarCounter, ZoneCounter
 from src.detector.yolo_detector import DetectionsData, YOLODetector
 from src.events.event_manager import event_manager
+from src.ocr.plate_tracker import vehicle_plate_manager
 from src.recognition.target_matcher import target_matcher
 from src.runtime.shared_state import shared_state
 from src.stream.camera_manager import CameraManager
@@ -191,6 +192,7 @@ def run_pipeline(
                 tracker.reset()
                 car_tracker.reset()
                 target_matcher.reset_tracks()
+                vehicle_plate_manager.reset_tracks()
                 counter.people_count = 0
                 car_counter.car_count = 0
                 event_manager.reset()
@@ -246,6 +248,13 @@ def run_pipeline(
             )
             track_states = target_matcher.get_all_track_states()
 
+            # 4.1 Vehicle License Plate Recognition (decoupled, non-blocking cadence)
+            plate_results = vehicle_plate_manager.process_vehicle_tracks(
+                frame=frame,
+                car_tracks=car_tracks,
+                frame_id=total_frames,
+            )
+
             # 5. Update Occupancy Counters
             people_in_view = counter.update(tracks, frame_shape=frame.shape)
             car_in_view = car_counter.update(car_tracks, frame_shape=frame.shape)
@@ -273,6 +282,7 @@ def run_pipeline(
                     zone_polygon=config.ZONE_POLYGON,
                     target_matches=target_matches,
                     track_states=track_states,
+                    plate_results=plate_results,
                 )
                 # Process occupancy events asynchronously
                 event_manager.process_frame(

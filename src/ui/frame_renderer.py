@@ -24,6 +24,7 @@ def render_frame(
     zone_polygon: list[tuple[int, int]] | np.ndarray | None = None,
     target_matches: dict[int, Any] | None = None,
     track_states: dict[int, Any] | None = None,
+    plate_results: dict[int, Any] | None = None,
 ) -> np.ndarray:
     """Render bounding boxes, tracking labels, occupancy HUD, and target highlights.
 
@@ -36,6 +37,7 @@ def render_frame(
         zone_polygon: Optional ROI polygon coordinates.
         target_matches: Optional dict mapping track_id -> TargetMatchInfo.
         track_states: Optional dict mapping track_id -> BestFaceState.
+        plate_results: Optional dict mapping vehicle track_id -> PlateTrackState.
 
     Returns:
         np.ndarray: Annotated BGR frame copy.
@@ -54,7 +56,7 @@ def render_frame(
 
     font = cv2.FONT_HERSHEY_SIMPLEX
 
-    # 2. Draw Car Tracks (Amber / Orange theme)
+    # 2. Draw Car Tracks (Amber / Orange theme with Plate Overlay)
     car_xyxy = getattr(car_tracks, "xyxy", None) if car_tracks is not None else None
     car_tracker_id = getattr(car_tracks, "tracker_id", None) if car_tracks is not None else None
     car_confidence = getattr(car_tracks, "confidence", None) if car_tracks is not None else None
@@ -72,19 +74,43 @@ def render_frame(
             cid = car_tracker_id[i] if car_tracker_id is not None and i < len(car_tracker_id) else None
             conf = car_confidence[i] if car_confidence is not None and i < len(car_confidence) else None
 
-            # Distinct Amber/Orange color for cars: BGR (11, 158, 245)
-            car_color = (11, 158, 245)
-            car_thickness = 2
-            if cid is not None and conf is not None:
-                car_label = f"CAR | C-{cid} | {conf:.2f}"
-            elif cid is not None:
-                car_label = f"CAR | C-{cid}"
-            elif conf is not None:
-                car_label = f"CAR | {conf:.2f}"
+            # Check if this vehicle has an identified license plate
+            plate_info = None
+            if cid is not None and plate_results is not None:
+                plate_info = plate_results.get(int(cid))
+
+            plate_text = getattr(plate_info, "plate_text", "") if plate_info is not None else ""
+            plate_conf = getattr(plate_info, "confidence", 0.0) if plate_info is not None else 0.0
+            plate_bbox_native = getattr(plate_info, "plate_bbox_native", None) if plate_info is not None else None
+
+            # Distinct Amber/Orange color for cars; Vibrant Yellow/Gold if plate identified
+            if plate_text:
+                car_color = (0, 215, 255)  # Amber/Gold
+                car_thickness = 2
+                car_label = f"CAR | C-{cid} | [{plate_text}] {plate_conf:.2f}"
             else:
-                car_label = "CAR"
+                car_color = (11, 158, 245)
+                car_thickness = 2
+                if cid is not None and conf is not None:
+                    car_label = f"CAR | C-{cid} | {conf:.2f}"
+                elif cid is not None:
+                    car_label = f"CAR | C-{cid}"
+                elif conf is not None:
+                    car_label = f"CAR | {conf:.2f}"
+                else:
+                    car_label = "CAR"
 
             cv2.rectangle(canvas, (x1, y1), (x2, y2), car_color, car_thickness, cv2.LINE_AA)
+
+            # Draw license plate box on vehicle if localized
+            if plate_bbox_native is not None:
+                px1, py1, px2, py2 = plate_bbox_native
+                px1 = max(0, min(int(px1), w - 1))
+                py1 = max(0, min(int(py1), h - 1))
+                px2 = max(0, min(int(px2), w - 1))
+                py2 = max(0, min(int(py2), h - 1))
+                if px2 > px1 and py2 > py1:
+                    cv2.rectangle(canvas, (px1, py1), (px2, py2), (0, 255, 0), 2, cv2.LINE_AA)
 
             font_scale = 0.55
             font_thickness = 1
