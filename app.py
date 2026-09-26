@@ -238,7 +238,13 @@ def run_pipeline(
             car_tracks = car_tracker.update(car_dets)
 
             # 4. Target Matcher (Associates registered targets with active ByteTrack person tracks)
-            target_matches = target_matcher.match_tracks(frame, tracks, frame_id=total_frames)
+            target_matches = target_matcher.match_tracks(
+                frame=frame,
+                tracks=tracks,
+                frame_id=total_frames,
+                native_frame=frame,
+            )
+            track_states = target_matcher.get_all_track_states()
 
             # 5. Update Occupancy Counters
             people_in_view = counter.update(tracks, frame_shape=frame.shape)
@@ -266,6 +272,7 @@ def run_pipeline(
                     car_count=last_car_in_view,
                     zone_polygon=config.ZONE_POLYGON,
                     target_matches=target_matches,
+                    track_states=track_states,
                 )
                 # Process occupancy events asynchronously
                 event_manager.process_frame(

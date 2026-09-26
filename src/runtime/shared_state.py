@@ -28,6 +28,7 @@ class TelemetrySnapshot:
     car_count: int = 0
     detection_count: int = 0
     track_count: int = 0
+    is_fallback: bool = False
     stream_fps: float = 0.0
     processing_fps: float = 0.0
     yolo_latency_ms: float = 0.0
@@ -78,6 +79,21 @@ class TelemetrySnapshot:
         return d
 
 
+@dataclass
+class Observation:
+    """Unified observation snapshot coupling video frame with detections and counters (Point 10)."""
+    frame_id: int = 0
+    timestamp: float = 0.0
+    annotated_frame: np.ndarray | None = None
+    raw_frame: np.ndarray | None = None
+    people_count: int = 0
+    car_count: int = 0
+    detection_count: int = 0
+    track_count: int = 0
+    is_fallback: bool = False
+    source_generation: int = 1
+
+
 class SharedRuntimeState:
     """Thread-safe singleton holding the newest frame and telemetry metrics.
 
@@ -98,6 +114,11 @@ class SharedRuntimeState:
         self._timestamp: float = time.time()
         self._last_processed_frame_time: float = 0.0
         self._last_annotated_frame_time: float = 0.0
+
+        # Observation and Sync (Point 10)
+        self._current_obs: Observation | None = None
+        self._last_good_obs: Observation | None = None
+        self._is_serving_fallback: bool = False
 
         # MJPEG Publisher Diagnostics
         self._last_jpeg_encode_time: float = 0.0
@@ -202,6 +223,13 @@ class SharedRuntimeState:
             self._annotated_frame = None
             self._last_good_annotated_frame = None
             self._last_good_source_generation = self._source_generation
+            self._current_obs = None
+            self._last_good_obs = None
+            self._is_serving_fallback = False
+            self._people_count = 0
+            self._car_count = 0
+            self._detection_count = 0
+            self._track_count = 0
 
     def update(
         self,
@@ -251,6 +279,8 @@ class SharedRuntimeState:
             self._frame_id += 1
             self._timestamp = now
             self._last_processed_frame_time = now
+            self._is_serving_fallback = False
+
             if latest_frame is not None:
                 self._latest_frame = latest_frame
             if annotated_frame is not None:
@@ -263,6 +293,23 @@ class SharedRuntimeState:
             self._car_count = car_count
             self._detection_count = detection_count
             self._track_count = track_count
+
+            obs = Observation(
+                frame_id=self._frame_id,
+                timestamp=now,
+                annotated_frame=annotated_frame,
+                raw_frame=latest_frame,
+                people_count=people_count,
+                car_count=car_count,
+                detection_count=detection_count,
+                track_count=track_count,
+                is_fallback=False,
+                source_generation=self._source_generation,
+            )
+            self._current_obs = obs
+            if annotated_frame is not None:
+                if self._last_good_obs is None or people_count > 0 or self._last_good_obs.people_count == 0:
+                    self._last_good_obs = obs
             self._stream_fps = stream_fps
             self._processing_fps = processing_fps
             self._yolo_latency_ms = yolo_latency_ms
@@ -406,10 +453,10 @@ class SharedRuntimeState:
     def get_frame_for_stream(self) -> tuple[int, np.ndarray | None, bool, int]:
         """Fetch frame for MJPEG streaming with same-source-generation fallback.
 
-        Requirement C3:
-        - If current annotated frame exists: return (frame_id, frame, False, source_generation).
+        Point 10:
+        - If current fresh annotated frame exists: return (frame_id, frame, False, source_generation).
         - If temporary gap exists but same-generation last good frame is cached:
-          return (frame_id, last_good_frame, True, source_generation).
+          marks is_serving_fallback=True, returns (last_good_frame_id, last_good_frame, True, source_generation).
         - If no frame exists for this generation (e.g. freshly switched or reset):
           return (frame_id, None, True, source_generation).
 
@@ -417,13 +464,34 @@ class SharedRuntimeState:
             tuple[int, np.ndarray | None, bool, int]: (frame_id, frame, is_fallback, source_generation)
         """
         with self._lock:
-            if self._annotated_frame is not None:
+            now = time.time()
+            gap = (now - self._last_processed_frame_time) > 0.35 if self._last_processed_frame_time > 0 else False
+
+            if self._annotated_frame is not None and not gap:
+                self._is_serving_fallback = False
                 return self._frame_id, self._annotated_frame, False, self._source_generation
+
+            if (
+                self._last_good_obs is not None
+                and self._last_good_obs.source_generation == self._source_generation
+                and self._last_good_obs.annotated_frame is not None
+            ):
+                self._is_serving_fallback = True
+                return (
+                    self._last_good_obs.frame_id,
+                    self._last_good_obs.annotated_frame,
+                    True,
+                    self._source_generation,
+                )
+
             if (
                 self._last_good_annotated_frame is not None
                 and self._last_good_source_generation == self._source_generation
             ):
+                self._is_serving_fallback = True
                 return self._frame_id, self._last_good_annotated_frame, True, self._source_generation
+
+            self._is_serving_fallback = True
             return self._frame_id, None, True, self._source_generation
 
     def get_raw_frame(self) -> tuple[int, np.ndarray | None]:
@@ -471,18 +539,48 @@ class SharedRuntimeState:
 
             last_pub_age = max(0.0, now - self._last_mjpeg_publish_time) if self._last_mjpeg_publish_time > 0 else 0.0
 
+            # Point 10: Counter Sync with Displayed Frame
+            # Frame video and telemetry must belong to the same observation/frame_id.
+            # If displaying last-good frame with 1 person: counts must still be 1, marked is_fallback=True.
+            # Do NOT drop to 0 until a new frame with truly 0 people is displayed.
+            gap = (now - self._last_processed_frame_time) > 0.35 if self._last_processed_frame_time > 0 else False
+            use_fallback_sync = (self._is_serving_fallback or gap) and (
+                self._last_good_obs is not None
+                and self._last_good_obs.source_generation == self._source_generation
+                and self._last_good_obs.people_count > 0
+                and self._people_count == 0
+            )
+
+            if use_fallback_sync and self._last_good_obs is not None:
+                active_frame_id = self._last_good_obs.frame_id
+                active_people = self._last_good_obs.people_count
+                active_cars = self._last_good_obs.car_count
+                active_dets = self._last_good_obs.detection_count
+                active_tracks = self._last_good_obs.track_count
+                is_fallback_active = True
+            else:
+                active_frame_id = self._frame_id
+                active_people = self._people_count
+                active_cars = self._car_count
+                active_dets = self._detection_count
+                active_tracks = self._track_count
+                is_fallback_active = self._is_serving_fallback or (
+                    gap and self._last_good_obs is not None
+                )
+
             return TelemetrySnapshot(
-                frame_id=self._frame_id,
+                frame_id=active_frame_id,
                 timestamp=self._timestamp,
                 status=camera_status,
                 camera_status=camera_status,
                 stream_alive=stream_alive,
                 last_frame_time=last_frame_time,
                 error_message=err,
-                people_count=self._people_count,
-                car_count=self._car_count,
-                detection_count=self._detection_count,
-                track_count=self._track_count,
+                people_count=active_people,
+                car_count=active_cars,
+                detection_count=active_dets,
+                track_count=active_tracks,
+                is_fallback=is_fallback_active,
                 stream_fps=self._stream_fps,
                 processing_fps=self._processing_fps,
                 yolo_latency_ms=self._yolo_latency_ms,

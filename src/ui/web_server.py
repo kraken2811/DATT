@@ -179,6 +179,8 @@ async def get_telemetry(request: Request) -> JSONResponse:
             "status": "DISCONNECTED",
             "camera_status": "DISCONNECTED",
             "stream_alive": False,
+            "is_fallback": True,
+            "frame_id": 0,
             "last_frame_time": 0.0,
             "error_message": f"Connecting to AI pipeline at {b_url}... Ensure 'python src/main.py' is active.",
             "people_count": 0,

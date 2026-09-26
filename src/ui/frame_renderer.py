@@ -23,6 +23,7 @@ def render_frame(
     car_count: int = 0,
     zone_polygon: list[tuple[int, int]] | np.ndarray | None = None,
     target_matches: dict[int, Any] | None = None,
+    track_states: dict[int, Any] | None = None,
 ) -> np.ndarray:
     """Render bounding boxes, tracking labels, occupancy HUD, and target highlights.
 
@@ -34,6 +35,7 @@ def render_frame(
         car_count: Optional current count of cars in view from CarCounter.
         zone_polygon: Optional ROI polygon coordinates.
         target_matches: Optional dict mapping track_id -> TargetMatchInfo.
+        track_states: Optional dict mapping track_id -> BestFaceState.
 
     Returns:
         np.ndarray: Annotated BGR frame copy.
@@ -139,17 +141,35 @@ def render_frame(
                 score = getattr(target_match, "score", 1.0)
                 label = f"TARGET: {t_name} | P-{tid} | {score:.2f}"
             else:
-                # Normal person: Vibrant Cyan/Teal box: BGR (255, 200, 0)
-                box_color = (255, 200, 0)
-                box_thickness = 2
-                if tid is not None and conf is not None:
-                    label = f"ID P-{tid} | {conf:.2f}"
-                elif tid is not None:
-                    label = f"ID P-{tid}"
-                elif conf is not None:
-                    label = f"Person | {conf:.2f}"
+                # Check BestFaceState for track state (Point 9)
+                st = track_states.get(int(tid)) if (tid is not None and track_states) else None
+                decision = getattr(st, "decision", "") if st is not None else ""
+                sim = getattr(st, "similarity", 0.0) if st is not None else 0.0
+
+                if decision == "CHECKING":
+                    box_color = (0, 230, 255)  # Cyan-Yellow
+                    box_thickness = 2
+                    label = f"P-{tid} | CHECKING ({sim:.2f})"
+                elif decision == "WAIT_FOR_BETTER_FACE":
+                    box_color = (255, 200, 0)  # Cyan/Teal
+                    box_thickness = 2
+                    label = f"ID P-{tid} | WAIT FOR FACE"
+                elif decision == "UNKNOWN":
+                    box_color = (180, 180, 180)  # Slate Gray
+                    box_thickness = 2
+                    label = f"ID P-{tid} | UNKNOWN ({sim:.2f})"
                 else:
-                    label = "Person"
+                    # Normal person: Vibrant Cyan/Teal box: BGR (255, 200, 0)
+                    box_color = (255, 200, 0)
+                    box_thickness = 2
+                    if tid is not None and conf is not None:
+                        label = f"ID P-{tid} | {conf:.2f}"
+                    elif tid is not None:
+                        label = f"ID P-{tid}"
+                    elif conf is not None:
+                        label = f"Person | {conf:.2f}"
+                    else:
+                        label = "Person"
 
             cv2.rectangle(canvas, (x1, y1), (x2, y2), box_color, box_thickness, cv2.LINE_AA)
 

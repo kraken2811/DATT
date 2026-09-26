@@ -218,6 +218,8 @@ class FaceEmbedder:
                 )
                 app.prepare(ctx_id=0, det_size=self.det_size, det_thresh=0.40)
                 self._app = app
+                self._det_model = app.models.get("detection")
+                self._rec_model = app.models.get("recognition")
                 self._initialized = True
                 logger.info(
                     "[FACE] InsightFace '%s' initialized successfully (provider=CPUExecutionProvider, det_size=%s).",
@@ -228,6 +230,257 @@ class FaceEmbedder:
                 self._init_error = str(exc)
                 logger.error("[FACE] Failed to initialize InsightFace: %s", exc, exc_info=True)
                 return False
+
+    @staticmethod
+    def check_illumination(roi: np.ndarray) -> tuple[str, str, np.ndarray]:
+        """Check illumination of head/face ROI using LAB-L space.
+
+        Returns:
+            tuple[str, str, np.ndarray]:
+                - illumination: "NORMAL", "DARK", or "BACKLIT"
+                - enhancement_applied: "NONE", "CLAHE", "CLAHE+GAMMA"
+                - enhanced_roi: Enhanced BGR image if dark/backlit, else original roi
+        """
+        if roi is None or roi.size == 0:
+            return "NORMAL", "NONE", roi
+
+        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+        L = lab[:, :, 0]
+
+        mean_L = float(np.mean(L))
+        rh, rw = L.shape[:2]
+        center = L[
+            int(rh * 0.2):max(int(rh * 0.2) + 1, int(rh * 0.8)),
+            int(rw * 0.2):max(int(rw * 0.2) + 1, int(rw * 0.8)),
+        ]
+        center_mean = float(np.mean(center)) if center.size > 0 else mean_L
+        p90 = float(np.percentile(L, 90))
+
+        # Backlit check: high background brightness while face center is dark or contrast gap > 85
+        if (p90 >= 170.0 and center_mean < 85.0) or (p90 - center_mean > 90.0):
+            illumination = "BACKLIT"
+        elif mean_L < 75.0 or center_mean < 70.0:
+            illumination = "DARK"
+        else:
+            illumination = "NORMAL"
+
+        if illumination == "NORMAL":
+            return "NORMAL", "NONE", roi
+
+        # Gentle enhancement for DARK or BACKLIT
+        enhancements = []
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        L_enhanced = clahe.apply(L)
+        enhancements.append("CLAHE")
+
+        if center_mean < 65.0:
+            inv_gamma = 1.0 / 0.85
+            table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
+            L_enhanced = cv2.LUT(L_enhanced, table)
+            enhancements.append("GAMMA")
+
+        lab_enhanced = lab.copy()
+        lab_enhanced[:, :, 0] = L_enhanced
+        enhanced_roi = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
+        enhancement_applied = "+".join(enhancements)
+
+        return illumination, enhancement_applied, enhanced_roi
+
+    def detect_faces_in_roi(
+        self,
+        roi: np.ndarray,
+        illumination: str,
+        enhanced_roi: np.ndarray | None = None,
+    ) -> list[dict[str, Any]]:
+        """Detect faces within upper-body/head ROI using SCRFD.
+
+        Supports upscaling for small ROIs (2x-4x) and enhancement fallback for backlit/dark scenes.
+
+        Returns:
+            list[dict[str, Any]]: List of dicts with 'bbox' [x1, y1, x2, y2], 'score', 'kps' in unscaled ROI coords.
+        """
+        if roi is None or roi.size == 0:
+            return []
+
+        if not self._initialized:
+            if not self.initialize():
+                return []
+
+        det_model = getattr(self, "_det_model", None)
+        if det_model is None and self._app is not None:
+            det_model = self._app.models.get("detection")
+        if det_model is None:
+            return []
+
+        rh, rw = roi.shape[:2]
+        min_dim = min(rh, rw)
+
+        # Upscaling factor to aid detection on small ROIs
+        scale_factor = 1.0
+        if min_dim < 64:
+            scale_factor = 4.0
+        elif min_dim < 160:
+            scale_factor = 2.0
+
+        if scale_factor > 1.0:
+            eval_roi = cv2.resize(roi, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
+        else:
+            eval_roi = roi
+
+        with self._infer_lock:
+            bboxes, kpss = det_model.detect(eval_roi, max_num=0, det_thresh=0.35)
+
+            # Fallback to enhanced ROI if no face found and scene is dark or backlit
+            if (bboxes is None or len(bboxes) == 0) and illumination in ("DARK", "BACKLIT") and enhanced_roi is not None:
+                if scale_factor > 1.0:
+                    eval_enhanced = cv2.resize(
+                        enhanced_roi, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC
+                    )
+                else:
+                    eval_enhanced = enhanced_roi
+                bboxes, kpss = det_model.detect(eval_enhanced, max_num=0, det_thresh=0.30)
+
+        if bboxes is None or len(bboxes) == 0:
+            return []
+
+        results = []
+        for i in range(len(bboxes)):
+            b = bboxes[i].copy()
+            k = kpss[i].copy() if kpss is not None and i < len(kpss) else None
+
+            if scale_factor > 1.0:
+                b[:4] /= scale_factor
+                if k is not None:
+                    k /= scale_factor
+
+            results.append({
+                "bbox": b[:4],
+                "score": float(b[4]),
+                "kps": k,
+            })
+
+        # Sort by bounding box area descending
+        results.sort(
+            key=lambda item: (item["bbox"][2] - item["bbox"][0]) * (item["bbox"][3] - item["bbox"][1]),
+            reverse=True,
+        )
+        return results
+
+    def calculate_face_quality(
+        self,
+        native_frame: np.ndarray,
+        face_bbox: Any,
+        conf: float,
+        illumination: str,
+    ) -> tuple[float, float, float, str]:
+        """Evaluate face quality against quality gates.
+
+        Returns:
+            tuple[float, float, float, str]:
+                - face_size: min(face_w, face_h) in native pixels
+                - sharpness: variance of Laplacian
+                - quality_score: composite quality score
+                - gate_decision: 'FACE_TOO_SMALL', 'WAIT_FOR_BETTER_FACE', or 'CAN_EMBED'
+        """
+        x1, y1, x2, y2 = [int(round(float(v))) for v in face_bbox[:4]]
+        h, w = native_frame.shape[:2]
+        x1 = max(0, min(x1, w - 1))
+        y1 = max(0, min(y1, h - 1))
+        x2 = max(0, min(x2, w))
+        y2 = max(0, min(y2, h))
+
+        fw = max(0, x2 - x1)
+        fh = max(0, y2 - y1)
+        face_size = float(min(fw, fh))
+
+        if fw < 5 or fh < 5:
+            return face_size, 0.0, 0.0, "FACE_TOO_SMALL"
+
+        face_crop = native_frame[y1:y2, x1:x2]
+        gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+        sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+        # Quality Gate (Point 5):
+        # <32 px  -> FACE_TOO_SMALL
+        # 32–48px -> WAIT_FOR_BETTER_FACE
+        # >=48px  -> can embedding
+        # >=64px  -> ưu tiên
+        if face_size < 32.0:
+            gate_decision = "FACE_TOO_SMALL"
+        elif face_size < 48.0:
+            gate_decision = "WAIT_FOR_BETTER_FACE"
+        else:
+            if conf < 0.40 or sharpness < 20.0:
+                gate_decision = "WAIT_FOR_BETTER_FACE"
+            else:
+                gate_decision = "CAN_EMBED"
+
+        # Composite quality score for BestFace replacement
+        # Rewards larger face size, higher sharpness, good confidence, and normal lighting
+        quality_score = (
+            face_size * 1.0
+            + min(sharpness, 200.0) * 0.3
+            + conf * 40.0
+            + (10.0 if illumination == "NORMAL" else 0.0)
+        )
+
+        return face_size, sharpness, quality_score, gate_decision
+
+    def align_and_embed(
+        self,
+        native_frame: np.ndarray,
+        kps: np.ndarray,
+        illumination: str = "NORMAL",
+    ) -> np.ndarray | None:
+        """Preprocess face with landmark alignment and extract ArcFace embedding.
+
+        Pipeline:
+            Landmark alignment (112x112) -> light lighting balancing if backlit -> ArcFace embedding -> normalize.
+            No generative face restoration.
+        """
+        if kps is None or len(kps) < 5:
+            return None
+
+        if not self._initialized:
+            if not self.initialize():
+                return None
+
+        try:
+            from insightface.utils import face_align
+            aligned = face_align.norm_crop(native_frame, landmark=kps, image_size=112)
+        except Exception as exc:
+            logger.warning("[FACE_ALIGN] norm_crop failed: %s", exc)
+            return None
+
+        if aligned is None or aligned.size == 0:
+            return None
+
+        # Mild lighting balancing if backlit or dark
+        if illumination in ("BACKLIT", "DARK"):
+            lab = cv2.cvtColor(aligned, cv2.COLOR_BGR2LAB)
+            clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(4, 4))
+            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+            aligned = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+        rec_model = getattr(self, "_rec_model", None)
+        if rec_model is None and self._app is not None:
+            rec_model = self._app.models.get("recognition")
+        if rec_model is None:
+            return None
+
+        with self._infer_lock:
+            try:
+                feat = rec_model.get_feat(aligned)
+                if feat is None:
+                    return None
+                emb = np.asarray(feat, dtype=np.float32).flatten()
+                norm = np.linalg.norm(emb)
+                if norm < 1e-7 or np.isnan(norm) or np.isinf(norm):
+                    return None
+                return emb / norm
+            except Exception as exc:
+                logger.error("[ARCFACE_EMBED] Error during embedding: %s", exc)
+                return None
 
     def extract_face_embedding_detailed(
         self,
