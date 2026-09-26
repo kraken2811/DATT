@@ -10,6 +10,8 @@ import cv2
 import numpy as np
 import supervision as sv
 
+import config
+
 
 class ZoneCounter:
     """Current frame-wide or polygon zone occupancy counter for active tracks."""
@@ -51,7 +53,12 @@ class ZoneCounter:
 
         # Filter for active tracks matching target class ID if class_id is present
         if tracks.class_id is not None and len(tracks.class_id) > 0:
-            is_target = tracks.class_id == self.target_class_id
+            if isinstance(self.target_class_id, (list, tuple, set, np.ndarray)):
+                is_target = np.isin(tracks.class_id, list(self.target_class_id))
+            elif self.target_class_id is not None:
+                is_target = tracks.class_id == self.target_class_id
+            else:
+                is_target = np.ones(len(tracks.class_id), dtype=bool)
             active_tracks = tracks.tracker_id[is_target]
             active_boxes = tracks.xyxy[is_target]
         else:
@@ -100,17 +107,21 @@ class ZoneCounter:
 
 
 class CarCounter(ZoneCounter):
-    """Dedicated occupancy counter for cars in view."""
+    """Dedicated occupancy counter for vehicles (cars, trucks, buses, motorcycles) in view."""
 
     def __init__(
         self,
         polygon: list[tuple[int, int]] | None = None,
         car_class_id: int = 2,
-        target_class_id: int | None = None,
+        target_class_id: int | list[int] | None = None,
         *args: Any,
         **kwargs: Any,
     ):
-        cid = target_class_id if target_class_id is not None else car_class_id
+        cid = (
+            target_class_id
+            if target_class_id is not None
+            else getattr(config, "VEHICLE_CLASS_IDS", [car_class_id, 3, 5, 7])
+        )
         super().__init__(polygon=polygon, target_class_id=cid, *args, **kwargs)
         self.car_count: int = 0
 
@@ -127,3 +138,7 @@ class CarCounter(ZoneCounter):
         """Reset car counter to 0."""
         super().reset()
         self.car_count = 0
+
+
+# Alias for semantic clarity
+VehicleCounter = CarCounter

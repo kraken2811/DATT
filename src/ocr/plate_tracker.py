@@ -16,6 +16,7 @@ from typing import Any, Sequence
 import cv2
 import numpy as np
 
+import config
 from src.ocr.plate_reader import LicensePlateReader, plate_reader
 
 logger = logging.getLogger("datt.ocr.plate_tracker")
@@ -29,6 +30,7 @@ EXPIRATION_TTL_FRAMES = 60
 class PlateTrackState:
     """Stores the best license plate representation and state for a vehicle track."""
     track_id: int
+    vehicle_class: str = "vehicle"
     plate_text: str = ""
     confidence: float = 0.0
     plate_bbox_native: tuple[int, int, int, int] | None = None
@@ -43,6 +45,7 @@ class PlateTrackState:
     def to_dict(self) -> dict[str, Any]:
         return {
             "track_id": self.track_id,
+            "vehicle_class": self.vehicle_class,
             "plate_text": self.plate_text,
             "confidence": self.confidence,
             "has_plate": bool(self.plate_text),
@@ -84,24 +87,29 @@ class VehiclePlateManager:
     def process_vehicle_tracks(
         self,
         frame: np.ndarray,
-        car_tracks: Any,
-        frame_id: int,
+        car_tracks: Any = None,
+        frame_id: int = 0,
+        vehicle_tracks: Any = None,
     ) -> dict[int, PlateTrackState]:
         """Evaluate active vehicle tracks for license plate detection & OCR.
 
         Args:
             frame: Native unresized BGR frame (H, W, 3).
-            car_tracks: Detections/Tracks from ByteTrack with xyxy and tracker_id.
+            car_tracks: Detections/Tracks from ByteTrack with xyxy and tracker_id (legacy alias).
             frame_id: Monotonically increasing sequence frame counter.
+            vehicle_tracks: Unified tracked vehicle detections (car, truck, bus, motorcycle).
 
         Returns:
             dict[int, PlateTrackState]: Active vehicle tracks with their latest recognized plate state.
         """
-        if frame is None or car_tracks is None:
+        v_tracks = vehicle_tracks if vehicle_tracks is not None else car_tracks
+        if frame is None or v_tracks is None:
             return {}
 
-        xyxy = getattr(car_tracks, "xyxy", None)
-        tracker_id = getattr(car_tracks, "tracker_id", None)
+        xyxy = getattr(v_tracks, "xyxy", None)
+        tracker_id = getattr(v_tracks, "tracker_id", None)
+        class_id = getattr(v_tracks, "class_id", None)
+        confidence = getattr(v_tracks, "confidence", None)
 
         h, w = frame.shape[:2]
         active_results: dict[int, PlateTrackState] = {}
@@ -145,10 +153,31 @@ class VehiclePlateManager:
                     continue
                 bbox_area = float(vw * vh)
 
+                cid = int(class_id[i]) if class_id is not None and i < len(class_id) else 2
+                cname = getattr(config, "VEHICLE_CLASSES", {}).get(cid, "vehicle")
+                conf_val = float(confidence[i]) if confidence is not None and i < len(confidence) else 0.0
+
+                logger.info(
+                    "[VEHICLE_DET] class=%s conf=%.2f bbox=[%d, %d, %d, %d] track_id=%d size=%dx%d frame_res=%dx%d frame_id=%d",
+                    cname, conf_val, vx1, vy1, vx2, vy2, tid_int, vw, vh, w, h, frame_id,
+                )
+
                 state = self._plate_states.get(tid_int)
                 if state is None:
-                    state = PlateTrackState(track_id=tid_int, last_eval_frame=-999)
+                    state = PlateTrackState(track_id=tid_int, vehicle_class=cname, last_eval_frame=-999)
                     self._plate_states[tid_int] = state
+                else:
+                    state.vehicle_class = cname
+
+                # Check license plate eligibility: car, truck, bus (motorcycle excluded from plate OCR)
+                eligible_classes = getattr(config, "PLATE_ELIGIBLE_CLASSES", [2, 5, 7])
+                if cid not in eligible_classes:
+                    logger.info(
+                        "[PLATE_ATTEMPT] track_id=%d class=%s frame_id=%d attempt=SKIP reason=not_eligible",
+                        tid_int, cname, frame_id,
+                    )
+                    active_results[tid_int] = state
+                    continue
 
                 # Fast retry if vehicle bbox area grew > 20% (moving closer, plate getting larger)
                 growth_due = False
@@ -158,11 +187,17 @@ class VehiclePlateManager:
                         growth_due = True
 
                 # Cadence logic (Requirement: Không OCR mọi frame)
-                if state.status == "RECOGNIZED" and state.confidence >= 0.70:
-                    needs_eval = (frame_id - state.last_eval_frame) >= CADENCE_RECOGNIZED_FRAMES or growth_due
-                else:
-                    cadence_due = (frame_id - state.last_eval_frame) >= self.eval_interval
-                    needs_eval = cadence_due or growth_due or (state.last_eval_frame < 0)
+                cadence_threshold = CADENCE_RECOGNIZED_FRAMES if (state.status == "RECOGNIZED" and state.confidence >= 0.70) else self.eval_interval
+                cadence_gap = frame_id - state.last_eval_frame if state.last_eval_frame >= 0 else -1
+                cadence_due = (cadence_gap >= cadence_threshold) if cadence_gap >= 0 else False
+                needs_eval = cadence_due or growth_due or (state.last_eval_frame < 0)
+
+                reason = "first_eval" if state.last_eval_frame < 0 else ("growth" if growth_due else ("cadence_interval" if cadence_due else "wait_cadence"))
+
+                logger.info(
+                    "[PLATE_ATTEMPT] track_id=%d class=%s frame_id=%d cadence_gap=%d attempt=%s reason=%s v_size=%dx%d status=%s",
+                    tid_int, cname, frame_id, cadence_gap, "RUN" if needs_eval else "SKIP", reason, vw, vh, state.status,
+                )
 
                 if needs_eval:
                     # Crop vehicle strictly for plate localization (Requirement: Không OCR toàn frame)
@@ -181,12 +216,24 @@ class VehiclePlateManager:
                     # BestPlate retention (Requirement: Giữ best plate crop theo track)
                     if cand is not None:
                         is_better = False
+                        better_reason = ""
                         if not state.plate_text:
                             is_better = True
+                            better_reason = "first_plate"
                         elif cand.quality_score > state.plate_quality:
                             is_better = True
+                            better_reason = f"higher_quality({cand.quality_score:.1f}>{state.plate_quality:.1f})"
                         elif cand.confidence > state.confidence + 0.08:
                             is_better = True
+                            better_reason = f"higher_conf({cand.confidence:.2f}>{state.confidence:.2f})"
+                        else:
+                            better_reason = f"rejected_inferior(q={cand.quality_score:.1f}<={state.plate_quality:.1f},conf={cand.confidence:.2f}<={state.confidence:.2f})"
+
+                        logger.info(
+                            "[PLATE_STATE] track_id=%d frame_id=%d status=%s current_plate='%s'(conf=%.2f,q=%.1f) cand='%s'(conf=%.2f,q=%.1f) is_better=%s reason=%s",
+                            tid_int, frame_id, state.status, state.plate_text, state.confidence, state.plate_quality,
+                            cand.plate_text, cand.confidence, cand.quality_score, is_better, better_reason,
+                        )
 
                         if is_better:
                             state.plate_text = cand.plate_text
@@ -198,9 +245,14 @@ class VehiclePlateManager:
                             state.status = "RECOGNIZED"
 
                             logger.info(
-                                "[PLATE_TRACK] Track C-%d f=%d NEW BEST PLATE: '%s' conf=%.2f quality=%.1f",
-                                tid_int, frame_id, state.plate_text, state.confidence, state.plate_quality
+                                "[PLATE_TRACK] Track %s-%d f=%d NEW BEST PLATE: '%s' conf=%.2f quality=%.1f",
+                                cname.upper(), tid_int, frame_id, state.plate_text, state.confidence, state.plate_quality
                             )
+                    else:
+                        logger.info(
+                            "[PLATE_STATE] track_id=%d frame_id=%d status=%s current_plate='%s'(conf=%.2f) cand=None",
+                            tid_int, frame_id, state.status, state.plate_text, state.confidence,
+                        )
 
                 active_results[tid_int] = state
 

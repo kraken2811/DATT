@@ -13,6 +13,8 @@ import sys
 import threading
 import time
 
+import numpy as np
+
 import config
 from src.counter.zone_counter import CarCounter, ZoneCounter
 from src.detector.yolo_detector import DetectionsData, YOLODetector
@@ -222,24 +224,26 @@ def run_pipeline(
             detections = detector.detect(frame)
             last_yolo_ms = detector.last_yolo_ms
 
-            # Split detections by class for independent ByteTrack trackers
+            # Split detections by class: person vs unified vehicles (car, truck, bus, motorcycle)
             person_mask = detections.class_id == config.PERSON_CLASS_ID
-            car_mask = detections.class_id == getattr(config, "CAR_CLASS_ID", 2)
+            vehicle_class_ids = getattr(config, "VEHICLE_CLASS_IDS", [2, 3, 5, 7])
+            vehicle_mask = np.isin(detections.class_id, vehicle_class_ids)
 
             person_dets = DetectionsData({
                 "xyxy": detections.xyxy[person_mask],
                 "confidence": detections.confidence[person_mask],
                 "class_id": detections.class_id[person_mask],
             })
-            car_dets = DetectionsData({
-                "xyxy": detections.xyxy[car_mask],
-                "confidence": detections.confidence[car_mask],
-                "class_id": detections.class_id[car_mask],
+            vehicle_dets = DetectionsData({
+                "xyxy": detections.xyxy[vehicle_mask],
+                "confidence": detections.confidence[vehicle_mask],
+                "class_id": detections.class_id[vehicle_mask],
             })
 
             # 3. Update independent ByteTrack trackers
             tracks = tracker.update(person_dets)
-            car_tracks = car_tracker.update(car_dets)
+            vehicle_tracks = car_tracker.update(vehicle_dets)
+            car_tracks = vehicle_tracks  # Backward-compatible alias
 
             # 4. Target Matcher (Associates registered targets with active ByteTrack person tracks)
             target_matches = target_matcher.match_tracks(
@@ -250,16 +254,16 @@ def run_pipeline(
             )
             track_states = target_matcher.get_all_track_states()
 
-            # 4.1 Vehicle License Plate Recognition (decoupled, non-blocking cadence)
+            # 4.1 Vehicle License Plate Recognition (decoupled, non-blocking cadence, applies to car/truck/bus)
             plate_results = vehicle_plate_manager.process_vehicle_tracks(
                 frame=frame,
-                car_tracks=car_tracks,
+                vehicle_tracks=vehicle_tracks,
                 frame_id=total_frames,
             )
 
             # 5. Update Occupancy Counters
             people_in_view = counter.update(tracks, frame_shape=frame.shape)
-            car_in_view = car_counter.update(car_tracks, frame_shape=frame.shape)
+            car_in_view = car_counter.update(vehicle_tracks, frame_shape=frame.shape)
 
             # Measure total pipeline latency (detection + tracking + matching + counting)
             last_pipeline_ms = (time.perf_counter() - pipeline_t0) * 1000

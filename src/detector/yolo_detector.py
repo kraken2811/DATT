@@ -102,7 +102,17 @@ class YOLODetector:
         nms_threshold = getattr(self.config, "NMS_THRESHOLD", 0.45)
         person_class_id = getattr(self.config, "PERSON_CLASS_ID", 0)
         car_class_id = getattr(self.config, "CAR_CLASS_ID", 2)
-        target_classes = getattr(self.config, "TARGET_CLASSES", [person_class_id, car_class_id])
+        target_classes = getattr(
+            self.config,
+            "TARGET_CLASSES",
+            [
+                person_class_id,
+                car_class_id,
+                getattr(self.config, "MOTORCYCLE_CLASS_ID", 3),
+                getattr(self.config, "BUS_CLASS_ID", 5),
+                getattr(self.config, "TRUCK_CLASS_ID", 7),
+            ],
+        )
         max_detections = getattr(self.config, "MAX_DETECTIONS", 100)
 
         # Ultralytics natively handles BGR numpy frames, letterbox resize to imgsz,
@@ -124,7 +134,7 @@ class YOLODetector:
         else:
             self.vram_allocated_mb = 0.0
 
-        # Extract predictions for target classes (person + car)
+        # Extract predictions for target classes (person + vehicles: car, truck, bus, motorcycle)
         res = results[0]
         if res.boxes is not None and len(res.boxes) > 0:
             boxes = res.boxes
