@@ -784,15 +784,35 @@ class LicensePlateReader:
         return (best.x1, best.y1, best.x2, best.y2)
 
     @staticmethod
-    def _adaptive_upscale_plate(crop: np.ndarray, target_h: int = 80) -> np.ndarray:
-        """Upscale a small plate crop to at least target_h pixels tall (aspect-ratio preserved)."""
+    def _adaptive_upscale_plate(crop: np.ndarray) -> tuple[np.ndarray, float]:
+        """Bounded adaptive upscale for tight plate crops (aspect-ratio preserved, INTER_CUBIC).
+
+        Scale table (keyed on native height):
+            h < 20   -> 4x
+            20 <= h < 35  -> 3x
+            35 <= h < 60  -> 2x
+            60 <= h < 80  -> 1.5x
+            h >= 80       -> 1x (no upscale)
+
+        Returns:
+            (upscaled_crop, scale_factor)
+        """
         h, w = crop.shape[:2]
-        if h >= target_h:
-            return crop
-        scale = target_h / float(h)
+        if h < 20:
+            scale = 4.0
+        elif h < 35:
+            scale = 3.0
+        elif h < 60:
+            scale = 2.0
+        elif h < 80:
+            scale = 1.5
+        else:
+            return crop, 1.0
+
         new_w = max(32, int(round(w * scale)))
-        new_h = max(target_h, int(round(h * scale)))
-        return cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+        new_h = max(1, int(round(h * scale)))
+        upscaled = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+        return upscaled, scale
 
     # ------------------------------------------------------------------
     # Main extraction entry point
@@ -855,12 +875,14 @@ class LicensePlateReader:
             if tight_crop.size == 0:
                 plate_bbox_in_vehicle = None  # fall through to heuristic
             else:
-                # Adaptive upscale for small plates
-                tight_crop = self._adaptive_upscale_plate(tight_crop, target_h=80)
+                # Bounded adaptive upscale for small plates
+                native_h, native_w = tight_crop.shape[:2]
+                tight_crop, scale_factor = self._adaptive_upscale_plate(tight_crop)
+                out_h, out_w = tight_crop.shape[:2]
 
                 logger.info(
-                    "[PLATE_CROP] track_id=%d frame_id=%d tight_plate_size=%dx%d (after upscale)",
-                    track_id, frame_id, tight_crop.shape[1], tight_crop.shape[0],
+                    "[PLATE_CROP] track_id=%d frame_id=%d native_size=%dx%d scale_factor=%.1fx output_size=%dx%d",
+                    track_id, frame_id, native_w, native_h, scale_factor, out_w, out_h,
                 )
 
                 # Save raw plate crop for debug
