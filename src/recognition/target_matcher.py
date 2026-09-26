@@ -25,6 +25,7 @@ import uuid
 import numpy as np
 
 from src.face.face_embedder import cosine_similarity, face_embedder
+from src.face.diagnostic_snapshot import export_if_requested
 from src.recognition.color_extractor import clothing_color_extractor
 
 logger = logging.getLogger("datt.target_matcher")
@@ -333,6 +334,8 @@ class TargetMatcher:
         """
         if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
             return {}
+
+        export_if_requested(frame, tracks, frame_id, native_frame, face_embedder)
 
         targets = self.manager.list_targets()
         if not targets or tracks is None:
