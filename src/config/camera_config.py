@@ -76,7 +76,7 @@ def load_cameras(config_path: Path | str | None = None) -> dict[str, CameraInfo]
         if not url:
             raise ValueError(f"Camera '{cam_id}' is missing a valid 'url' parameter.")
 
-        valid_types = {"youtube", "rtsp", "file", "http", "https"}
+        valid_types = {"youtube", "rtsp", "file", "local", "direct_hls", "http", "https"}
         if cam_type not in valid_types:
             raise ValueError(
                 f"Camera '{cam_id}' has unsupported type '{cam_type}'. Valid: {valid_types}"

@@ -1,5 +1,13 @@
 cameras:
   camera_01:
+    name: "Local Benchmark - 1280x720 Vehicle & Plate Stream"
+    type: local
+    url: "scratch/audit_fixture_200.mp4"
+    width: 1280
+    height: 720
+    description: "Local 1280x720 benchmark stream for Stage Timing & Zone audit"
+
+  camera_02:
     name: "YouTube Live - Tokyo Street"
     type: youtube
     url: "https://youtu.be/Cp4RRAEgpeU"
@@ -7,7 +15,7 @@ cameras:
     height: 720
     description: "Primary Tokyo live pedestrian crosswalk stream"
 
-  camera_02:
+  camera_03:
     name: "YouTube Live - Wildlife Waterhole"
     type: youtube
     url: "https://www.youtube.com/watch?v=ydYDqZQpim8"
@@ -15,7 +23,7 @@ cameras:
     height: 720
     description: "Namibia Namib Desert 24/7 wildlife live stream"
 
-  camera_03:
+  camera_04:
     name: "RTSP Camera Example"
     type: rtsp
     url: "rtsp://127.0.0.1:8554/live"

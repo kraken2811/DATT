@@ -82,9 +82,21 @@ TRACKER_FRAME_RATE: float = 30.0
 # ==============================================================================
 # 5. COUNTING & ZONE CONFIGURATION
 # ==============================================================================
-# Default zone is full frame [0, 0, WIDTH, HEIGHT] if None.
-# Can be defined as a list of (x, y) tuples for ROI polygon.
-ZONE_POLYGON: list[tuple[int, int]] | None = None
+# Default counting zone mode: False = Full View, True = Selected Zone
+ZONE_ENABLED: bool = False
+
+# Default zone polygon for 1280x720 ROI when counting zone is enabled
+DEFAULT_ZONE_POLYGON: list[tuple[int, int]] = [
+    (150, 200),
+    (1130, 200),
+    (1200, 680),
+    (80, 680),
+]
+ZONE_POLYGON: list[tuple[int, int]] | None = DEFAULT_ZONE_POLYGON
+
+# Model precision: True = FP16 (on CUDA GPU), False = FP32
+HALF: bool = True
+
 
 # ==============================================================================
 # 6. DISPLAY & DEBUG CONFIGURATION

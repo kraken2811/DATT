@@ -1,0 +1,12 @@
+**
+!Dockerfile
+!src/
+!src/__init__.py
+!src/db/
+!src/db/**
+!tests/
+!tests/test_db.py
+!tests/test_db_postgres.py
+**/__pycache__/
+**/*.pyc
+**/.env

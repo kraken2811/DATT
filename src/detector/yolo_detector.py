@@ -117,6 +117,8 @@ class YOLODetector:
 
         # Ultralytics natively handles BGR numpy frames, letterbox resize to imgsz,
         # normalization, inference, and IoU NMS.
+        half_enabled = bool(getattr(self.config, "HALF", True)) and ("cuda" in str(self.device).lower())
+        kwargs = {"half": True} if half_enabled else {}
         results = self.model(
             frame,
             imgsz=img_size,
@@ -125,6 +127,7 @@ class YOLODetector:
             classes=target_classes,
             device=self.device,
             verbose=False,
+            **kwargs,
         )
 
         self.last_yolo_ms = (time.perf_counter() - t0) * 1000

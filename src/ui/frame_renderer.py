@@ -23,10 +23,13 @@ def render_frame(
     people_count: int,
     car_tracks: Any = None,
     car_count: int = 0,
+    car_count_label: str = "VEHICLES IN VIEW",
     zone_polygon: list[tuple[int, int]] | np.ndarray | None = None,
     target_matches: dict[int, Any] | None = None,
     track_states: dict[int, Any] | None = None,
     plate_results: dict[int, Any] | None = None,
+    zone_enabled: bool = False,
+    in_zone_ids: set[int] | frozenset[int] | None = None,
 ) -> np.ndarray:
     """Render bounding boxes, tracking labels, occupancy HUD, and target highlights.
 
@@ -40,6 +43,8 @@ def render_frame(
         target_matches: Optional dict mapping track_id -> TargetMatchInfo.
         track_states: Optional dict mapping track_id -> BestFaceState.
         plate_results: Optional dict mapping vehicle track_id -> PlateTrackState.
+        zone_enabled: If True, renders ROI polygon and highlights in-zone vehicles.
+        in_zone_ids: Optional set of tracker_ids located inside the counting zone.
 
     Returns:
         np.ndarray: Annotated BGR frame copy.
@@ -51,12 +56,32 @@ def render_frame(
     canvas = frame.copy()
     h, w = canvas.shape[:2]
 
-    # 1. Draw Zone Polygon if configured
-    if zone_polygon is not None:
+    # 1. Draw Zone Polygon ONLY when Zone is explicitly enabled
+    if zone_enabled and zone_polygon is not None:
         poly_arr = np.array(zone_polygon, dtype=np.int32)
-        cv2.polylines(canvas, [poly_arr], isClosed=True, color=(0, 255, 255), thickness=2)
+        # Semi-transparent overlay to clearly delineate the zone
+        overlay = canvas.copy()
+        cv2.fillPoly(overlay, [poly_arr], color=(0, 200, 255))
+        cv2.addWeighted(overlay, 0.12, canvas, 0.88, 0, canvas)
+        # Bright yellow boundary with corner indicators
+        cv2.polylines(canvas, [poly_arr], isClosed=True, color=(0, 255, 255), thickness=2, lineType=cv2.LINE_AA)
+        # Draw label on polygon top-left
+        pts = poly_arr.reshape(-1, 2)
+        top_idx = np.argmin(pts[:, 1])
+        lbl_x, lbl_y = int(pts[top_idx, 0]), max(20, int(pts[top_idx, 1]) - 8)
+        cv2.putText(
+            canvas,
+            "COUNTING ZONE (ACTIVE)",
+            (lbl_x, lbl_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
 
     font = cv2.FONT_HERSHEY_SIMPLEX
+
 
     # 2. Draw Vehicle Tracks (Amber / Orange theme with Plate Overlay)
     car_xyxy = getattr(car_tracks, "xyxy", None) if car_tracks is not None else None
@@ -88,24 +113,37 @@ def render_frame(
             plate_conf = getattr(plate_info, "confidence", 0.0) if plate_info is not None else 0.0
             plate_bbox_native = getattr(plate_info, "plate_bbox_native", None) if plate_info is not None else None
 
+            # If Zone is active, distinguish whether vehicle is inside counting zone
+            is_in_zone = True
+            if zone_enabled and in_zone_ids is not None:
+                is_in_zone = cid is not None and int(cid) in in_zone_ids
+
             # Distinct Amber/Orange color for vehicles; Vibrant Yellow/Gold if plate identified
             if plate_text:
-                car_color = (0, 215, 255)  # Amber/Gold
+                car_color = (0, 215, 255) if is_in_zone else (140, 160, 175)
                 car_thickness = 2
-                car_label = f"{v_type_str} | C-{cid} | [{plate_text}] {plate_conf:.2f}"
+                zone_prefix = "[ZONE] " if (zone_enabled and in_zone_ids is not None and is_in_zone) else ""
+                car_label = f"{zone_prefix}{v_type_str} | C-{cid} | [{plate_text}] {plate_conf:.2f}"
             else:
-                car_color = (11, 158, 245)
+                if is_in_zone:
+                    car_color = (11, 158, 245)
+                    zone_prefix = "[ZONE] " if (zone_enabled and in_zone_ids is not None) else ""
+                else:
+                    car_color = (120, 125, 135)  # Muted slate for vehicles outside counting zone
+                    zone_prefix = "[OUT] "
+
                 car_thickness = 2
                 if cid is not None and conf is not None:
-                    car_label = f"{v_type_str} | C-{cid} | {conf:.2f}"
+                    car_label = f"{zone_prefix}{v_type_str} | C-{cid} | {conf:.2f}"
                 elif cid is not None:
-                    car_label = f"{v_type_str} | C-{cid}"
+                    car_label = f"{zone_prefix}{v_type_str} | C-{cid}"
                 elif conf is not None:
-                    car_label = f"{v_type_str} | {conf:.2f}"
+                    car_label = f"{zone_prefix}{v_type_str} | {conf:.2f}"
                 else:
-                    car_label = v_type_str
+                    car_label = f"{zone_prefix}{v_type_str}"
 
             cv2.rectangle(canvas, (x1, y1), (x2, y2), car_color, car_thickness, cv2.LINE_AA)
+
 
             # Draw license plate box on vehicle if localized
             if plate_bbox_native is not None:
@@ -230,5 +268,18 @@ def render_frame(
                 font_thickness,
                 cv2.LINE_AA,
             )
+
+    # 4. Top HUD Status Bar
+    hud_bg = canvas.copy()
+    cv2.rectangle(hud_bg, (0, 0), (w, 36), (15, 23, 42), -1)
+    cv2.addWeighted(hud_bg, 0.75, canvas, 0.25, 0, canvas)
+    cv2.line(canvas, (0, 36), (w, 36), (51, 65, 85), 1)
+
+    hud_text = f"PEOPLE: {people_count}  |  {car_count_label}: {car_count}"
+    cv2.putText(canvas, hud_text, (16, 24), font, 0.60, (255, 255, 255), 2, cv2.LINE_AA)
+
+    zone_status_text = "[ZONE: ACTIVE]" if zone_enabled else "[ZONE: OFF - FULL VIEW]"
+    zone_color = (0, 220, 255) if zone_enabled else (148, 163, 184)
+    cv2.putText(canvas, zone_status_text, (max(16, w - 260), 24), font, 0.55, zone_color, 2, cv2.LINE_AA)
 
     return canvas

@@ -121,22 +121,28 @@ class PlateDetector:
             else:
                 logger.warning("[PLATE_MODEL] PLATE_MODEL_PATH set to '%s' but file not found – trying hub.", self._model_path)
 
-        # 2. Auto-download lightweight hub model
+        # 2. Auto-download from verified HuggingFace repo if file not found locally
         try:
-            logger.info("[PLATE_MODEL] Downloading plate model from hub: %s", _DEFAULT_HUB_MODEL)
-            from ultralyticsplus import YOLO as HubYOLO, render_result  # type: ignore  # noqa: F401
-            self._model = HubYOLO(_DEFAULT_HUB_MODEL)
-            self._model.overrides["conf"] = self._conf_threshold
-            self._model.overrides["iou"] = 0.45
-            self._model.overrides["agnostic_nms"] = True
-            self._model.overrides["max_det"] = 10
-            logger.info("[PLATE_MODEL] Hub model loaded: %s", _DEFAULT_HUB_MODEL)
+            from huggingface_hub import hf_hub_download
+            logger.info("[PLATE_MODEL] Downloading plate model from HuggingFace: Koushim/yolov8-license-plate-detection...")
+            hf_path = hf_hub_download(repo_id="Koushim/yolov8-license-plate-detection", filename="best.pt")
+            self._model = YOLO(hf_path)
+            logger.info("[PLATE_MODEL] Loaded plate model from HuggingFace cache: %s", hf_path)
+            # Cache locally to models/ for subsequent runs
+            try:
+                import shutil
+                target_p = Path(self._model_path or "models/yolov8n-license-plate.pt")
+                target_p.parent.mkdir(parents=True, exist_ok=True)
+                if not target_p.is_file():
+                    shutil.copyfile(hf_path, str(target_p))
+            except Exception:
+                pass
             self._initialized = True
             return True
-        except Exception as exc_hub:
-            logger.warning("[PLATE_MODEL] ultralyticsplus hub load failed: %s. Trying vanilla ultralytics download.", exc_hub)
+        except Exception as exc_hf:
+            logger.warning("[PLATE_MODEL] HuggingFace auto-download failed: %s. Trying vanilla ultralytics.", exc_hf)
 
-        # 3. Vanilla ultralytics auto-download (for models that support hub slug)
+        # 3. Vanilla ultralytics auto-download fallback
         try:
             self._model = YOLO(_DEFAULT_HUB_MODEL)
             logger.info("[PLATE_MODEL] Loaded via vanilla YOLO hub: %s", _DEFAULT_HUB_MODEL)
