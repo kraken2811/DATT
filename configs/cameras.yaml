@@ -1,0 +1,24 @@
+cameras:
+  camera_01:
+    name: "YouTube Live - Tokyo Street"
+    type: youtube
+    url: "https://youtu.be/Cp4RRAEgpeU"
+    width: 1280
+    height: 720
+    description: "Primary Tokyo live pedestrian crosswalk stream"
+
+  camera_02:
+    name: "YouTube Live - Wildlife Waterhole"
+    type: youtube
+    url: "https://www.youtube.com/watch?v=ydYDqZQpim8"
+    width: 1280
+    height: 720
+    description: "Namibia Namib Desert 24/7 wildlife live stream"
+
+  camera_03:
+    name: "RTSP Camera Example"
+    type: rtsp
+    url: "rtsp://127.0.0.1:8554/live"
+    width: 1280
+    height: 720
+    description: "Simulated RTSP surveillance stream"
