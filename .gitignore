@@ -52,3 +52,7 @@ $RECYCLE.BIN/
 
 # Temporary scratch directory
 scratch/
+.env
+.env.*
+!.env.example
+backups/
