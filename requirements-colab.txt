@@ -12,3 +12,5 @@ yt-dlp
 imageio-ffmpeg
 psutil
 streamlit>=1.40.0
+
+easyocr>=1.7.1,<2

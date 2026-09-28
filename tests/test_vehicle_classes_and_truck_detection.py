@@ -53,7 +53,7 @@ class TestVehicleClassesAndTruckDetection(unittest.TestCase):
         self.assertIn(2, config.PLATE_ELIGIBLE_CLASSES)
         self.assertIn(5, config.PLATE_ELIGIBLE_CLASSES)
         self.assertIn(7, config.PLATE_ELIGIBLE_CLASSES)
-        self.assertNotIn(3, config.PLATE_ELIGIBLE_CLASSES)  # Motorcycle excluded from plate OCR
+        self.assertIn(3, config.PLATE_ELIGIBLE_CLASSES)  # Motorcycle eligible
 
     def test_2_detector_passes_all_vehicle_classes_to_yolo_model(self) -> None:
         """YOLODetector passes [0, 2, 3, 5, 7] to Ultralytics model call."""
@@ -136,12 +136,13 @@ class TestVehicleClassesAndTruckDetection(unittest.TestCase):
             # Check plate evaluated for truck
             self.assertIn(42, results)
             self.assertEqual(results[42].vehicle_class, "truck")
-            self.assertEqual(results[42].plate_text, "29C-888.88")
-            self.assertEqual(results[42].status, "RECOGNIZED")
+            self.assertEqual(results[42].candidate_text, "29C88888")
+            self.assertEqual(results[42].status, "CHECKING")
 
-    def test_5_motorcycle_excluded_from_plate_ocr_but_tracked(self) -> None:
-        """Motorcycle (3) is tracked with [VEHICLE_DET] logged, but excluded from plate OCR."""
+    def test_5_motorcycle_eligible_for_plate_ocr(self) -> None:
+        """Motorcycle (3) is tracked with [VEHICLE_DET] logged, and eligible for plate OCR."""
         mock_reader = MagicMock()
+        mock_reader.extract_license_plate.return_value = None
         mgr = VehiclePlateManager(reader=mock_reader)
         dummy_frame = np.ones((720, 1280, 3), dtype=np.uint8) * 128
 
@@ -159,7 +160,7 @@ class TestVehicleClassesAndTruckDetection(unittest.TestCase):
             self.assertTrue(any("[VEHICLE_DET] class=motorcycle" in msg for msg in log_ctx.output))
 
             # Plate OCR reader was NEVER called for motorcycle
-            mock_reader.extract_license_plate.assert_not_called()
+            mock_reader.extract_license_plate.assert_called_once()
             self.assertEqual(results[99].vehicle_class, "motorcycle")
             self.assertEqual(results[99].plate_text, "")
 

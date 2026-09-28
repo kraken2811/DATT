@@ -379,8 +379,7 @@ class SharedRuntimeState:
             self._current_obs = obs
 
             if annotated_frame is not None:
-                if self._last_good_obs is None or people_count > 0 or self._last_good_obs.people_count == 0:
-                    self._last_good_obs = obs
+                self._last_good_obs = obs
             self._stream_fps = stream_fps
             self._processing_fps = processing_fps
             self._yolo_latency_ms = yolo_latency_ms
@@ -521,49 +520,22 @@ class SharedRuntimeState:
         with self._lock:
             return self._frame_id, self._annotated_frame
 
+    def _stream_observation_locked(self):
+        current = self._current_obs
+        if current is not None and self._annotated_frame is not None and current.annotated_frame is not None and current.source_generation == self._source_generation:
+            return current, time.time() - current.timestamp > 0.35
+        previous = self._last_good_obs
+        if previous is not None and previous.source_generation == self._source_generation:
+            return previous, True
+        return None, True
+
     def get_frame_for_stream(self) -> tuple[int, np.ndarray | None, bool, int]:
-        """Fetch frame for MJPEG streaming with same-source-generation fallback.
-
-        Point 10:
-        - If current fresh annotated frame exists: return (frame_id, frame, False, source_generation).
-        - If temporary gap exists but same-generation last good frame is cached:
-          marks is_serving_fallback=True, returns (last_good_frame_id, last_good_frame, True, source_generation).
-        - If no frame exists for this generation (e.g. freshly switched or reset):
-          return (frame_id, None, True, source_generation).
-
-        Returns:
-            tuple[int, np.ndarray | None, bool, int]: (frame_id, frame, is_fallback, source_generation)
-        """
+        """Use the same observation selection as telemetry, including zero-count frames."""
         with self._lock:
-            now = time.time()
-            gap = (now - self._last_processed_frame_time) > 0.35 if self._last_processed_frame_time > 0 else False
-
-            if self._annotated_frame is not None and not gap:
-                self._is_serving_fallback = False
-                return self._frame_id, self._annotated_frame, False, self._source_generation
-
-            if (
-                self._last_good_obs is not None
-                and self._last_good_obs.source_generation == self._source_generation
-                and self._last_good_obs.annotated_frame is not None
-            ):
-                self._is_serving_fallback = True
-                return (
-                    self._last_good_obs.frame_id,
-                    self._last_good_obs.annotated_frame,
-                    True,
-                    self._source_generation,
-                )
-
-            if (
-                self._last_good_annotated_frame is not None
-                and self._last_good_source_generation == self._source_generation
-            ):
-                self._is_serving_fallback = True
-                return self._frame_id, self._last_good_annotated_frame, True, self._source_generation
-
-            self._is_serving_fallback = True
-            return self._frame_id, None, True, self._source_generation
+            obs, fallback = self._stream_observation_locked()
+            self._is_serving_fallback = fallback
+            return (obs.frame_id if obs else self._frame_id,
+                    obs.annotated_frame if obs else None, fallback, self._source_generation)
 
     def get_raw_frame(self) -> tuple[int, np.ndarray | None]:
         """Fetch the newest raw frame and its frame ID."""
@@ -616,37 +588,16 @@ class SharedRuntimeState:
             last_pub_age = max(0.0, now - self._last_mjpeg_publish_time) if self._last_mjpeg_publish_time > 0 else 0.0
 
             # Point 10: Counter Sync with Displayed Frame
-            # Frame video and telemetry must belong to the same observation/frame_id.
-            # If displaying last-good frame with 1 person: counts must still be 1, marked is_fallback=True.
-            # Do NOT drop to 0 until a new frame with truly 0 people is displayed.
-            gap = (now - self._last_processed_frame_time) > 0.35 if self._last_processed_frame_time > 0 else False
-            use_fallback_sync = (self._is_serving_fallback or gap) and (
-                self._last_good_obs is not None
-                and self._last_good_obs.source_generation == self._source_generation
-                and self._last_good_obs.people_count > 0
-                and self._people_count == 0
-            )
-
-            if use_fallback_sync and self._last_good_obs is not None:
-                active_frame_id = self._last_good_obs.frame_id
-                active_people = self._last_good_obs.people_count
-                active_cars = self._last_good_obs.car_count
-                active_dets = self._last_good_obs.detection_count
-                active_tracks = self._last_good_obs.track_count
-                is_fallback_active = True
-            else:
-                active_frame_id = self._frame_id
-                active_people = self._people_count
-                active_cars = self._car_count
-                active_dets = self._detection_count
-                active_tracks = self._track_count
-                is_fallback_active = self._is_serving_fallback or (
-                    gap and self._last_good_obs is not None
-                )
+            obs, is_fallback_active = self._stream_observation_locked()
+            active_frame_id = obs.frame_id if obs else self._frame_id
+            active_people = obs.people_count if obs else self._people_count
+            active_cars = obs.car_count if obs else self._car_count
+            active_dets = obs.detection_count if obs else self._detection_count
+            active_tracks = obs.track_count if obs else self._track_count
 
             return TelemetrySnapshot(
                 frame_id=active_frame_id,
-                timestamp=self._timestamp,
+                timestamp=obs.timestamp if obs else self._timestamp,
                 status=camera_status,
                 camera_status=camera_status,
                 stream_alive=stream_alive,
@@ -679,11 +630,11 @@ class SharedRuntimeState:
                 display_fps=self._display_fps,
                 dropped_frames=self._dropped_frames,
                 buffer_age_ms=self._buffer_age_ms,
-                zone_enabled=self._zone_enabled,
+                zone_enabled=obs.zone_enabled if obs else self._zone_enabled,
                 zone_mode="selected_zone" if self._zone_enabled else "full_view",
                 car_count_label="VEHICLES IN ZONE" if self._zone_enabled else "VEHICLES IN VIEW",
-                vehicles_in_view=self._vehicles_in_view,
-                vehicles_in_zone=self._vehicles_in_zone,
+                vehicles_in_view=obs.vehicles_in_view if obs else self._vehicles_in_view,
+                vehicles_in_zone=obs.vehicles_in_zone if obs else self._vehicles_in_zone,
                 source_generation=self._source_generation,
                 mjpeg_clients=self._mjpeg_clients_count,
                 mjpeg_connection_generation=self._mjpeg_connection_generation,

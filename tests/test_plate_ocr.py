@@ -60,13 +60,13 @@ class TestPlateOCR(unittest.TestCase):
         self.assertEqual(clean_plate_text("30G / 567.89"), "30G-567.89")
         self.assertEqual(clean_plate_text("29A\n123.45"), "29A-123.45")
         self.assertEqual(clean_plate_text("30G 567.89"), "30G-567.89")
-        self.assertEqual(clean_plate_text("3OG / 567.89"), "30G-567.89")
+        self.assertEqual(clean_plate_text("3OG / 567.89"), "3OG-567.89")
 
         # Validation
         self.assertTrue(is_valid_plate_format("29A-123.45"))
         self.assertTrue(is_valid_plate_format("30G-567.89"))
         self.assertTrue(is_valid_plate_format("51G-8888"))
-        self.assertTrue(is_valid_plate_format("7XYZ890"))
+        self.assertFalse(is_valid_plate_format("7XYZ890"))
 
         # Invalid noise strings
         self.assertFalse(is_valid_plate_format("A"))
@@ -180,13 +180,13 @@ class TestPlateOCR(unittest.TestCase):
             # Frame 1: Initial evaluation -> runs OCR
             res1 = self.manager.process_vehicle_tracks(frame, tracks_1, frame_id=1)
             self.assertEqual(mock_extract.call_count, 1)
-            self.assertEqual(res1[5].plate_text, "51H-5678")
-            self.assertEqual(res1[5].status, "RECOGNIZED")
+            self.assertEqual(res1[5].candidate_text, "51H5678")
+            self.assertEqual(res1[5].status, "CHECKING")
 
             # Frame 2: Same size, cadence not due -> OCR MUST NOT BE CALLED
             res2 = self.manager.process_vehicle_tracks(frame, tracks_1, frame_id=2)
             self.assertEqual(mock_extract.call_count, 1, "Must NOT OCR every frame")
-            self.assertEqual(res2[5].plate_text, "51H-5678")
+            self.assertEqual(res2[5].plate_text, "")
 
             # Frame 3: Same size -> still not called
             self.manager.process_vehicle_tracks(frame, tracks_1, frame_id=3)
@@ -228,19 +228,21 @@ class TestPlateOCR(unittest.TestCase):
             quality_score=35.0,
         )
 
-        with patch.object(self.reader, "extract_license_plate", side_effect=[cand_good, cand_bad]):
+        with patch.object(self.reader, "extract_license_plate", side_effect=[cand_good, cand_good, cand_good, cand_bad]):
             # Frame 1: Receives good candidate
             self.manager.process_vehicle_tracks(frame, tracks, frame_id=1)
+            self.manager.process_vehicle_tracks(frame, tracks, frame_id=6)
+            self.manager.process_vehicle_tracks(frame, tracks, frame_id=11)
             st = self.manager.get_plate_state(8)
-            self.assertEqual(st.plate_text, "29B-9999")
+            self.assertEqual(st.plate_text, "29B9999")
             self.assertIs(st.plate_crop, crop_good)
             self.assertEqual(st.confidence, 0.92)
 
             # Frame 70: Cadence due, receives blurry/bad candidate
-            self.manager.process_vehicle_tracks(frame, tracks, frame_id=70)
+            self.manager.process_vehicle_tracks(frame, tracks, frame_id=191)
             st_after = self.manager.get_plate_state(8)
             # Must PRESERVE best plate!
-            self.assertEqual(st_after.plate_text, "29B-9999", "Best plate text must not be overwritten by worse candidate")
+            self.assertEqual(st_after.plate_text, "29B9999", "Best plate text must not be overwritten by worse candidate")
             self.assertIs(st_after.plate_crop, crop_good, "Best plate crop must be preserved")
             self.assertEqual(st_after.confidence, 0.92)
 
@@ -326,7 +328,7 @@ class TestPlateOCR(unittest.TestCase):
         # License plate on the car (in lower region)
         cv2.rectangle(frame, (400, 380), (520, 430), (250, 250, 250), -1)
         cv2.rectangle(frame, (400, 380), (520, 430), (10, 10, 10), 2)
-        cv2.putText(frame, "29A-1234", (405, 418), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+        cv2.putText(frame, "29A-1234", (405, 418), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
 
         car_box = np.array([[300.0, 200.0, 600.0, 480.0]], dtype=np.float32)
         tracks = MockDetections(xyxy=car_box, tracker_id=np.array([42]), confidence=np.array([0.95]))
@@ -339,7 +341,11 @@ class TestPlateOCR(unittest.TestCase):
         self.assertIn(42, results)
         st = results[42]
         self.assertEqual(st.track_id, 42)
-        self.assertTrue(len(st.plate_text) >= 3, f"Expected recognized plate, got '{st.plate_text}'")
+        self.assertEqual(st.plate_text, "")
+        for frame_id in (6, 11):
+            results = real_manager.process_vehicle_tracks(frame, tracks, frame_id=frame_id)
+        st = results[42]
+        self.assertEqual(st.status, "RECOGNIZED")
         self.assertIn("29", st.plate_text)
         self.assertGreater(st.confidence, 0.3)
         self.assertIsNotNone(st.plate_crop)
