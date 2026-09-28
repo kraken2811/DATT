@@ -52,6 +52,13 @@ class TelemetrySnapshot:
     dropped_frames: int = 0
     buffer_age_ms: float = 0.0
 
+    # Counting Zone & Mode (Full View vs Selected Zone)
+    zone_enabled: bool = False
+    zone_mode: str = "full_view"
+    car_count_label: str = "VEHICLES IN VIEW"
+    vehicles_in_view: int = 0
+    vehicles_in_zone: int = 0
+
     # Stream Pacing & Black-Screen Diagnostics (Phase B & C)
     source_generation: int = 1
     mjpeg_clients: int = 0
@@ -92,6 +99,13 @@ class Observation:
     track_count: int = 0
     is_fallback: bool = False
     source_generation: int = 1
+    zone_enabled: bool = False
+    zone_mode: str = "full_view"
+    car_count_label: str = "VEHICLES IN VIEW"
+    vehicles_in_view: int = 0
+    vehicles_in_zone: int = 0
+    jpeg_bytes: bytes | None = None
+
 
 
 class SharedRuntimeState:
@@ -180,6 +194,13 @@ class SharedRuntimeState:
         self._dropped_frames = 0
         self._buffer_age_ms = 0.0
 
+        # Zone Counting & Diagnostics
+        self._zone_enabled: bool = False
+        self._vehicles_in_view: int = 0
+        self._vehicles_in_zone: int = 0
+        self._latest_jpeg_bytes: bytes | None = None
+        self._latest_jpeg_frame_id: int = -1
+
     @property
     def status(self) -> str:
         with self._lock:
@@ -210,6 +231,22 @@ class SharedRuntimeState:
         with self._lock:
             return self._mjpeg_clients_count
 
+    @property
+    def zone_enabled(self) -> bool:
+        with self._lock:
+            return self._zone_enabled
+
+    def set_zone_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._zone_enabled = bool(enabled)
+
+    def get_latest_jpeg_bytes(self, expected_frame_id: int | None = None) -> bytes | None:
+        """Return cached JPEG bytes encoded once per new frame."""
+        with self._lock:
+            if expected_frame_id is not None and self._latest_jpeg_frame_id != expected_frame_id:
+                return None
+            return self._latest_jpeg_bytes
+
     def clear_frames(self, increment_generation: bool = True) -> None:
         """Clear cached frames to avoid serving stale video on camera switch or idle.
 
@@ -230,6 +267,10 @@ class SharedRuntimeState:
             self._car_count = 0
             self._detection_count = 0
             self._track_count = 0
+            self._vehicles_in_view = 0
+            self._vehicles_in_zone = 0
+            self._latest_jpeg_bytes = None
+            self._latest_jpeg_frame_id = -1
 
     def update(
         self,
@@ -269,6 +310,12 @@ class SharedRuntimeState:
         jitter_buffer_ms: float | None = None,
         last_decoded_frame_age: float | None = None,
         last_paced_frame_age: float | None = None,
+        zone_enabled: bool | None = None,
+        zone_mode: str | None = None,
+        car_count_label: str | None = None,
+        vehicles_in_view: int | None = None,
+        vehicles_in_zone: int | None = None,
+        jpeg_bytes: bytes | None = None,
     ) -> None:
         """Atomically update state with the newest frame and metrics.
 
@@ -280,6 +327,20 @@ class SharedRuntimeState:
             self._timestamp = now
             self._last_processed_frame_time = now
             self._is_serving_fallback = False
+
+            if zone_enabled is not None:
+                self._zone_enabled = bool(zone_enabled)
+            if vehicles_in_view is not None:
+                self._vehicles_in_view = vehicles_in_view
+            else:
+                self._vehicles_in_view = car_count
+            if vehicles_in_zone is not None:
+                self._vehicles_in_zone = vehicles_in_zone
+            else:
+                self._vehicles_in_zone = car_count
+            if jpeg_bytes is not None:
+                self._latest_jpeg_bytes = jpeg_bytes
+                self._latest_jpeg_frame_id = self._frame_id
 
             if latest_frame is not None:
                 self._latest_frame = latest_frame
@@ -294,6 +355,9 @@ class SharedRuntimeState:
             self._detection_count = detection_count
             self._track_count = track_count
 
+            active_label = car_count_label or ("VEHICLES IN ZONE" if self._zone_enabled else "VEHICLES IN VIEW")
+            active_mode = zone_mode or ("Selected Zone" if self._zone_enabled else "Full View")
+
             obs = Observation(
                 frame_id=self._frame_id,
                 timestamp=now,
@@ -305,8 +369,15 @@ class SharedRuntimeState:
                 track_count=track_count,
                 is_fallback=False,
                 source_generation=self._source_generation,
+                zone_enabled=self._zone_enabled,
+                zone_mode=active_mode,
+                car_count_label=active_label,
+                vehicles_in_view=self._vehicles_in_view,
+                vehicles_in_zone=self._vehicles_in_zone,
+                jpeg_bytes=jpeg_bytes,
             )
             self._current_obs = obs
+
             if annotated_frame is not None:
                 if self._last_good_obs is None or people_count > 0 or self._last_good_obs.people_count == 0:
                     self._last_good_obs = obs
@@ -499,6 +570,11 @@ class SharedRuntimeState:
         with self._lock:
             return self._frame_id, self._latest_frame
 
+    def get_observation(self) -> Observation | None:
+        """Fetch current synchronized observation snapshot."""
+        with self._lock:
+            return self._current_obs
+
     def get_telemetry(self) -> TelemetrySnapshot:
         """Fetch an immutable point-in-time telemetry snapshot with dynamic camera status."""
         with self._lock:
@@ -603,6 +679,11 @@ class SharedRuntimeState:
                 display_fps=self._display_fps,
                 dropped_frames=self._dropped_frames,
                 buffer_age_ms=self._buffer_age_ms,
+                zone_enabled=self._zone_enabled,
+                zone_mode="selected_zone" if self._zone_enabled else "full_view",
+                car_count_label="VEHICLES IN ZONE" if self._zone_enabled else "VEHICLES IN VIEW",
+                vehicles_in_view=self._vehicles_in_view,
+                vehicles_in_zone=self._vehicles_in_zone,
                 source_generation=self._source_generation,
                 mjpeg_clients=self._mjpeg_clients_count,
                 mjpeg_connection_generation=self._mjpeg_connection_generation,

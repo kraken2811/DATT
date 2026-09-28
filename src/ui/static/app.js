@@ -147,6 +147,9 @@
         telemActiveCam: document.getElementById("telemActiveCam"),
         metricPeopleCount: document.getElementById("metricPeopleCount"),
         metricCarCount: document.getElementById("metricCarCount"),
+        metricCarLabel: document.getElementById("metricCarLabel"),
+        zoneToggleCheckbox: document.getElementById("zoneToggleCheckbox"),
+        zoneModeBadge: document.getElementById("zoneModeBadge"),
         metricDetections: document.getElementById("metricDetections"),
         metricTracks: document.getElementById("metricTracks"),
         metricProcessingFps: document.getElementById("metricProcessingFps"),
@@ -1112,6 +1115,22 @@
         if (DOM.metricCarCount) {
             DOM.metricCarCount.textContent = data.car_count !== undefined ? data.car_count : 0;
         }
+        if (DOM.metricCarLabel && data.car_count_label) {
+            DOM.metricCarLabel.textContent = `🚗 ${data.car_count_label}`;
+        }
+        if (DOM.zoneModeBadge) {
+            DOM.zoneModeBadge.textContent = data.zone_mode || (data.zone_enabled ? "Selected Zone" : "Full View");
+            if (data.zone_enabled) {
+                DOM.zoneModeBadge.style.background = "#1e3a8a";
+                DOM.zoneModeBadge.style.color = "#93c5fd";
+            } else {
+                DOM.zoneModeBadge.style.background = "#334155";
+                DOM.zoneModeBadge.style.color = "#94a3b8";
+            }
+        }
+        if (DOM.zoneToggleCheckbox && document.activeElement !== DOM.zoneToggleCheckbox) {
+            DOM.zoneToggleCheckbox.checked = !!data.zone_enabled;
+        }
         DOM.metricDetections.textContent = data.detection_count || 0;
         DOM.metricTracks.textContent = data.track_count || 0;
         DOM.metricProcessingFps.textContent = Number(data.processing_fps || 0).toFixed(1);
@@ -1382,6 +1401,21 @@
 
         if (DOM.registerTargetBtn) {
             DOM.registerTargetBtn.addEventListener("click", registerTarget);
+        }
+
+        if (DOM.zoneToggleCheckbox) {
+            DOM.zoneToggleCheckbox.addEventListener("change", async (e) => {
+                const enabled = e.target.checked;
+                try {
+                    await fetch(apiUrl("/set_zone_mode"), {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ zone_enabled: enabled }),
+                    });
+                } catch (err) {
+                    console.warn("Failed to set zone mode:", err);
+                }
+            });
         }
 
         if (DOM.targetFaceInput) {

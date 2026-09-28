@@ -209,6 +209,11 @@ class CameraManager:
                         width=cam_info.width,
                         height=cam_info.height,
                     )
+                elif cam_info.type in ("local", "file", "mp4"):
+                    reader = LocalVideoReader(
+                        file_path=cam_info.url,
+                        loop=True,
+                    )
                 elif cam_info.type in ("youtube_vod", "vod"):
                     reader = YouTubeVODReader(
                         youtube_url=cam_info.url,

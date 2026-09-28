@@ -46,10 +46,33 @@ class ZoneCounter:
         Returns:
             int: Number of active tracks currently in view.
         """
+        count, _ = self.update_and_get_visible_ids(tracks, frame_shape)
+        return count
+
+    def update_and_get_visible_ids(
+        self,
+        tracks: sv.Detections,
+        frame_shape: tuple[int, ...] | None = None,
+    ) -> tuple[int, frozenset[int]]:
+        """Calculate occupancy and return the visible tracker-ID set.
+
+        This is the canonical counter method. Both the count returned here
+        and the rendered bboxes must derive from the same returned ID set so
+        that VEHICLES IN VIEW == number of rendered vehicle boxes.
+
+        Args:
+            tracks: Tracked detections containing tracker_id.
+            frame_shape: (height, width, channels) to boundary-check positions.
+
+        Returns:
+            tuple[int, frozenset[int]]:
+                count  — number of tracks visible in zone/frame.
+                ids    — frozenset of tracker_id ints that are visible.
+        """
         if tracks.tracker_id is None or len(tracks.tracker_id) == 0:
             self.count = 0
             self.people_count = 0
-            return 0
+            return 0, frozenset()
 
         # Filter for active tracks matching target class ID if class_id is present
         if tracks.class_id is not None and len(tracks.class_id) > 0:
@@ -68,7 +91,7 @@ class ZoneCounter:
         if len(active_tracks) == 0:
             self.count = 0
             self.people_count = 0
-            return 0
+            return 0, frozenset()
 
         # Bottom-center anchor points of the bounding boxes
         cx = (active_boxes[:, 0] + active_boxes[:, 2]) / 2.0
@@ -93,7 +116,7 @@ class ZoneCounter:
 
         self.count = len(active_tracks)
         self.people_count = self.count
-        return self.count
+        return self.count, frozenset(int(t) for t in active_tracks)
 
     @property
     def current_count(self) -> int:
