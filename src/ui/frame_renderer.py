@@ -9,12 +9,100 @@ This module is strictly a visualization layer:
 - It NEVER modifies tracking or counter states.
 """
 
+import re
 from typing import Any
 
 import cv2
 import numpy as np
 
 import config
+
+def format_plate_display(raw_plate: str) -> str:
+    """Format a confirmed license plate into standard presentation format.
+
+    Examples:
+        - 29K10425 -> 29K-104.25
+        - 24X112442 -> 24X1-124.42
+        - 29K40435 -> 29K-404.35
+        - 29A1234 -> 29A-1234
+    """
+    if not raw_plate:
+        return ""
+
+    raw_clean = str(raw_plate).strip().upper()
+
+    # 1. If raw plate already has a clear separator between series and digits
+    # e.g. "29K-104.25", "24X1-124.42", "24X1\n12442", "29A-1234"
+    delim_match = re.match(
+        r"^([0-9]{2}[A-Z](?:[A-Z]|[0-9])?)[\s\-/]+([0-9]{3,5}(?:[\.\-][0-9]{2})?)$",
+        raw_clean,
+    )
+    if delim_match:
+        prefix = delim_match.group(1)
+        num_part = re.sub(r"[^0-9]", "", delim_match.group(2))
+        if len(num_part) == 5:
+            return f"{prefix}-{num_part[:3]}.{num_part[3:]}"
+        elif len(num_part) == 4:
+            return f"{prefix}-{num_part}"
+
+    # 2. Compact string without separator (e.g. normalized "29K10425", "24X112442")
+    compact = re.sub(r"[\s./-]", "", raw_clean)
+
+    # 5-digit number plate (most common VN civilian standard)
+    if len(compact) >= 7 and compact[-5:].isdigit():
+        prefix = compact[:-5]
+        if re.fullmatch(r"[0-9]{2}[A-Z](?:[A-Z]|[0-9])?", prefix):
+            num = compact[-5:]
+            return f"{prefix}-{num[:3]}.{num[3:]}"
+
+    # 4-digit number plate (legacy format)
+    if len(compact) >= 6 and compact[-4:].isdigit():
+        prefix = compact[:-4]
+        if re.fullmatch(r"[0-9]{2}[A-Z](?:[A-Z]|[0-9])?", prefix):
+            num = compact[-4:]
+            return f"{prefix}-{num}"
+
+    return raw_clean
+
+
+def get_vehicle_track_label(
+    v_type_str: str,
+    track_id: int | None,
+    conf: float | None = None,
+    plate_text: str = "",
+    plate_status: str = "",
+    zone_prefix: str = "",
+) -> tuple[str, bool]:
+    """Build the overlay label for a vehicle track.
+
+    Rules:
+    - Confirmed/RECOGNIZED plate: CLASS-ID | PLATE (e.g. CAR-46 | 29K-104.25).
+    - Unconfirmed / CHECKING / SEARCHING: keep existing tracking label without plate text
+      (e.g. CAR | C-46 | 0.92).
+
+    Returns:
+        tuple[str, bool]: (label, is_confirmed_plate)
+    """
+    has_confirmed = (
+        bool(plate_text)
+        and (plate_status == "RECOGNIZED" or (not plate_status and bool(plate_text)))
+    )
+
+    if has_confirmed:
+        formatted_plate = format_plate_display(plate_text)
+        if track_id is not None:
+            return f"{zone_prefix}{v_type_str}-{track_id} | {formatted_plate}", True
+        return f"{zone_prefix}{v_type_str} | {formatted_plate}", True
+
+    # Plate not confirmed yet: keep current tracking label without plate text
+    if track_id is not None and conf is not None:
+        return f"{zone_prefix}{v_type_str} | C-{track_id} | {conf:.2f}", False
+    elif track_id is not None:
+        return f"{zone_prefix}{v_type_str} | C-{track_id}", False
+    elif conf is not None:
+        return f"{zone_prefix}{v_type_str} | {conf:.2f}", False
+    else:
+        return f"{zone_prefix}{v_type_str}", False
 
 
 def render_frame(
@@ -109,38 +197,51 @@ def render_frame(
             if cid is not None and plate_results is not None:
                 plate_info = plate_results.get(int(cid))
 
-            plate_text = getattr(plate_info, "plate_text", "") if plate_info is not None else ""
-            plate_conf = getattr(plate_info, "confidence", 0.0) if plate_info is not None else 0.0
-            plate_bbox_native = getattr(plate_info, "plate_bbox_native", None) if plate_info is not None else None
+            if isinstance(plate_info, dict):
+                plate_text = plate_info.get("plate_text", "")
+                plate_status = plate_info.get("status", "")
+                plate_conf = plate_info.get("confidence", 0.0)
+                plate_bbox_native = plate_info.get("plate_bbox_native", None)
+            elif plate_info is not None:
+                plate_text = getattr(plate_info, "plate_text", "")
+                plate_status = getattr(plate_info, "status", "")
+                plate_conf = getattr(plate_info, "confidence", 0.0)
+                plate_bbox_native = getattr(plate_info, "plate_bbox_native", None)
+            else:
+                plate_text = ""
+                plate_status = ""
+                plate_conf = 0.0
+                plate_bbox_native = None
 
             # If Zone is active, distinguish whether vehicle is inside counting zone
             is_in_zone = True
             if zone_enabled and in_zone_ids is not None:
                 is_in_zone = cid is not None and int(cid) in in_zone_ids
 
-            # Distinct Amber/Orange color for vehicles; Vibrant Yellow/Gold if plate identified
-            if plate_text:
+            if zone_enabled and in_zone_ids is not None:
+                zone_prefix = "[ZONE] " if is_in_zone else "[OUT] "
+            else:
+                zone_prefix = ""
+
+            car_label, has_confirmed_plate = get_vehicle_track_label(
+                v_type_str=v_type_str,
+                track_id=int(cid) if cid is not None else None,
+                conf=float(conf) if conf is not None else None,
+                plate_text=plate_text,
+                plate_status=plate_status,
+                zone_prefix=zone_prefix,
+            )
+
+            # Colors: Vibrant Yellow/Gold if plate confirmed; Amber/Orange if inside zone; Muted slate if outside zone
+            if has_confirmed_plate:
                 car_color = (0, 215, 255) if is_in_zone else (140, 160, 175)
                 car_thickness = 2
-                zone_prefix = "[ZONE] " if (zone_enabled and in_zone_ids is not None and is_in_zone) else ""
-                car_label = f"{zone_prefix}{v_type_str} | C-{cid} | [{plate_text}] {plate_conf:.2f}"
             else:
                 if is_in_zone:
                     car_color = (11, 158, 245)
-                    zone_prefix = "[ZONE] " if (zone_enabled and in_zone_ids is not None) else ""
                 else:
                     car_color = (120, 125, 135)  # Muted slate for vehicles outside counting zone
-                    zone_prefix = "[OUT] "
-
                 car_thickness = 2
-                if cid is not None and conf is not None:
-                    car_label = f"{zone_prefix}{v_type_str} | C-{cid} | {conf:.2f}"
-                elif cid is not None:
-                    car_label = f"{zone_prefix}{v_type_str} | C-{cid}"
-                elif conf is not None:
-                    car_label = f"{zone_prefix}{v_type_str} | {conf:.2f}"
-                else:
-                    car_label = f"{zone_prefix}{v_type_str}"
 
             cv2.rectangle(canvas, (x1, y1), (x2, y2), car_color, car_thickness, cv2.LINE_AA)
 
