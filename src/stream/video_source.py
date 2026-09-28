@@ -242,7 +242,7 @@ class LocalVideoReader(BaseVideoReader):
             )
 
     def _capture_loop(self) -> None:
-        """Background worker reading frames at target FPS pace."""
+        """Background worker reading frames at target FPS pace (timestamp-based)."""
         cap = cv2.VideoCapture(str(self.file_path))
         if not cap.isOpened():
             with self._lock:
@@ -255,12 +255,14 @@ class LocalVideoReader(BaseVideoReader):
                 self._stream_alive = False
             return
 
-        frame_interval = 1.0 / max(self.video_fps, 1.0)
+        # Timestamp-based pacing: target_time = loop_start + frame_index / source_fps
+        # This is self-correcting — if one frame takes longer, the next sleep is shorter.
+        loop_start = time.perf_counter()
+        frame_index = 0  # monotonic frame counter (resets on loop)
         sequence = 0
 
         try:
             while not self._stop_event.is_set():
-                t_start = time.perf_counter()
                 ret, frame = cap.read()
 
                 if not ret or frame is None:
@@ -269,6 +271,9 @@ class LocalVideoReader(BaseVideoReader):
                         self.clean_eof_count += 1
                         logger.debug("[LOCAL-VIDEO] EOF reached, looping to start")
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        # Reset pacing clock on loop to avoid giant accumulated debt
+                        loop_start = time.perf_counter()
+                        frame_index = 0
                         continue
                     else:
                         self.clean_eof_count += 1
@@ -280,6 +285,7 @@ class LocalVideoReader(BaseVideoReader):
                         break
 
                 sequence += 1
+                frame_index += 1
                 now_perf = time.perf_counter()
                 now_wall = time.time()
                 self._first_frame_received = True
@@ -305,9 +311,9 @@ class LocalVideoReader(BaseVideoReader):
                         with self._lock:
                             self._stream_fps = (len(self._timestamps) - 1) / dt
 
-                # Pacing: maintain native FPS playback speed
-                elapsed = time.perf_counter() - t_start
-                sleep_time = max(0.0, frame_interval - elapsed)
+                # Timestamp-based pacing: sleep until next frame's target time
+                target_time = loop_start + frame_index / max(self.video_fps, 1.0)
+                sleep_time = max(0.0, target_time - time.perf_counter())
                 if sleep_time > 0 and self._stop_event.wait(sleep_time):
                     break
 
@@ -324,6 +330,7 @@ class LocalVideoReader(BaseVideoReader):
         finally:
             cap.release()
             logger.info("[LOCAL-VIDEO] Released VideoCapture for '%s'", self.file_path.name)
+
 
     def read(self, timeout: float = 1.0) -> np.ndarray | None:
         """Read newest available frame."""

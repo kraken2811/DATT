@@ -149,6 +149,8 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self.handle_events(query)
         elif path == "/event_snapshot":
             self.handle_event_snapshot(query)
+        elif path in ("/zone_mode", "/api/zone_mode"):
+            self.handle_zone_mode()
         elif path == "/":
             self.handle_root()
         else:
@@ -178,6 +180,8 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self._execute_set_video_source(data)
         elif path in ("/register_target", "/api/register_target"):
             self._execute_register_target(data)
+        elif path in ("/zone_mode", "/api/zone_mode", "/set_zone_mode"):
+            self._execute_set_zone_mode(data)
         else:
             self.send_response(404)
             self.end_headers()
@@ -250,6 +254,16 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
 
                 # Case A: Fresh new frame available
                 if frame is not None and frame_id != last_sent_frame_id and not is_fallback:
+                    # Check pre-encoded JPEG bytes from shared_state first (reuse bytes, encode once per new frame)
+                    pre_encoded = self.state.get_latest_jpeg_bytes(expected_frame_id=frame_id)
+                    if pre_encoded is not None:
+                        self._write_frame(pre_encoded)
+                        last_sent_frame_id = frame_id
+                        last_sent_time = now
+                        self.state.record_mjpeg_publish(success=True)
+                        time.sleep(0.01)
+                        continue
+
                     success, encoded_jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                     if success:
                         self._write_frame(encoded_jpg.tobytes())
@@ -412,6 +426,28 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             return
         info = self.camera_manager.get_current_source_info()
         self._send_json_response({"status": "ok", "source": info})
+
+    def handle_zone_mode(self) -> None:
+        """Return counting zone mode status."""
+        enabled = self.state.zone_enabled
+        self._send_json_response({
+            "status": "ok",
+            "zone_enabled": enabled,
+            "zone_mode": "selected_zone" if enabled else "full_view",
+            "car_count_label": "VEHICLES IN ZONE" if enabled else "VEHICLES IN VIEW",
+        })
+
+    def _execute_set_zone_mode(self, data: dict[str, Any]) -> None:
+        """Toggle or set counting zone mode."""
+        enabled = bool(data.get("zone_enabled", False))
+        self.state.set_zone_enabled(enabled)
+        self._send_json_response({
+            "status": "ok",
+            "zone_enabled": enabled,
+            "zone_mode": "selected_zone" if enabled else "full_view",
+            "car_count_label": "VEHICLES IN ZONE" if enabled else "VEHICLES IN VIEW",
+            "message": f"Counting zone set to {'ON (Selected Zone)' if enabled else 'OFF (Full View)'}",
+        })
 
     def handle_targets(self) -> None:
         """Return list of currently registered targets."""
@@ -813,6 +849,17 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                     <div class="metric-value" id="val-people">0</div>
                 </div>
                 <div class="metric">
+                    <div class="metric-title" id="lbl-cars">VEHICLES IN VIEW</div>
+                    <div class="metric-value" id="val-cars" style="color: #00d7ff;">0</div>
+                </div>
+                <div class="metric" style="padding: 10px; background: rgba(0,229,255,0.06); border-radius: 6px; border: 1px solid rgba(0,229,255,0.2);">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; user-select: none;">
+                        <input type="checkbox" id="toggle-zone" onchange="toggleZoneMode(this.checked)" style="width: 18px; height: 18px; cursor: pointer; accent-color: #00e5ff;">
+                        <span style="font-weight: 600;">Use Counting Zone</span>
+                    </label>
+                    <div id="zone-mode-desc" style="font-size: 11px; color: #8fa0b5; margin-top: 4px; padding-left: 26px;">OFF = Full View</div>
+                </div>
+                <div class="metric">
                     <div class="metric-title">Processing FPS / Stream FPS</div>
                     <div class="metric-value"><span id="val-pfps">0</span> / <span id="val-sfps">0</span></div>
                 </div>
@@ -828,12 +875,24 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         </div>
     </div>
     <script>
+        async function toggleZoneMode(enabled) {
+            try {
+                await fetch('/api/zone_mode', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({zone_enabled: enabled})
+                });
+                document.getElementById('zone-mode-desc').innerText = enabled ? 'ON = Selected Zone' : 'OFF = Full View';
+            } catch (e) {}
+        }
         async function updateTelemetry() {
             try {
                 const res = await fetch('/telemetry');
                 if (res.ok) {
                     const data = await res.json();
                     document.getElementById('val-people').innerText = data.people_count;
+                    document.getElementById('val-cars').innerText = data.car_count;
+                    document.getElementById('lbl-cars').innerText = data.car_count_label || (data.zone_enabled ? 'VEHICLES IN ZONE' : 'VEHICLES IN VIEW');
                     document.getElementById('val-pfps').innerText = data.processing_fps.toFixed(1);
                     document.getElementById('val-sfps').innerText = data.stream_fps.toFixed(1);
                     document.getElementById('val-yolo').innerText = data.yolo_latency_ms.toFixed(1);
@@ -843,6 +902,12 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                     const badge = document.getElementById('status-badge');
                     badge.innerText = data.status;
                     badge.className = 'badge badge-' + data.status.toLowerCase();
+
+                    const toggle = document.getElementById('toggle-zone');
+                    if (document.activeElement !== toggle) {
+                        toggle.checked = !!data.zone_enabled;
+                        document.getElementById('zone-mode-desc').innerText = data.zone_enabled ? 'ON = Selected Zone' : 'OFF = Full View';
+                    }
                 }
             } catch (e) {}
         }

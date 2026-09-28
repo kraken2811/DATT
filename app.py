@@ -13,7 +13,9 @@ import sys
 import threading
 import time
 
+import cv2
 import numpy as np
+import supervision as sv
 
 import config
 from src.counter.zone_counter import CarCounter, ZoneCounter
@@ -165,6 +167,14 @@ def run_pipeline(
     last_track_count = 0
     last_people_in_view = 0
     last_car_in_view = 0
+    # Per-stage timing (ms)
+    _t_decode_ms = 0.0
+    _t_yolo_ms = 0.0
+    _t_bytetrack_ms = 0.0
+    _t_plate_ms = 0.0
+    _t_render_ms = 0.0
+    _t_jpeg_ms = 0.0
+    _t_total_ms = 0.0
 
     try:
         while True:
@@ -219,10 +229,13 @@ def run_pipeline(
 
             # Start total pipeline timer
             pipeline_t0 = time.perf_counter()
+            _t_decode_ms = (time.perf_counter() - pipeline_t0) * 1000  # decode already done by reader thread
 
             # 2. Detect with YOLO (PyTorch CUDA) - exactly 1 inference pass
+            _t_yolo_t0 = time.perf_counter()
             detections = detector.detect(frame)
             last_yolo_ms = detector.last_yolo_ms
+            _t_yolo_ms = (time.perf_counter() - _t_yolo_t0) * 1000
 
             # Split detections by class: person vs unified vehicles (car, truck, bus, motorcycle)
             person_mask = detections.class_id == config.PERSON_CLASS_ID
@@ -241,9 +254,11 @@ def run_pipeline(
             })
 
             # 3. Update independent ByteTrack trackers
+            _t_bt_t0 = time.perf_counter()
             tracks = tracker.update(person_dets)
             vehicle_tracks = car_tracker.update(vehicle_dets)
             car_tracks = vehicle_tracks  # Backward-compatible alias
+            _t_bytetrack_ms = (time.perf_counter() - _t_bt_t0) * 1000
 
             # 4. Target Matcher (Associates registered targets with active ByteTrack person tracks)
             target_matches = target_matcher.match_tracks(
@@ -254,18 +269,57 @@ def run_pipeline(
             )
             track_states = target_matcher.get_all_track_states()
 
-            # 4.1 Vehicle License Plate Recognition (decoupled, non-blocking cadence, applies to car/truck/bus)
+            # 4.1 Vehicle License Plate Recognition (non-blocking: enqueues OCR job, returns cached results)
+            _t_plate_t0 = time.perf_counter()
             plate_results = vehicle_plate_manager.process_vehicle_tracks(
                 frame=frame,
                 vehicle_tracks=vehicle_tracks,
                 frame_id=total_frames,
             )
+            _t_plate_ms = (time.perf_counter() - _t_plate_t0) * 1000
 
-            # 5. Update Occupancy Counters
-            people_in_view = counter.update(tracks, frame_shape=frame.shape)
-            car_in_view = car_counter.update(vehicle_tracks, frame_shape=frame.shape)
+            # 5. Counting Zone / Vehicles in View Mode Determination
+            is_zone_on = shared_state.zone_enabled
+            total_tracked_vehicles = (
+                len(vehicle_tracks.tracker_id)
+                if (vehicle_tracks is not None and getattr(vehicle_tracks, "tracker_id", None) is not None)
+                else 0
+            )
 
-            # Measure total pipeline latency (detection + tracking + matching + counting)
+            # People Occupancy
+            people_in_view, visible_person_ids = counter.update_and_get_visible_ids(
+                tracks, frame_shape=frame.shape
+            )
+
+            if not is_zone_on:
+                # Mode: Full View (Zone OFF)
+                # - detect + track + render all visible vehicles
+                # - VEHICLES IN VIEW = number of vehicle tracks actually rendered
+                # - no polygon filtering or polygon rendering
+                visible_vehicle_tracks = vehicle_tracks
+                vehicles_in_view = total_tracked_vehicles
+                vehicles_in_zone = 0
+                car_count_label = "VEHICLES IN VIEW"
+                zone_mode_str = "Full View"
+                active_zone_polygon = None
+                in_zone_ids = None
+            else:
+                # Mode: Selected Zone (Zone ON)
+                # - YOLO + ByteTrack tracks all vehicles
+                # - polygon/ROI clearly displayed
+                # - only vehicles inside polygon are counted
+                # - all tracks rendered with [ZONE] / [OUT] visual distinction
+                visible_vehicle_tracks = vehicle_tracks
+                car_in_view, in_zone_ids = car_counter.update_and_get_visible_ids(
+                    vehicle_tracks, frame_shape=frame.shape
+                )
+                vehicles_in_view = len(in_zone_ids)
+                vehicles_in_zone = len(in_zone_ids)
+                car_count_label = "VEHICLES IN ZONE"
+                zone_mode_str = "Selected Zone"
+                active_zone_polygon = config.ZONE_POLYGON
+
+            # Measure pipeline latency prior to UI rendering
             last_pipeline_ms = (time.perf_counter() - pipeline_t0) * 1000
 
             total_frames += 1
@@ -273,34 +327,49 @@ def run_pipeline(
             pipeline_latencies.append(last_pipeline_ms)
 
             last_det_count = len(detections)
-            last_track_count = len(tracks) + len(car_tracks)
+            last_track_count = len(tracks) + total_tracked_vehicles
             last_people_in_view = people_in_view
-            last_car_in_view = car_in_view
+            last_car_in_view = vehicles_in_view
 
             # 6. UI Observation & Event Layer (Non-blocking latest-frame update)
             if ui_mode:
+                _t_render_t0 = time.perf_counter()
                 annotated_frame = render_frame(
                     frame=frame,
                     tracks=tracks,
                     people_count=last_people_in_view,
-                    car_tracks=car_tracks,
-                    car_count=last_car_in_view,
-                    zone_polygon=config.ZONE_POLYGON,
+                    car_tracks=visible_vehicle_tracks,
+                    car_count=vehicles_in_view,
+                    car_count_label=car_count_label,
+                    zone_polygon=active_zone_polygon,
+                    zone_enabled=is_zone_on,
+                    in_zone_ids=in_zone_ids,
                     target_matches=target_matches,
                     track_states=track_states,
                     plate_results=plate_results,
                 )
+                _t_render_ms = (time.perf_counter() - _t_render_t0) * 1000
+
+                # Single JPEG encode per new frame (re-used by all streaming clients)
+                _t_jpeg_t0 = time.perf_counter()
+                ret_enc, jpeg_buf = cv2.imencode(".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                jpeg_bytes = jpeg_buf.tobytes() if ret_enc else b""
+                _t_jpeg_ms = (time.perf_counter() - _t_jpeg_t0) * 1000
+
                 # Process occupancy events asynchronously
                 event_manager.process_frame(
                     camera_id=active_cam.id,
                     people_count=last_people_in_view,
                     annotated_frame=annotated_frame,
                 )
+                _t_total_ms = (time.perf_counter() - pipeline_t0) * 1000
+                _t_effective_fps = 1000.0 / max(_t_total_ms, 1.0)
+
                 shared_state.update(
                     latest_frame=frame,
                     annotated_frame=annotated_frame,
                     people_count=last_people_in_view,
-                    car_count=last_car_in_view,
+                    car_count=vehicles_in_view,
                     detection_count=last_det_count,
                     track_count=last_track_count,
                     stream_fps=camera_mgr.stream_fps,
@@ -327,6 +396,29 @@ def run_pipeline(
                     last_paced_frame_age=camera_mgr.last_paced_frame_age,
                     camera_id=active_cam.id,
                     camera_name=active_cam.name,
+                    zone_enabled=is_zone_on,
+                    zone_mode=zone_mode_str,
+                    car_count_label=car_count_label,
+                    vehicles_in_view=total_tracked_vehicles,
+                    vehicles_in_zone=vehicles_in_zone,
+                    jpeg_bytes=jpeg_bytes,
+                )
+
+                logger.info(
+                    "[STAGE_TIMING] frame=%d source_fps=%.1f decode_ms=%.1f yolo_ms=%.1f bytetrack_ms=%.1f plate_enqueue_ms=%.1f render_ms=%.1f jpeg_ms=%.1f total_main_ms=%.1f effective_fps=%.1f ocr_worker_ms=%.1f ocr_queue_size=%d dropped_frames=%d",
+                    total_frames,
+                    camera_mgr.stream_fps,
+                    _t_decode_ms,
+                    _t_yolo_ms,
+                    _t_bytetrack_ms,
+                    _t_plate_ms,
+                    _t_render_ms,
+                    _t_jpeg_ms,
+                    _t_total_ms,
+                    _t_effective_fps,
+                    vehicle_plate_manager.last_ocr_worker_ms,
+                    vehicle_plate_manager.ocr_queue_size,
+                    camera_mgr.dropped_frames,
                 )
 
             # 7. Measure Processing FPS & Output Realtime HUD Log
@@ -343,7 +435,7 @@ def run_pipeline(
                     detection_count=last_det_count,
                     track_count=last_track_count,
                     people_in_view=last_people_in_view,
-                    car_in_view=last_car_in_view,
+                    car_in_view=vehicles_in_view,
                     camera_name=active_cam.name,
                     input_res=f"{active_cam.width}x{active_cam.height}",
                     inference_res=f"{config.IMG_SIZE}x{config.IMG_SIZE}",

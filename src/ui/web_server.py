@@ -282,6 +282,50 @@ async def switch_camera(request: Request) -> JSONResponse:
         )
 
 
+@app.get("/api/zone_mode")
+@app.get("/zone_mode")
+async def get_zone_mode(request: Request) -> JSONResponse:
+    """Get current counting zone mode."""
+    from src.runtime.shared_state import shared_state  # noqa: PLC0415
+    return JSONResponse({
+        "status": "ok",
+        "zone_enabled": shared_state.zone_enabled,
+        "mode": "Selected Zone" if shared_state.zone_enabled else "Full View",
+    })
+
+
+@app.post("/set_zone_mode")
+@app.post("/api/set_zone_mode")
+@app.get("/set_zone_mode")
+@app.get("/api/set_zone_mode")
+async def set_zone_mode(request: Request) -> JSONResponse:
+    """Set counting zone mode (toggle between Full View and Selected Zone)."""
+    from src.runtime.shared_state import shared_state  # noqa: PLC0415
+    enabled = False
+    if request.method == "POST":
+        try:
+            body = await request.json()
+            enabled = bool(body.get("zone_enabled", False))
+        except Exception:
+            enabled = request.query_params.get("zone_enabled", "false").lower() in ("true", "1", "yes")
+    else:
+        enabled = request.query_params.get("zone_enabled", "false").lower() in ("true", "1", "yes")
+
+    shared_state.set_zone_enabled(enabled)
+    b_url = get_backend_url(request).rstrip("/")
+    try:
+        client = get_backend_http_client()
+        await client.post(f"{b_url}/set_zone_mode", json={"zone_enabled": enabled}, timeout=1.0)
+    except Exception:
+        pass
+
+    return JSONResponse({
+        "status": "ok",
+        "zone_enabled": shared_state.zone_enabled,
+        "mode": "Selected Zone" if shared_state.zone_enabled else "Full View",
+    })
+
+
 # -----------------------------------------------------------------------------
 # Video Source Management API
 # -----------------------------------------------------------------------------

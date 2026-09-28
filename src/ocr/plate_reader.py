@@ -415,7 +415,9 @@ class LicensePlateReader:
                 track_id, frame_id, baseline_text, cleaned_base, baseline_conf, is_valid_base, base_score,
             )
 
-        for vname in ["ORIGINAL/RESIZED", "ENHANCED_GRAY", "BINARIZED"]:
+        # Cascade OCR variants: ORIGINAL -> fail mới ENHANCED -> fail mới BINARY
+        cascade_order = ["ORIGINAL/RESIZED", "ENHANCED_GRAY", "BINARIZED"]
+        for vname in cascade_order:
             img = variants.get(vname)
             if img is None or img.size == 0:
                 continue
@@ -429,7 +431,7 @@ class LicensePlateReader:
             text, conf = self._parse_plate_text_from_ocr_boxes(ocr_res)
             if not text:
                 logger.info(
-                    "[PLATE_OCR] track_id=%d frame_id=%d variant=%s raw_boxes=%d text='' (empty)",
+                    "[PLATE_OCR] track_id=%d frame_id=%d variant=%s raw_boxes=%d text='' (empty) -> try next in cascade",
                     track_id, frame_id, vname, len(ocr_res),
                 )
                 continue
@@ -441,17 +443,32 @@ class LicensePlateReader:
             score = (conf * 1.0) + (2.0 if is_valid else 0.0) + (comp * 0.8) + bonus
 
             logger.info(
-                "[PLATE_OCR] track_id=%d frame_id=%d variant=%s raw_boxes=%d text='%s' conf=%.3f valid=%s score=%.2f",
+                "[PLATE_OCR] track_id=%d frame_id=%d cascade_variant=%s raw_boxes=%d text='%s' conf=%.3f valid=%s score=%.2f",
                 track_id, frame_id, vname, len(ocr_res), text, conf, is_valid, score,
             )
 
-            candidates.append({
+            cand = {
                 "variant": vname,
                 "text": text,
                 "conf": conf,
                 "score": score,
                 "img": img,
-            })
+            }
+            candidates.append(cand)
+
+            # Cascade early-exit: If valid complete plate format and acceptable confidence, STOP cascade!
+            is_complete = (
+                is_valid
+                and alnum_cnt >= 5
+                and any(c.isalpha() for c in text)
+                and any(c.isdigit() for c in text)
+            )
+            if is_complete and conf >= self.min_confidence:
+                logger.info(
+                    "[PLATE_OCR] track_id=%d frame_id=%d CASCADE SUCCESS on variant=%s (text='%s', conf=%.3f) -> stopping cascade early",
+                    track_id, frame_id, vname, text, conf,
+                )
+                return vname, text, conf, img
 
         if not candidates:
             return default_vname, baseline_text, baseline_conf, default_img
@@ -756,11 +773,11 @@ class LicensePlateReader:
         vehicle_crop: np.ndarray,
         track_id: int = -1,
         frame_id: int = -1,
-    ) -> "tuple[int, int, int, int] | None":
+    ) -> "tuple[int, int, int, int, float] | None":
         """Run the dedicated YOLO plate detector on the vehicle crop.
 
-        Returns the best (highest-conf) plate (x1, y1, x2, y2) in vehicle-crop
-        coordinates, or None if the detector is unavailable / finds nothing.
+        Returns (x1, y1, x2, y2, confidence) in vehicle-crop coordinates,
+        or None if the detector is unavailable / finds nothing.
         """
         detector = self._plate_detector
         if detector is None or not detector.is_available:
@@ -769,19 +786,21 @@ class LicensePlateReader:
         boxes = detector.detect(vehicle_crop)
         if not boxes:
             logger.info(
-                "[PLATE_DET] track_id=%d frame_id=%d yolo_plate_boxes=0 (no plate found by detector)",
+                "[PLATE_DET] track_id=%d frame_id=%d yolo_plate_boxes=0 confidence=0.000 bbox=[0,0,0,0] native_plate_WxH=0x0",
                 track_id, frame_id,
             )
             return None
 
         best = boxes[0]  # sorted by conf desc
+        pw = max(0, best.x2 - best.x1)
+        ph = max(0, best.y2 - best.y1)
         logger.info(
-            "[PLATE_DET] track_id=%d frame_id=%d yolo_plate_boxes=%d best_conf=%.3f bbox=[%d,%d,%d,%d] size=%dx%d",
+            "[PLATE_DET] track_id=%d frame_id=%d yolo_plate_boxes=%d confidence=%.3f bbox=[%d,%d,%d,%d] native_plate_WxH=%dx%d",
             track_id, frame_id, len(boxes),
             best.confidence, best.x1, best.y1, best.x2, best.y2,
-            best.x2 - best.x1, best.y2 - best.y1,
+            pw, ph,
         )
-        return (best.x1, best.y1, best.x2, best.y2)
+        return (best.x1, best.y1, best.x2, best.y2, float(best.confidence))
 
     @staticmethod
     def _adaptive_upscale_plate(crop: np.ndarray) -> tuple[np.ndarray, float]:
@@ -829,8 +848,10 @@ class LicensePlateReader:
 
         Pipeline:
           Stage 0  – Dedicated YOLO plate detector → tight plate crop.
-          Stage 1  – EasyOCR on tight plate crop (or ROI heuristic fallback).
-          Stage 2  – Multi-variant evaluation and refinement.
+          Stage 1  – Size gate check (<15px wide or <8px high skips OCR).
+          Stage 2  – Bounded adaptive upscale (INTER_CUBIC).
+          Stage 3  – Cascade OCR variants (ORIGINAL -> ENHANCED -> BINARY).
+          Stage 4  – Multi-factor quality scoring & candidate emission.
 
         Args:
             vehicle_crop: BGR crop of the vehicle from native frame.
@@ -860,10 +881,10 @@ class LicensePlateReader:
         # ----------------------------------------------------------------
         # Stage 0: Dedicated YOLO plate detector
         # ----------------------------------------------------------------
-        plate_bbox_in_vehicle = self._detect_plate_bbox(vehicle_crop, track_id, frame_id)
+        plate_det_res = self._detect_plate_bbox(vehicle_crop, track_id, frame_id)
 
-        if plate_bbox_in_vehicle is not None:
-            px1, py1, px2, py2 = plate_bbox_in_vehicle
+        if plate_det_res is not None:
+            px1, py1, px2, py2, det_conf = plate_det_res
             # Small padding to avoid cutting off plate edges
             pad = 4
             px1 = max(0, px1 - pad)
@@ -871,100 +892,99 @@ class LicensePlateReader:
             px2 = min(vw, px2 + pad)
             py2 = min(vh, py2 + pad)
 
-            tight_crop = vehicle_crop[py1:py2, px1:px2]
-            if tight_crop.size == 0:
-                plate_bbox_in_vehicle = None  # fall through to heuristic
+            raw_tight_crop = vehicle_crop[py1:py2, px1:px2]
+            if raw_tight_crop.size == 0:
+                plate_det_res = None
             else:
-                # Bounded adaptive upscale for small plates
-                native_h, native_w = tight_crop.shape[:2]
-                tight_crop, scale_factor = self._adaptive_upscale_plate(tight_crop)
-                out_h, out_w = tight_crop.shape[:2]
+                native_h, native_w = raw_tight_crop.shape[:2]
+
+                # Size gate: If plate is too small (w < 15px or h < 8px), do not OCR; keep SEARCHING
+                if native_w < 15 or native_h < 8:
+                    logger.info(
+                        "[PLATE_DET] track_id=%d frame_id=%d plate too small (native_plate_WxH=%dx%d < 15x8), skipping OCR, keep SEARCHING",
+                        track_id, frame_id, native_w, native_h,
+                    )
+                    return None
+
+                # Bounded adaptive upscale
+                plate_upscaled, scale_factor = self._adaptive_upscale_plate(raw_tight_crop)
+                out_h, out_w = plate_upscaled.shape[:2]
 
                 logger.info(
                     "[PLATE_CROP] track_id=%d frame_id=%d native_size=%dx%d scale_factor=%.1fx output_size=%dx%d",
                     track_id, frame_id, native_w, native_h, scale_factor, out_w, out_h,
                 )
 
-                # Save raw plate crop for debug
+                # Preprocessing variants on upscaled crop: ORIGINAL, ENHANCED, BINARY
+                variants, meta = self.generate_preprocessing_variants(plate_upscaled)
+                best_meta = meta
+
+                enhanced_crop = variants.get("ENHANCED_GRAY", plate_upscaled)
+                binary_crop = variants.get("BINARIZED", plate_upscaled)
+
+                # Save debug crops: vehicle_crop, tight_plate_crop, plate_upscaled, enhanced, binary
                 if self._debug_sample_count < self._max_debug_samples:
                     try:
                         self._debug_dir.mkdir(parents=True, exist_ok=True)
-                        cv2.imwrite(
-                            str(self._debug_dir / f"f{frame_id}_v{track_id}_plate_tight.jpg"),
-                            tight_crop,
-                        )
-                        cv2.imwrite(
-                            str(self._debug_dir / f"f{frame_id}_v{track_id}_vehicle.jpg"),
-                            vehicle_crop,
-                        )
-                    except Exception:
-                        pass
+                        prefix = f"f{frame_id}_v{track_id}"
+                        cv2.imwrite(str(self._debug_dir / "vehicle_crop.jpg"), vehicle_crop)
+                        cv2.imwrite(str(self._debug_dir / f"{prefix}_vehicle_crop.jpg"), vehicle_crop)
+                        cv2.imwrite(str(self._debug_dir / "tight_plate_crop.jpg"), raw_tight_crop)
+                        cv2.imwrite(str(self._debug_dir / f"{prefix}_tight_plate_crop.jpg"), raw_tight_crop)
+                        cv2.imwrite(str(self._debug_dir / "plate_upscaled.jpg"), plate_upscaled)
+                        cv2.imwrite(str(self._debug_dir / f"{prefix}_plate_upscaled.jpg"), plate_upscaled)
+                        cv2.imwrite(str(self._debug_dir / "enhanced.jpg"), enhanced_crop)
+                        cv2.imwrite(str(self._debug_dir / f"{prefix}_enhanced.jpg"), enhanced_crop)
+                        cv2.imwrite(str(self._debug_dir / "binary.jpg"), binary_crop)
+                        cv2.imwrite(str(self._debug_dir / f"{prefix}_binary.jpg"), binary_crop)
+                        self._debug_sample_count += 1
+                        logger.info("[PLATE_DEBUG] Saved all 5 debug crops for track_id=%d frame_id=%d to %s", track_id, frame_id, self._debug_dir)
+                    except Exception as e:
+                        logger.warning("[PLATE_DEBUG] Failed saving debug crops: %s", e)
 
-                # Run EasyOCR on the tight plate crop directly (Stage 1)
-                if self._reader is not None:
-                    logger.info(
-                        "[PLATE_OCR] track_id=%d frame_id=%d running EasyOCR on tight_crop %dx%d",
-                        track_id, frame_id, tight_crop.shape[1], tight_crop.shape[0],
+                # Cascade OCR: ORIGINAL -> fail mới ENHANCED -> fail mới BINARY
+                v_name, v_text, v_conf, v_img = self.evaluate_variants(
+                    variants=variants,
+                    baseline_text="",
+                    baseline_conf=0.0,
+                    track_id=track_id,
+                    frame_id=frame_id,
+                )
+                variant_selected = v_name
+
+                if v_text and is_valid_plate_format(v_text) and v_conf >= self.min_confidence:
+                    gray_crop = cv2.cvtColor(raw_tight_crop, cv2.COLOR_BGR2GRAY) if len(raw_tight_crop.shape) == 3 else raw_tight_crop
+                    sharpness = float(cv2.Laplacian(gray_crop, cv2.CV_64F).var())
+                    brightness = float(np.mean(gray_crop))
+                    deskew_angle = meta.get("deskew", 0.0)
+
+                    # Multi-factor quality score: detector conf, size, sharpness, brightness, perspective
+                    q_conf = min(max(v_conf, 0.0), 1.0) * 35.0 + min(max(det_conf, 0.0), 1.0) * 15.0
+                    q_size = min(native_w / 120.0, 1.0) * 25.0
+                    q_sharp = min(sharpness / 150.0, 1.0) * 20.0
+                    q_bright = 10.0 if (65.0 <= brightness <= 190.0) else max(0.0, 10.0 - abs(brightness - 128.0) * 0.1)
+                    q_skew = max(-5.0, -abs(deskew_angle) * 0.3)
+                    quality = round(max(0.0, q_conf + q_size + q_sharp + q_bright + q_skew + 5.0), 2)
+
+                    best_cand = PlateCandidate(
+                        plate_text=v_text,
+                        confidence=round(v_conf, 3),
+                        bbox_vehicle=(px1, py1, px2, py2),
+                        bbox_native=(
+                            int(round(vx1 + px1)),
+                            int(round(vy1 + py1)),
+                            int(round(vx1 + px2)),
+                            int(round(vy1 + py2)),
+                        ),
+                        raw_crop=raw_tight_crop,
+                        preprocessed_crop=v_img,
+                        sharpness=round(sharpness, 1),
+                        quality_score=quality,
                     )
-                    with self._infer_lock:
-                        try:
-                            ocr_results = self._reader.readtext(tight_crop)
-                        except Exception as exc:
-                            logger.debug("[OCR] Inference error on tight plate crop: %s", exc)
-                            ocr_results = []
-
-                    text, conf = self._parse_plate_text_from_ocr_boxes(ocr_results)
                     logger.info(
-                        "[PLATE_OCR] track_id=%d frame_id=%d tight_crop raw_boxes=%d text='%s' conf=%.3f",
-                        track_id, frame_id, len(ocr_results), text, conf,
+                        "[PLATE_DET] track_id=%d frame_id=%d YOLO+OCR SUCCESS: plate='%s' conf=%.3f scale=%.1fx quality=%.2f variant=%s",
+                        track_id, frame_id, best_cand.plate_text, best_cand.confidence, scale_factor, best_cand.quality_score, variant_selected,
                     )
-
-                    if text and conf >= self.min_confidence:
-                        # Build PlateCandidate from the YOLO-detected plate bbox
-                        raw_plate_crop = vehicle_crop[py1:py2, px1:px2]
-                        preprocessed = self.preprocess_plate_crop(raw_plate_crop)
-                        gray = cv2.cvtColor(raw_plate_crop, cv2.COLOR_BGR2GRAY) if len(raw_plate_crop.shape) == 3 else raw_plate_crop
-                        sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-                        pw = px2 - px1
-                        ph_px = py2 - py1
-                        quality = conf * 50.0 + min(sharpness, 200.0) * 0.3 + min(pw, 150.0) * 0.2 + 30.0  # +30 YOLO-detected bonus
-
-                        best_cand = PlateCandidate(
-                            plate_text=text,
-                            confidence=round(conf, 3),
-                            bbox_vehicle=(px1, py1, px2, py2),
-                            bbox_native=(
-                                int(round(vx1 + px1)),
-                                int(round(vy1 + py1)),
-                                int(round(vx1 + px2)),
-                                int(round(vy1 + py2)),
-                            ),
-                            raw_crop=raw_plate_crop,
-                            preprocessed_crop=preprocessed,
-                            sharpness=round(sharpness, 1),
-                            quality_score=round(quality, 2),
-                        )
-
-                        # Stage 2: multi-variant refinement on the tight crop
-                        variants, meta = self.generate_preprocessing_variants(raw_plate_crop)
-                        best_meta = meta
-                        v_name, v_text, v_conf, v_img = self.evaluate_variants(
-                            variants=variants,
-                            baseline_text=best_cand.plate_text,
-                            baseline_conf=best_cand.confidence,
-                            track_id=track_id,
-                            frame_id=frame_id,
-                        )
-                        variant_selected = v_name
-                        if v_text:
-                            best_cand.plate_text = v_text
-                            best_cand.confidence = round(v_conf, 3)
-                            best_cand.preprocessed_crop = v_img
-
-                        logger.info(
-                            "[PLATE_DET] track_id=%d frame_id=%d YOLO+OCR RESULT: plate='%s' conf=%.3f quality=%.2f",
-                            track_id, frame_id, best_cand.plate_text, best_cand.confidence, best_cand.quality_score,
-                        )
 
         # ----------------------------------------------------------------
         # Stage 1 (fallback): ROI heuristic + EasyOCR on vehicle crop
