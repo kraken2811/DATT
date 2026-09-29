@@ -57,12 +57,15 @@ class PlateTrackState:
     generation: int = 0
     plate_history: list[Any] = None  # type: ignore  # stores past candidates for multi-frame voting
     vote_scores: dict[str, float] = None  # type: ignore
+    candidate_crops: list[Any] = None  # type: ignore  # stores real observed crops for multi-frame fusion
 
     def __post_init__(self) -> None:
         if self.plate_history is None:
             self.plate_history = []
         if self.vote_scores is None:
             self.vote_scores = {}
+        if self.candidate_crops is None:
+            self.candidate_crops = []
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,6 +84,7 @@ class PlateTrackState:
             "candidate_text": self.candidate_text,
             "consensus_count": self.consensus_count,
             "frame_id": self.frame_id,
+            "candidate_crops_count": len(self.candidate_crops) if self.candidate_crops else 0,
         }
 
 
@@ -322,6 +326,11 @@ class VehiclePlateManager:
 
         self._worker: _OcrWorker | None = None
         self._worker_lock = threading.Lock()
+        self.last_timings: dict[str, float] = {
+            "sched_ms": 0.0,
+            "enq_ms": 0.0,
+            "total_ms": 0.0,
+        }
 
     @property
     def last_ocr_worker_ms(self) -> float:
@@ -355,6 +364,21 @@ class VehiclePlateManager:
             state.last_result_frame = job.frame_id
             if cand is None:
                 return
+
+            if getattr(cand, "raw_crop", None) is not None and isinstance(cand.raw_crop, np.ndarray) and cand.raw_crop.size > 0:
+                state.candidate_crops.append(cand.raw_crop)
+                if len(state.candidate_crops) > 6:
+                    state.candidate_crops.pop(0)
+
+            # Multi-frame real-evidence fusion across buffered crops
+            if len(state.candidate_crops) >= 2 and state.status in ("PROVISIONAL", "CHECKING", "SEARCHING"):
+                try:
+                    from src.ocr.plate_reader import fuse_plate_crops
+                    fused = fuse_plate_crops(state.candidate_crops)
+                    if fused is not None and fused.size > 0:
+                        state.plate_crop = fused
+                except Exception as exc:
+                    logger.debug("[PLATE_FUSION] Multi-frame fusion error: %s", exc)
 
             # Confirmed plate is sticky: cannot be downgraded or overwritten
             if state.status in ("CONFIRMED", "RECOGNIZED"):
@@ -522,7 +546,10 @@ class VehiclePlateManager:
             dict[int, PlateTrackState]: Active vehicle tracks with cached plate state.
         """
         v_tracks = vehicle_tracks if vehicle_tracks is not None else car_tracks
+        t_pv_0 = time.perf_counter()
+        self.last_timings = {"sched_ms": 0.0, "enq_ms": 0.0, "total_ms": 0.0}
         if frame is None or v_tracks is None:
+            self.last_timings["total_ms"] = (time.perf_counter() - t_pv_0) * 1000.0
             return {}
 
         xyxy = getattr(v_tracks, "xyxy", None)
@@ -553,6 +580,7 @@ class VehiclePlateManager:
                         self._track_last_seen[int(tid)] = frame_id
 
             if xyxy is None or tracker_id is None or len(xyxy) == 0:
+                self.last_timings["total_ms"] = (time.perf_counter() - t_pv_0) * 1000.0
                 return {}
 
             # 2. Process each detected vehicle track (cadence check — no blocking OCR here)
@@ -626,21 +654,32 @@ class VehiclePlateManager:
                     growth_due = False
                 needs_eval = cadence_due or growth_due or (state.last_eval_frame < 0)
 
+                t_sc_0 = time.perf_counter()
                 reason = (
                     "first_eval" if state.last_eval_frame < 0
                     else ("growth" if growth_due
                           else ("cadence_interval" if cadence_due else "wait_cadence"))
                 )
 
-                logger.info(
-                    "[PLATE_ATTEMPT] track_id=%d class=%s frame_id=%d cadence_gap=%d attempt=%s"
-                    " reason=%s v_size=%dx%d status=%s",
-                    tid_int, cname, frame_id, cadence_gap,
-                    "ENQUEUE" if needs_eval else "SKIP",
-                    reason, vw, vh, state.status,
-                )
+                if needs_eval:
+                    logger.info(
+                        "[PLATE_ATTEMPT] track_id=%d class=%s frame_id=%d cadence_gap=%d attempt=ENQUEUE"
+                        " reason=%s v_size=%dx%d status=%s",
+                        tid_int, cname, frame_id, cadence_gap,
+                        reason, vw, vh, state.status,
+                    )
+                else:
+                    logger.debug(
+                        "[PLATE_ATTEMPT] track_id=%d class=%s frame_id=%d cadence_gap=%d attempt=SKIP"
+                        " reason=%s v_size=%dx%d status=%s",
+                        tid_int, cname, frame_id, cadence_gap,
+                        reason, vw, vh, state.status,
+                    )
+
+                self.last_timings["sched_ms"] += (time.perf_counter() - t_sc_0) * 1000.0
 
                 if needs_eval:
+                    t_enq_0 = time.perf_counter()
                     prev_area = state.last_bbox_area
                     # Update cadence counters before OCR (prevents re-enqueue next frame)
                     state.last_eval_frame = frame_id
@@ -690,8 +729,11 @@ class VehiclePlateManager:
                         )
                         self._apply_ocr_result(job, cand)
 
+                    self.last_timings["enq_ms"] += (time.perf_counter() - t_enq_0) * 1000.0
+
                 active_results[tid_int] = state
 
+        self.last_timings["total_ms"] = (time.perf_counter() - t_pv_0) * 1000.0
         return active_results
 
     def get_pending_ocr_job(self, track_id: int) -> _OcrJob | None:

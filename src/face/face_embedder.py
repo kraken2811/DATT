@@ -12,6 +12,7 @@ Lifecycle:
 from dataclasses import asdict, dataclass, field
 import io
 import logging
+import math
 import os
 from pathlib import Path
 import threading
@@ -180,14 +181,17 @@ class FaceEmbedder:
         self,
         model_name: str = "buffalo_s",
         det_size: list[tuple[int, int]] | tuple[int, int] = [(320, 320), (640, 640)],
+        prefer_gpu: bool = True,
     ) -> None:
         self.model_name = model_name
         self.det_size = det_size
+        self.prefer_gpu = prefer_gpu
         self._app = None
         self._initialized = False
         self._init_error: str | None = None
         self._model_path: str = ""
         self._infer_lock = threading.Lock()
+        self.execution_provider: str = "CUDAExecutionProvider" if prefer_gpu else "CPUExecutionProvider"
 
     @classmethod
     def get_instance(cls) -> "FaceEmbedder":
@@ -198,7 +202,7 @@ class FaceEmbedder:
             return cls._instance
 
     def initialize(self) -> bool:
-        """Load InsightFace models into memory."""
+        """Load InsightFace models into memory on GPU (CUDA) or fallback to CPU."""
         with self._infer_lock:
             if self._initialized:
                 return True
@@ -207,23 +211,66 @@ class FaceEmbedder:
 
             try:
                 from insightface.app import FaceAnalysis
+                import onnxruntime as ort
 
                 model_root = Path.home() / ".insightface" / "models" / self.model_name
                 self._model_path = str(model_root)
 
                 logger.info("[FACE] Initializing InsightFace '%s' models from %s...", self.model_name, self._model_path)
+
+                # Determine GPU device ID from config if available
+                target_gpu_id = 0
+                try:
+                    import config
+                    dev = getattr(config, "DEVICE", "cuda:0")
+                    if "cuda:" in str(dev).lower():
+                        target_gpu_id = int(str(dev).split(":")[-1])
+                except Exception:
+                    target_gpu_id = 0
+
+                # Prioritize CUDA GPU, with graceful fallback to CPU
+                available_providers = ort.get_available_providers()
+                if self.prefer_gpu and "CUDAExecutionProvider" in available_providers:
+                    providers: list[Any] = [
+                        ("CUDAExecutionProvider", {"device_id": target_gpu_id}),
+                        "CPUExecutionProvider",
+                    ]
+                    ctx_id = target_gpu_id
+                elif self.prefer_gpu and "DmlExecutionProvider" in available_providers:
+                    providers = [("DmlExecutionProvider", {"device_id": target_gpu_id}), "CPUExecutionProvider"]
+                    ctx_id = target_gpu_id
+                elif self.prefer_gpu:
+                    # Request CUDA with CPU fallback if onnxruntime-gpu is configured
+                    providers = [
+                        ("CUDAExecutionProvider", {"device_id": target_gpu_id}),
+                        "CPUExecutionProvider",
+                    ]
+                    ctx_id = target_gpu_id
+                else:
+                    providers = ["CPUExecutionProvider"]
+                    ctx_id = -1
+
                 app = FaceAnalysis(
                     name=self.model_name,
-                    providers=["CPUExecutionProvider"],
+                    providers=providers,
                 )
-                app.prepare(ctx_id=0, det_size=self.det_size, det_thresh=0.40)
+                app.prepare(ctx_id=ctx_id, det_size=self.det_size, det_thresh=0.40)
                 self._app = app
                 self._det_model = app.models.get("detection")
                 self._rec_model = app.models.get("recognition")
+
+                # Detect actual active provider from session
+                active_provider = "CPUExecutionProvider"
+                if self._det_model and hasattr(self._det_model, "session"):
+                    sess_providers = self._det_model.session.get_providers()
+                    if sess_providers:
+                        active_provider = sess_providers[0]
+                self.execution_provider = active_provider
+
                 self._initialized = True
                 logger.info(
-                    "[FACE] InsightFace '%s' initialized successfully (provider=CPUExecutionProvider, det_size=%s).",
-                    self.model_name, self.det_size,
+                    "[FACE] InsightFace '%s' initialized successfully (provider=%s, det_size=%s).",
+                    self.model_name, self.execution_provider, self.det_size,
                 )
                 return True
             except Exception as exc:
@@ -232,59 +279,186 @@ class FaceEmbedder:
                 return False
 
     @staticmethod
-    def check_illumination(roi: np.ndarray) -> tuple[str, str, np.ndarray]:
-        """Check illumination of head/face ROI using LAB-L space.
+    def analyze_illumination(roi: np.ndarray) -> dict[str, Any]:
+        """Analyze local illumination statistics on head/face ROI using luminance.
+
+        Returns:
+            dict[str, Any] with state ("NORMAL", "DARK", "OVEREXPOSED", "LOW_CONTRAST", "BACKLIT")
+            and luminance metrics (median, mean, p05, p95, dynamic_range, ratios).
+        """
+        if roi is None or roi.size == 0:
+            return {
+                "state": "NORMAL", "median": 128.0, "mean": 128.0,
+                "p05": 60.0, "p95": 200.0, "dynamic_range": 140.0,
+                "overexposed_ratio": 0.0, "underexposed_ratio": 0.0, "local_contrast": 0.5,
+                "center_median": 128.0,
+            }
+
+        ycbcr = cv2.cvtColor(roi, cv2.COLOR_BGR2YCrCb)
+        Y = ycbcr[:, :, 0]
+        median = float(np.median(Y))
+        mean = float(np.mean(Y))
+        p05 = float(np.percentile(Y, 5))
+        p95 = float(np.percentile(Y, 95))
+        dynamic_range = p95 - p05
+        overexposed_ratio = float(np.mean(Y >= 245))
+        underexposed_ratio = float(np.mean(Y <= 15))
+        std_y = float(np.std(Y))
+        local_contrast = std_y / max(1.0, mean)
+
+        rh, rw = Y.shape[:2]
+        center_Y = Y[
+            int(rh * 0.15):max(int(rh * 0.15) + 1, int(rh * 0.75)),
+            int(rw * 0.20):max(int(rw * 0.20) + 1, int(rw * 0.80)),
+        ]
+        center_median = float(np.median(center_Y)) if center_Y.size > 0 else median
+
+        if overexposed_ratio > 0.18 or p05 > 190.0 or median > 210.0:
+            state = "OVEREXPOSED"
+        elif median < 45.0 or p95 < 65.0:
+            state = "DARK"
+        elif (p95 >= 175.0 and center_median < 80.0) or (p95 - center_median > 90.0 and p95 > 165.0):
+            state = "BACKLIT"
+        elif dynamic_range < 40.0:
+            state = "LOW_CONTRAST"
+        else:
+            state = "NORMAL"
+
+        return {
+            "state": state,
+            "median": round(median, 1),
+            "mean": round(mean, 1),
+            "p05": round(p05, 1),
+            "p95": round(p95, 1),
+            "dynamic_range": round(dynamic_range, 1),
+            "overexposed_ratio": round(overexposed_ratio, 3),
+            "underexposed_ratio": round(underexposed_ratio, 3),
+            "local_contrast": round(local_contrast, 3),
+            "center_median": round(center_median, 1),
+        }
+
+    @classmethod
+    def check_illumination(cls, roi: np.ndarray) -> tuple[str, str, np.ndarray]:
+        """Check illumination of head/face ROI using luminance statistics.
 
         Returns:
             tuple[str, str, np.ndarray]:
-                - illumination: "NORMAL", "DARK", or "BACKLIT"
-                - enhancement_applied: "NONE", "CLAHE", "CLAHE+GAMMA"
-                - enhanced_roi: Enhanced BGR image if dark/backlit, else original roi
+                - illumination: "NORMAL", "DARK", "BACKLIT", "OVEREXPOSED", or "LOW_CONTRAST"
+                - enhancement_applied: "NONE", "CLAHE", "CLAHE+GAMMA", etc.
+                - enhanced_roi: Enhanced BGR image if needed for detector ROI, else original roi
         """
         if roi is None or roi.size == 0:
             return "NORMAL", "NONE", roi
 
-        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
-        L = lab[:, :, 0]
-
-        mean_L = float(np.mean(L))
-        rh, rw = L.shape[:2]
-        center = L[
-            int(rh * 0.2):max(int(rh * 0.2) + 1, int(rh * 0.8)),
-            int(rw * 0.2):max(int(rw * 0.2) + 1, int(rw * 0.8)),
-        ]
-        center_mean = float(np.mean(center)) if center.size > 0 else mean_L
-        p90 = float(np.percentile(L, 90))
-
-        # Backlit check: high background brightness while face center is dark or contrast gap > 85
-        if (p90 >= 170.0 and center_mean < 85.0) or (p90 - center_mean > 90.0):
-            illumination = "BACKLIT"
-        elif mean_L < 75.0 or center_mean < 70.0:
-            illumination = "DARK"
-        else:
-            illumination = "NORMAL"
+        info = cls.analyze_illumination(roi)
+        illumination = info["state"]
 
         if illumination == "NORMAL":
             return "NORMAL", "NONE", roi
 
-        # Gentle enhancement for DARK or BACKLIT
+        # Gentle enhancement on luminance channel for detector ROI
         enhancements = []
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        L_enhanced = clahe.apply(L)
-        enhancements.append("CLAHE")
+        ycbcr = cv2.cvtColor(roi, cv2.COLOR_BGR2YCrCb)
+        Y = ycbcr[:, :, 0]
 
-        if center_mean < 65.0:
-            inv_gamma = 1.0 / 0.85
-            table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
-            L_enhanced = cv2.LUT(L_enhanced, table)
-            enhancements.append("GAMMA")
+        if illumination in ("BACKLIT", "LOW_CONTRAST"):
+            clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(4, 4))
+            ycbcr[:, :, 0] = clahe.apply(Y)
+            enhancements.append("CLAHE")
+        elif illumination == "DARK":
+            if info["median"] < 50.0:
+                inv_gamma = 1.0 / 0.85
+                table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
+                ycbcr[:, :, 0] = cv2.LUT(Y, table)
+                enhancements.append("GAMMA")
+            clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(4, 4))
+            ycbcr[:, :, 0] = clahe.apply(ycbcr[:, :, 0])
+            enhancements.append("CLAHE")
 
-        lab_enhanced = lab.copy()
-        lab_enhanced[:, :, 0] = L_enhanced
-        enhanced_roi = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
-        enhancement_applied = "+".join(enhancements)
-
+        enhanced_roi = cv2.cvtColor(ycbcr, cv2.COLOR_YCrCb2BGR)
+        enhancement_applied = "+".join(enhancements) if enhancements else "NONE"
         return illumination, enhancement_applied, enhanced_roi
+
+    @staticmethod
+    def validate_landmarks(kps: np.ndarray, face_bbox: list | tuple) -> tuple[bool, str]:
+        """Validate 5-point facial landmark geometry before embedding.
+
+        Checks:
+        1. Left/right eye ordering
+        2. Eye-line roll angle (within ~38 degrees of horizontal)
+        3. Eye distance relative to face size
+        4. Nose location relative to eyes
+        5. Mouth location below nose and mouth ordering
+        6. Landmarks within bounding box margins
+        7. Reasonable facial triangle proportion
+
+        Returns:
+            tuple[bool, str]: (is_valid, reason)
+        """
+        if kps is None or len(kps) < 5 or not np.isfinite(kps).all():
+            return False, "INVALID_LANDMARKS"
+
+        lx, ly = float(kps[0][0]), float(kps[0][1])
+        rx, ry = float(kps[1][0]), float(kps[1][1])
+        nx, ny = float(kps[2][0]), float(kps[2][1])
+        lmx, lmy = float(kps[3][0]), float(kps[3][1])
+        rmx, rmy = float(kps[4][0]), float(kps[4][1])
+
+        # 1. Left/Right Eye Ordering
+        if rx <= lx + 2.0:
+            return False, "EYE_ORDERING_INVERTED"
+
+        # 2. Eye-line roll angle
+        eye_dx = rx - lx
+        eye_dy = ry - ly
+        angle_rad = abs(math.atan2(eye_dy, eye_dx))
+        if angle_rad > 0.66:
+            return False, "EXCESSIVE_ROLL_ANGLE"
+
+        # 3. Eye distance
+        eye_dist = math.hypot(eye_dx, eye_dy)
+        if eye_dist < 3.0:
+            return False, "EYE_DISTANCE_TOO_SMALL"
+
+        fb_w = max(1.0, float(face_bbox[2] - face_bbox[0]))
+        eye_ratio = eye_dist / fb_w
+        if eye_ratio < 0.10 or eye_ratio > 0.85:
+            return False, "ABNORMAL_EYE_RATIO"
+
+        # 4. Nose location relative to eyes
+        if nx < (lx - 0.25 * eye_dist) or nx > (rx + 0.25 * eye_dist):
+            return False, "NOSE_OUTSIDE_EYES"
+        if ny <= min(ly, ry) + 1.0:
+            return False, "NOSE_ABOVE_EYES"
+
+        # 5. Mouth below nose & mouth ordering
+        mouth_y = (lmy + rmy) / 2.0
+        if mouth_y <= ny + 1.5:
+            return False, "MOUTH_ABOVE_NOSE"
+        if rmx <= lmx + 1.0:
+            return False, "MOUTH_ORDERING_INVERTED"
+
+        # 6. Landmarks inside/near bbox (margin 18%)
+        margin_x = fb_w * 0.18
+        fb_h = max(1.0, float(face_bbox[3] - face_bbox[1]))
+        margin_y = fb_h * 0.18
+        for pt in kps:
+            px, py = float(pt[0]), float(pt[1])
+            if px < (face_bbox[0] - margin_x) or px > (face_bbox[2] + margin_x):
+                return False, "LANDMARKS_OUTSIDE_BBOX"
+            if py < (face_bbox[1] - margin_y) or py > (face_bbox[3] + margin_y):
+                return False, "LANDMARKS_OUTSIDE_BBOX"
+
+        # 7. Vertical facial triangle proportion
+        eye_mid_y = (ly + ry) / 2.0
+        nose_dist = ny - eye_mid_y
+        mouth_dist = mouth_y - eye_mid_y
+        if mouth_dist > 2.0:
+            v_ratio = nose_dist / mouth_dist
+            if v_ratio < 0.20 or v_ratio > 0.88:
+                return False, "ABNORMAL_TRIANGLE_RATIO"
+
+        return True, "VALID"
 
     def detect_faces_in_roi(
         self,
@@ -445,14 +619,15 @@ class FaceEmbedder:
         face_bbox: Any,
         conf: float,
         illumination: str,
+        kps: np.ndarray | None = None,
     ) -> tuple[float, float, float, str]:
-        """Evaluate face quality against quality gates.
+        """Evaluate face quality against quality gates from native face pixels.
 
         Returns:
             tuple[float, float, float, str]:
                 - face_size: min(face_w, face_h) in native pixels
-                - sharpness: variance of Laplacian
-                - quality_score: composite quality score
+                - sharpness: scale-robust sharpness (Tenengrad / Laplacian)
+                - quality_score: composite quality score with clipping penalty
                 - gate_decision: 'FACE_TOO_SMALL', 'WAIT_FOR_BETTER_FACE', or 'CAN_EMBED'
         """
         x1, y1, x2, y2 = [int(round(float(v))) for v in face_bbox[:4]]
@@ -471,7 +646,19 @@ class FaceEmbedder:
 
         face_crop = native_frame[y1:y2, x1:x2]
         gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
-        sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+        # Native sharpness metrics computed BEFORE upscale
+        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        tenengrad = float(np.mean(sobelx**2 + sobely**2))
+        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        # Blend Tenengrad & Laplacian var for robustness across small/large faces
+        sharpness = max(lap_var, min(300.0, tenengrad * 0.05))
+
+        # Clipping penalty
+        over_ratio = float(np.mean(gray >= 245))
+        under_ratio = float(np.mean(gray <= 15))
+        clipping_penalty = max(0.25, min(1.0, 1.0 - (over_ratio * 2.0 + under_ratio * 1.5)))
 
         # Quality Gate:
         # <28 px  -> FACE_TOO_SMALL (protects against noise/blobs)
@@ -479,19 +666,28 @@ class FaceEmbedder:
         if face_size < 28.0:
             gate_decision = "FACE_TOO_SMALL"
         else:
-            if conf < 0.30 or sharpness < 12.0:
+            if conf < 0.30 or (lap_var < 12.0 and tenengrad < 150.0):
                 gate_decision = "WAIT_FOR_BETTER_FACE"
             else:
                 gate_decision = "CAN_EMBED"
 
+        frontality = 0.5
+        if kps is not None:
+            try:
+                from src.recognition.target_matcher import calculate_face_frontality
+                frontality = calculate_face_frontality(kps)
+            except Exception:
+                frontality = 0.5
+
         # Composite quality score for BestFace replacement
-        # Rewards larger face size (soft signal), higher sharpness, good confidence, and normal lighting
+        # Rewards larger face size, higher sharpness, good confidence, frontality, and normal lighting
         quality_score = (
             min(face_size, 120.0) * 0.8
             + min(sharpness, 200.0) * 0.3
             + conf * 40.0
+            + frontality * 10.0
             + (10.0 if illumination == "NORMAL" else 0.0)
-        )
+        ) * clipping_penalty
 
         return face_size, sharpness, quality_score, gate_decision
 
@@ -500,12 +696,15 @@ class FaceEmbedder:
         native_frame: np.ndarray,
         kps: np.ndarray,
         illumination: str = "NORMAL",
+        variant: str = "RAW",
     ) -> np.ndarray | None:
         """Preprocess face with landmark alignment and extract ArcFace embedding.
 
         Pipeline:
-            Landmark alignment (112x112) -> light lighting balancing if backlit -> ArcFace embedding -> normalize.
-            No generative face restoration.
+            Landmark alignment (112x112) from native frame pixels ->
+            conditional enhancement variant (RAW / EXPOSURE_CORRECTED / LOCAL_CONTRAST / MILD_SHARPEN) ->
+            ArcFace embedding -> L2 normalize.
+            RAW is the primary reference. No generative face restoration.
         """
         if kps is None or len(kps) < 5:
             return None
@@ -524,10 +723,32 @@ class FaceEmbedder:
         if aligned is None or aligned.size == 0:
             return None
 
-        # Mild lighting balancing if backlit or dark
-        if illumination in ("BACKLIT", "DARK"):
+        # Resolve variant
+        eff_variant = variant
+        if eff_variant == "RAW":
+            # Keep raw native pixels for ArcFace
+            pass
+        elif eff_variant == "EXPOSURE_CORRECTED" or (eff_variant == "AUTO" and illumination in ("DARK", "UNDEREXPOSED")):
+            ycbcr = cv2.cvtColor(aligned, cv2.COLOR_BGR2YCrCb)
+            Y = ycbcr[:, :, 0]
+            med = float(np.median(Y))
+            gamma = np.clip(np.log(100.0 / 255.0) / np.log(max(15.0, med) / 255.0), 0.70, 1.0)
+            inv_gamma = 1.0 / gamma
+            table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
+            ycbcr[:, :, 0] = cv2.LUT(Y, table)
+            aligned = cv2.cvtColor(ycbcr, cv2.COLOR_YCrCb2BGR)
+        elif eff_variant == "LOCAL_CONTRAST" or (eff_variant == "AUTO" and illumination in ("BACKLIT", "LOW_CONTRAST")):
+            ycbcr = cv2.cvtColor(aligned, cv2.COLOR_BGR2YCrCb)
+            clahe = cv2.createCLAHE(clipLimit=1.2, tileGridSize=(4, 4))
+            ycbcr[:, :, 0] = clahe.apply(ycbcr[:, :, 0])
+            aligned = cv2.cvtColor(ycbcr, cv2.COLOR_YCrCb2BGR)
+        elif eff_variant == "MILD_SHARPEN":
+            blurred = cv2.GaussianBlur(aligned, (0, 0), 1.0)
+            aligned = cv2.addWeighted(aligned, 1.35, blurred, -0.35, 0)
+        elif illumination in ("BACKLIT", "DARK") and eff_variant not in ("RAW",):
+            # Backward-compatible fallback
             lab = cv2.cvtColor(aligned, cv2.COLOR_BGR2LAB)
-            clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(4, 4))
+            clahe = cv2.createCLAHE(clipLimit=1.2, tileGridSize=(4, 4))
             lab[:, :, 0] = clahe.apply(lab[:, :, 0])
             aligned = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
@@ -572,6 +793,7 @@ class FaceEmbedder:
             model_name=self.model_name,
             model_path=self._model_path,
             model_loaded=self._initialized,
+            execution_provider=self.execution_provider,
             det_size=self.det_size,
         )
 

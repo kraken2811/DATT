@@ -73,7 +73,10 @@ class TestBlockersRegression(unittest.TestCase):
         self.assertEqual(reader.clean_eof_count, 1)
         self.assertEqual(reader.abnormal_exit_count, 0)
         self.assertTrue(reader.finished)
-        self.assertEqual(reader.status, "STOPPED")
+        # Clean EOF with loop=False intentionally sets VIDEO_FINISHED (not STOPPED)
+        # to distinguish from a user-initiated stop. Both ui/app.js and camera_manager
+        # handle this status explicitly.
+        self.assertEqual(reader.status, "VIDEO_FINISHED")
 
     def test_2_vod_clean_eof_loop_true_controlled_restart(self) -> None:
         """2. VOD clean EOF + loop=True: restarts playback in a controlled way."""

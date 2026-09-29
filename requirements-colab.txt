@@ -14,3 +14,7 @@ psutil
 streamlit>=1.40.0
 
 easyocr>=1.7.1,<2
+
+# Phase 5: Face Recognition & Embedding (InsightFace CUDA GPU)
+insightface>=0.7.3
+onnxruntime-gpu>=1.18.0

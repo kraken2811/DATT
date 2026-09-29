@@ -90,6 +90,7 @@ class TelemetrySnapshot:
 class Observation:
     """Unified observation snapshot coupling video frame with detections and counters (Point 10)."""
     frame_id: int = 0
+    frame_pts: float = 0.0
     timestamp: float = 0.0
     annotated_frame: np.ndarray | None = None
     raw_frame: np.ndarray | None = None
@@ -316,6 +317,8 @@ class SharedRuntimeState:
         vehicles_in_view: int | None = None,
         vehicles_in_zone: int | None = None,
         jpeg_bytes: bytes | None = None,
+        frame_id: int | None = None,
+        frame_pts: float | None = None,
     ) -> None:
         """Atomically update state with the newest frame and metrics.
 
@@ -323,7 +326,11 @@ class SharedRuntimeState:
         """
         with self._lock:
             now = time.time()
-            self._frame_id += 1
+            if frame_id is not None:
+                self._frame_id = frame_id
+            else:
+                self._frame_id += 1
+            self._frame_pts = frame_pts if frame_pts is not None else 0.0
             self._timestamp = now
             self._last_processed_frame_time = now
             self._is_serving_fallback = False
@@ -360,6 +367,7 @@ class SharedRuntimeState:
 
             obs = Observation(
                 frame_id=self._frame_id,
+                frame_pts=self._frame_pts,
                 timestamp=now,
                 annotated_frame=annotated_frame,
                 raw_frame=latest_frame,

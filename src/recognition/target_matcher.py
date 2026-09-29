@@ -94,6 +94,8 @@ class BestFaceState:
     candidate_confidence: float = 0.0
     candidate_sharpness: float = 0.0
     candidate_quality_score: float = 0.0
+    candidates: list[dict] = field(default_factory=list)
+    fused_embedding: np.ndarray | None = None
 
 
 def calculate_face_frontality(kps: np.ndarray | None) -> float:
@@ -279,6 +281,13 @@ class TargetMatcher:
         self._debug_sample_dir = Path("scratch/face_debug")
         self._debug_sample_count = 0
         self._max_debug_samples = 15
+        self.last_timings: dict[str, float] = {
+            "acq_ms": 0.0,
+            "det_ms": 0.0,
+            "emb_ms": 0.0,
+            "match_ms": 0.0,
+            "total_ms": 0.0,
+        }
 
     def _save_face_debug_sample(
         self,
@@ -424,6 +433,8 @@ class TargetMatcher:
         Returns:
             dict[int, TargetMatchInfo]: Map of track_id -> TargetMatchInfo for all matched targets.
         """
+        t_mt_0 = time.perf_counter()
+        self.last_timings = {"acq_ms": 0.0, "det_ms": 0.0, "emb_ms": 0.0, "match_ms": 0.0, "total_ms": 0.0}
         if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
             return {}
 
@@ -431,12 +442,14 @@ class TargetMatcher:
 
         targets = self.manager.list_targets()
         if not targets or tracks is None:
+            self.last_timings["total_ms"] = (time.perf_counter() - t_mt_0) * 1000.0
             return {}
 
         xyxy = getattr(tracks, "xyxy", None)
         tracker_id = getattr(tracks, "tracker_id", None)
 
         if xyxy is None or tracker_id is None or len(tracker_id) == 0:
+            self.last_timings["total_ms"] = (time.perf_counter() - t_mt_0) * 1000.0
             return {}
 
         source_native = native_frame if native_frame is not None else frame
@@ -537,6 +550,7 @@ class TargetMatcher:
                 elif tid in self._matched_tracks:
                     self._matched_tracks.pop(tid, None)
 
+            self.last_timings["total_ms"] = (time.perf_counter() - t_mt_0) * 1000.0
             return active_matches
 
     def _evaluate_single_track_native(
@@ -557,6 +571,7 @@ class TargetMatcher:
 
         # Point 2: Head/Upper-body ROI (50-60% upper half with head/shoulder padding)
         # ROI A: standard upper 58% ROI
+        t_acq0 = time.perf_counter()
         head_h_A = int(ph * 0.58)
         pad_x_A = int(pw * 0.12)
         pad_top_A = int(ph * 0.08)
@@ -572,18 +587,22 @@ class TargetMatcher:
         if rw < 10 or rh < 10:
             state.last_eval_frame = frame_id
             state.last_bbox_area = bbox_area
+            self.last_timings["acq_ms"] += (time.perf_counter() - t_acq0) * 1000.0
             return None
 
         head_roi = source_native[roi_A_y1:roi_A_y2, roi_A_x1:roi_A_x2]
         if head_roi.size == 0:
             state.last_eval_frame = frame_id
             state.last_bbox_area = bbox_area
+            self.last_timings["acq_ms"] += (time.perf_counter() - t_acq0) * 1000.0
             return None
 
         # Point 3: Illumination check with LAB-L (NORMAL, DARK, BACKLIT)
         illumination, enhancement_applied, enhanced_roi = face_embedder.check_illumination(head_roi)
+        self.last_timings["acq_ms"] += (time.perf_counter() - t_acq0) * 1000.0
 
         # Point 4: Face Detection with SCRFD on head ROI (Pass 1 & Pass 2 adaptive upscale)
+        t_det0 = time.perf_counter()
         detected_faces, diag = face_embedder.detect_faces_in_roi(
             head_roi, illumination=illumination, enhanced_roi=enhanced_roi, return_diag=True
         )
@@ -682,6 +701,7 @@ class TargetMatcher:
         cand_conf = 0.0
         cand_sharpness = 0.0
         cand_quality = 0.0
+        self.last_timings["det_ms"] += (time.perf_counter() - t_det0) * 1000.0
 
         if not detected_faces and mock_embedding is None:
             if not has_color_only_targets:
@@ -722,6 +742,7 @@ class TargetMatcher:
                 return None
 
         # Handle face detected
+        t_emb0 = time.perf_counter()
         if detected_faces:
             best_det = detected_faces[0]
             det_box = best_det["bbox"]
@@ -770,29 +791,10 @@ class TargetMatcher:
 
                 # 2. 5-point landmarks validation and reasonable geometry
                 if gate_decision == "CAN_EMBED":
-                    if kps_native is None or len(kps_native) < 5 or not np.isfinite(kps_native).all():
+                    lmk_valid, lmk_reason = face_embedder.validate_landmarks(kps_native, face_bbox_native)
+                    if not lmk_valid:
                         gate_decision = "WAIT_FOR_BETTER_FACE"
-                        gate_reason = "INVALID_LANDMARKS"
-                    else:
-                        lx = float(kps_native[0][0])
-                        rx = float(kps_native[1][0])
-                        nx = float(kps_native[2][0])
-                        ny = float(kps_native[2][1])
-                        eye_y = (float(kps_native[0][1]) + float(kps_native[1][1])) / 2.0
-                        mouth_y = (float(kps_native[3][1]) + float(kps_native[4][1])) / 2.0
-                        eye_dist = abs(rx - lx)
-
-                        if eye_dist < 3.0:
-                            gate_decision = "WAIT_FOR_BETTER_FACE"
-                            gate_reason = "BAD_LANDMARKS"
-                        elif nx < min(lx, rx) - 5.0 or nx > max(lx, rx) + 5.0:
-                            # Nose is completely outside eyes horizontally (extreme yaw / profile)
-                            gate_decision = "WAIT_FOR_BETTER_FACE"
-                            gate_reason = "EXTREME_POSE"
-                        elif ny < eye_y - 2.0 or mouth_y < ny - 2.0:
-                            # Vertical inversion: nose above eyes or mouth above nose (extreme pitch / distorted)
-                            gate_decision = "WAIT_FOR_BETTER_FACE"
-                            gate_reason = "EXTREME_POSE"
+                        gate_reason = lmk_reason
             else:
                 if gate_decision == "FACE_TOO_SMALL":
                     gate_reason = "FACE_TOO_SMALL"
@@ -844,6 +846,7 @@ class TargetMatcher:
                         decision=state.decision,
                         target_name=state.matched_target_name,
                     )
+                    self.last_timings["emb_ms"] += (time.perf_counter() - t_emb0) * 1000.0
                     return None
             else:
                 # Meaningful replacement criteria to avoid unnecessary ArcFace recomputations
@@ -868,8 +871,18 @@ class TargetMatcher:
                     replacement_reason = "REUSE_BEST_FACE"
 
                 if is_better and kps_native is not None:
+                    # Select enhancement variant based ONLY on native image quality
+                    if illumination == "UNDEREXPOSED":
+                        variant = "EXPOSURE_CORRECTED"
+                    elif illumination in ("BACKLIT", "LOW_CONTRAST"):
+                        variant = "LOCAL_CONTRAST"
+                    elif 25.0 <= cand_sharpness <= 180.0:
+                        variant = "MILD_SHARPEN"
+                    else:
+                        variant = "RAW"
+
                     new_emb = face_embedder.align_and_embed(
-                        source_native, kps_native, illumination=illumination
+                        source_native, kps_native, illumination=illumination, variant=variant
                     )
                     valid_emb = (
                         new_emb is not None
@@ -891,6 +904,32 @@ class TargetMatcher:
                         emb_recomputed = True
                         self._track_face_cache[track_id] = new_emb
 
+                        # Bounded temporal candidate history (recent 10 frames)
+                        cand_entry = {
+                            "embedding": new_emb,
+                            "quality": cand_quality,
+                            "frame_id": frame_id,
+                            "size": cand_face_size,
+                        }
+                        state.candidates.append(cand_entry)
+                        if len(state.candidates) > 10:
+                            state.candidates.pop(0)
+
+                        # Multi-frame embedding fusion when >= 3 quality embeddings exist
+                        if len(state.candidates) >= 3:
+                            top_cands = sorted(state.candidates, key=lambda c: c["quality"], reverse=True)[:5]
+                            fused = np.zeros(512, dtype=np.float32)
+                            w_sum = 0.0
+                            for c in top_cands:
+                                w = max(0.1, float(c["quality"]))
+                                fused += c["embedding"] * w
+                                w_sum += w
+                            fused_norm = float(np.linalg.norm(fused))
+                            if fused_norm > 1e-6:
+                                state.fused_embedding = fused / fused_norm
+                        else:
+                            state.fused_embedding = new_emb
+
                         logger.info(
                             "[FACE_QUALITY_GATE] track_id=%d frame_id=%d face_size=%.1f confidence=%.3f sharpness=%.1f quality=%.1f embedding_valid=YES action=ACCEPT_FOR_MATCH reason=%s",
                             track_id, frame_id, cand_face_size, cand_conf, cand_sharpness, cand_quality, replacement_reason
@@ -903,6 +942,7 @@ class TargetMatcher:
                         )
                         if state.embedding is None:
                             state.decision = "WAIT_FOR_BETTER_FACE"
+                            self.last_timings["emb_ms"] += (time.perf_counter() - t_emb0) * 1000.0
                             return None
                 else:
                     best_replaced = False
@@ -931,6 +971,9 @@ class TargetMatcher:
                 track_id, frame_id, 64.0, 0.90, 100.0, 100.0
             )
 
+        self.last_timings["emb_ms"] += (time.perf_counter() - t_emb0) * 1000.0
+        t_mat0 = time.perf_counter()
+
         # Clothing Color Extraction if any target requires color
         has_color_targets = any(t.clothing_color is not None for t in targets)
         color_result = None
@@ -945,15 +988,17 @@ class TargetMatcher:
         max_face_sim = -1.0
         target_thresh = DEFAULT_FACE_THRESHOLD
 
+        matching_emb = state.fused_embedding if state.fused_embedding is not None else state.embedding
+
         for target in targets:
             requires_face = target.face_embedding is not None
             requires_color = target.clothing_color is not None
 
             # Case A: Both FACE and CLOTHING COLOR required
             if requires_face and requires_color:
-                if state.embedding is None:
+                if matching_emb is None:
                     continue
-                face_sim = cosine_similarity(target.face_embedding, state.embedding)
+                face_sim = cosine_similarity(target.face_embedding, matching_emb)
                 if face_sim > max_face_sim:
                     max_face_sim = face_sim
                     target_thresh = target.face_threshold
@@ -978,9 +1023,9 @@ class TargetMatcher:
 
             # Case B: FACE only required
             elif requires_face:
-                if state.embedding is None:
+                if matching_emb is None:
                     continue
-                face_sim = cosine_similarity(target.face_embedding, state.embedding)
+                face_sim = cosine_similarity(target.face_embedding, matching_emb)
                 if face_sim > max_face_sim:
                     max_face_sim = face_sim
                     target_thresh = target.face_threshold
@@ -1080,6 +1125,7 @@ class TargetMatcher:
             target_name=state.matched_target_name,
         )
 
+        self.last_timings["match_ms"] += (time.perf_counter() - t_mat0) * 1000.0
         return best_match
 
     def reset_tracks(self) -> None:
