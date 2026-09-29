@@ -11,6 +11,7 @@ from src.ocr.plate_reader import (
 from src.ocr.plate_tracker import (
     PlateTrackState,
     VehiclePlateManager,
+    compute_ocr_job_quality,
     vehicle_plate_manager,
 )
 
@@ -24,4 +25,5 @@ __all__ = [
     "PlateTrackState",
     "VehiclePlateManager",
     "vehicle_plate_manager",
+    "compute_ocr_job_quality",
 ]

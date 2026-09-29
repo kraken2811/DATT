@@ -42,6 +42,7 @@ class PlateTrackState:
     frame_id: int = -1
     last_eval_frame: int = -999
     last_bbox_area: float = 0.0
+    max_bbox_area: float = 0.0
     eval_count: int = 0
     status: str = "SEARCHING"  # SEARCHING -> CHECKING -> RECOGNIZED
     candidate_text: str = ""
@@ -71,6 +72,93 @@ class PlateTrackState:
         }
 
 
+def compute_ocr_job_quality(
+    vehicle_crop: np.ndarray,
+    native_vehicle_bbox: tuple[int, int, int, int] | Sequence[int],
+    frame_res: tuple[int, int] | None = None,
+    prev_bbox_area: float = 0.0,
+    max_bbox_area: float = 0.0,
+    plate_det_conf: float = 0.0,
+    plate_size: tuple[int, int] | None = None,
+) -> float:
+    """Compute lightweight quality score (0.0 to 100.0) for an OCR candidate job.
+
+    Cheap metrics evaluated without blocking the main loop:
+    - Vehicle bounding box size & effective area
+    - Sharpness (Laplacian variance)
+    - Brightness and contrast (mean & std dev)
+    - Plate detector confidence & native dimensions (if already available)
+    - Approaching vs leaving dynamics (growth trend, historical peak size, frame boundary truncation)
+    """
+    if vehicle_crop is None or vehicle_crop.size == 0:
+        return 0.0
+
+    vx1, vy1, vx2, vy2 = [int(v) for v in native_vehicle_bbox[:4]]
+    vw = max(0, vx2 - vx1)
+    vh = max(0, vy2 - vy1)
+    if vw < 30 or vh < 30:
+        return 0.0
+
+    v_area = float(vw * vh)
+    v_eff = math.sqrt(v_area)
+
+    # 1. Vehicle size score (40% weight): larger approaching vehicles provide much higher resolution plates
+    size_score = max(0.0, min(100.0, (v_eff - 40.0) / 360.0 * 100.0))
+
+    # 2. Sharpness score (25% weight): Laplacian variance on resized grayscale (takes <0.1ms)
+    ch, cw = vehicle_crop.shape[:2]
+    if ch > 160 or cw > 160:
+        scale = 160.0 / max(ch, cw)
+        nw, nh = max(1, int(round(cw * scale))), max(1, int(round(ch * scale)))
+        small = cv2.resize(vehicle_crop, (nw, nh), interpolation=cv2.INTER_NEAREST)
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = cv2.cvtColor(vehicle_crop, cv2.COLOR_BGR2GRAY)
+
+    lap_var = float(cv2.Laplacian(gray, cv2.CV_32F).var())
+    sharpness_score = max(0.0, min(100.0, (lap_var / 350.0) * 100.0))
+
+    # 3. Brightness and contrast (15% weight)
+    mean_val, std_val = cv2.meanStdDev(gray)
+    b_val = float(mean_val[0][0])
+    c_val = float(std_val[0][0])
+    b_score = max(0.0, 100.0 - (abs(b_val - 128.0) / 128.0) * 60.0)
+    c_score = max(0.0, min(100.0, (c_val / 45.0) * 100.0))
+    illum_score = 0.5 * b_score + 0.5 * c_score
+
+    # Base weighted quality
+    score = (0.45 * size_score) + (0.30 * sharpness_score) + (0.15 * illum_score)
+
+    # 4. Plate prior bonus/penalty if already available
+    if plate_det_conf > 0:
+        score += min(15.0, plate_det_conf * 15.0)
+    if plate_size is not None and plate_size[0] > 0 and plate_size[1] > 0:
+        pw, ph = plate_size
+        if pw >= 60 and ph >= 25:
+            score += 10.0
+        elif pw < 35 or ph < 18:
+            score -= 15.0
+
+    # 5. Approaching vs leaving dynamics
+    # When vehicle is significantly smaller than its historical peak, it is leaving/decaying
+    if max_bbox_area > 0:
+        shrink_ratio = v_area / max_bbox_area
+        if shrink_ratio < 0.70:
+            leaving_penalty = max(0.0, min(30.0, (1.0 - shrink_ratio) * 35.0))
+            score -= leaving_penalty
+        elif prev_bbox_area > 0 and v_area > 1.12 * prev_bbox_area:
+            # Approaching: vehicle is expanding
+            score += 8.0
+
+    # Truncation penalty: vehicle touching frame boundary as it leaves
+    if frame_res is not None:
+        fw, fh = frame_res
+        if vx1 <= 2 or vy1 <= 2 or vx2 >= fw - 3 or vy2 >= fh - 3:
+            score -= 15.0
+
+    return max(0.0, min(100.0, score))
+
+
 class _OcrJob(NamedTuple):
     """Immutable OCR job submitted to the async worker."""
     track_id: int
@@ -80,18 +168,24 @@ class _OcrJob(NamedTuple):
     vehicle_class: str
     eval_count: int
     generation: int = 0
+    quality_score: float = 0.0
+    plate_det_conf: float = 0.0
+    plate_w: int = 0
+    plate_h: int = 0
 
 
 class _OcrWorker:
-    """One latest pending crop per track; one running job; bounded global backlog."""
-    def __init__(self, manager):
+    """Best-quality pending crop per track; one running job; bounded global backlog."""
+    def __init__(self, manager, start_thread: bool = True):
         self._manager = manager
-        self._pending = OrderedDict()
+        self._pending: OrderedDict[int, _OcrJob] = OrderedDict()
         self._condition = threading.Condition()
         self._stopped = False
         self._last_ocr_worker_ms = 0.0
-        self._thread = threading.Thread(target=self._run, name="OcrWorkerThread", daemon=True)
-        self._thread.start()
+        self._thread: threading.Thread | None = None
+        if start_thread:
+            self._thread = threading.Thread(target=self._run, name="OcrWorkerThread", daemon=True)
+            self._thread.start()
 
     @property
     def last_ocr_worker_ms(self):
@@ -102,29 +196,56 @@ class _OcrWorker:
         with self._condition:
             return len(self._pending)
 
-    def enqueue(self, job):
+    def get_pending_job(self, track_id: int) -> _OcrJob | None:
+        with self._condition:
+            return self._pending.get(track_id)
+
+    def enqueue(self, job: _OcrJob) -> None:
         with self._condition:
             if self._stopped:
                 return
-            if job.track_id not in self._pending and len(self._pending) >= _OCR_QUEUE_MAXSIZE:
-                self._pending.popitem(last=False)
-            self._pending[job.track_id] = job
+
+            old_job = self._pending.get(job.track_id)
+            if old_job is not None:
+                # Frame age penalty relative to current candidate frame
+                age = max(0, job.frame_id - old_job.frame_id)
+                age_penalty = min(25.0, max(0.0, (age - 30) * 0.25))
+                old_quality = max(0.0, old_job.quality_score - age_penalty)
+                new_quality = job.quality_score
+
+                if new_quality > old_quality:
+                    action = "REPLACE"
+                    self._pending[job.track_id] = job
+                else:
+                    action = "KEEP_BEST"
+                    # Preserve existing old_job in queue
+
+                logger.info(
+                    "[OCR_JOB_SELECT] track_id=%d old_frame=%d new_frame=%d old_quality=%.2f new_quality=%.2f action=%s",
+                    job.track_id, old_job.frame_id, job.frame_id, old_quality, new_quality, action,
+                )
+            else:
+                if len(self._pending) >= _OCR_QUEUE_MAXSIZE:
+                    self._pending.popitem(last=False)
+                self._pending[job.track_id] = job
+
             self._condition.notify()
 
-    def discard(self, track_id):
+    def discard(self, track_id: int) -> None:
         with self._condition:
             self._pending.pop(track_id, None)
 
-    def clear(self):
+    def clear(self) -> None:
         with self._condition:
             self._pending.clear()
 
-    def stop(self):
+    def stop(self) -> None:
         with self._condition:
             self._stopped = True
             self._pending.clear()
             self._condition.notify_all()
-        self._thread.join(timeout=2.0)
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
 
     def _run(self):
         while True:
@@ -201,6 +322,11 @@ class VehiclePlateManager:
         if self._worker is not None:
             return self._worker.queue_size
         return 0
+
+    def stop(self) -> None:
+        """Stop the async OCR worker thread."""
+        if self._worker is not None:
+            self._worker.stop()
 
     def _get_worker(self) -> _OcrWorker:
         if self._worker is None:
@@ -356,10 +482,18 @@ class VehiclePlateManager:
                 state = self._plate_states.get(tid_int)
                 if state is None:
                     self._generation += 1
-                    state = PlateTrackState(track_id=tid_int, vehicle_class=cname, last_eval_frame=-999, generation=self._generation)
+                    state = PlateTrackState(
+                        track_id=tid_int,
+                        vehicle_class=cname,
+                        last_eval_frame=-999,
+                        generation=self._generation,
+                        max_bbox_area=bbox_area,
+                    )
                     self._plate_states[tid_int] = state
                 else:
                     state.vehicle_class = cname
+                    if bbox_area > state.max_bbox_area:
+                        state.max_bbox_area = bbox_area
 
                 eligible_classes = getattr(config, "PLATE_ELIGIBLE_CLASSES", [2, 3, 5, 7])
                 if cid not in eligible_classes:
@@ -402,6 +536,7 @@ class VehiclePlateManager:
                 )
 
                 if needs_eval:
+                    prev_area = state.last_bbox_area
                     # Update cadence counters before OCR (prevents re-enqueue next frame)
                     state.last_eval_frame = frame_id
                     state.last_bbox_area = bbox_area
@@ -409,6 +544,22 @@ class VehiclePlateManager:
 
                     # Copy crop so frame buffer can be reused immediately
                     vehicle_crop = frame[vy1:vy2, vx1:vx2].copy()
+
+                    plate_prior_conf = float(state.confidence) if state.confidence > 0 else 0.0
+                    plate_prior_size = None
+                    if state.plate_bbox_native is not None:
+                        px1, py1, px2, py2 = state.plate_bbox_native
+                        plate_prior_size = (max(0, px2 - px1), max(0, py2 - py1))
+
+                    quality_score = compute_ocr_job_quality(
+                        vehicle_crop=vehicle_crop,
+                        native_vehicle_bbox=(vx1, vy1, vx2, vy2),
+                        frame_res=(w, h),
+                        prev_bbox_area=prev_area,
+                        max_bbox_area=state.max_bbox_area,
+                        plate_det_conf=plate_prior_conf,
+                        plate_size=plate_prior_size,
+                    )
 
                     job = _OcrJob(
                         track_id=tid_int,
@@ -418,6 +569,10 @@ class VehiclePlateManager:
                         vehicle_class=cname,
                         eval_count=state.eval_count,
                         generation=state.generation,
+                        quality_score=quality_score,
+                        plate_det_conf=plate_prior_conf,
+                        plate_w=plate_prior_size[0] if plate_prior_size else 0,
+                        plate_h=plate_prior_size[1] if plate_prior_size else 0,
                     )
                     if self.async_worker:
                         self._get_worker().enqueue(job)
@@ -433,6 +588,13 @@ class VehiclePlateManager:
                 active_results[tid_int] = state
 
         return active_results
+
+    def get_pending_ocr_job(self, track_id: int) -> _OcrJob | None:
+        """Retrieve the pending _OcrJob for track_id if currently queued."""
+        worker = self._worker
+        if worker is not None:
+            return worker.get_pending_job(track_id)
+        return None
 
     def reset_tracks(self) -> None:
         """Clear all vehicle track associations (called on camera/source switch)."""
