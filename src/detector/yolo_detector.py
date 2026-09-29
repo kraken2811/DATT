@@ -92,6 +92,18 @@ class YOLODetector:
         self.last_before_nms: int = 0
         self.last_after_nms: int = 0
         self.vram_allocated_mb: float = 0.0
+        self._warmed_up: bool = False
+
+    def warmup(self, img_size: int | None = None) -> None:
+        """Warm up YOLO model once to initialize CUDA kernels and persistent VRAM residency."""
+        if self._warmed_up:
+            return
+        sz = img_size or getattr(self.config, "IMG_SIZE", 640)
+        dummy = np.zeros((sz, sz, 3), dtype=np.uint8)
+        self.detect(dummy)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        self._warmed_up = True
 
     def detect(self, frame: np.ndarray) -> DetectionsData:
         """Run YOLO11s inference on frame and return decoupled {xyxy, confidence, class_id}."""

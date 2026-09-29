@@ -62,6 +62,37 @@ class EventStorage:
                 cursor.execute(
                     "CREATE INDEX IF NOT EXISTS idx_events_camera ON events(camera_id);"
                 )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS vehicle_passages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        camera_id TEXT NOT NULL,
+                        track_id INTEGER NOT NULL,
+                        vehicle_type TEXT,
+                        vehicle_color TEXT,
+                        zone_id TEXT,
+                        plate_text TEXT,
+                        plate_status TEXT,
+                        plate_confidence REAL,
+                        direction TEXT,
+                        first_seen REAL,
+                        last_seen REAL,
+                        duration REAL,
+                        best_vehicle_path TEXT,
+                        best_plate_path TEXT,
+                        created_at TEXT
+                    );
+                    """
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_passages_track ON vehicle_passages(track_id);"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_passages_camera ON vehicle_passages(camera_id);"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_passages_plate ON vehicle_passages(plate_text);"
+                )
                 conn.commit()
 
     def save_event(
@@ -162,6 +193,63 @@ class EventStorage:
                 )
                 res = cursor.fetchone()
                 return res[0] if res else 0
+
+    def save_passage(self, passage: Any) -> int:
+        """Save a finalized VehiclePassage record and best images to SQLite."""
+        best_veh_path = ""
+        best_plt_path = ""
+        ts_compact = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
+
+        if getattr(passage, "best_vehicle_image", None) is not None and passage.best_vehicle_image.size > 0:
+            fn = f"veh_{ts_compact}_{passage.camera_id}_t{passage.track_id}.jpg"
+            dest = self.snapshot_dir / fn
+            try:
+                cv2.imwrite(str(dest), passage.best_vehicle_image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                best_veh_path = f"data/events/{fn}"
+            except Exception as e:
+                logger.warning("EventStorage: Failed to save best vehicle image: %s", e)
+
+        if getattr(passage, "best_plate_image", None) is not None and passage.best_plate_image.size > 0:
+            fn = f"plate_{ts_compact}_{passage.camera_id}_t{passage.track_id}.jpg"
+            dest = self.snapshot_dir / fn
+            try:
+                cv2.imwrite(str(dest), passage.best_plate_image, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                best_plt_path = f"data/events/{fn}"
+            except Exception as e:
+                logger.warning("EventStorage: Failed to save best plate image: %s", e)
+
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO vehicle_passages (
+                        camera_id, track_id, vehicle_type, vehicle_color, zone_id,
+                        plate_text, plate_status, plate_confidence, direction,
+                        first_seen, last_seen, duration, best_vehicle_path, best_plate_path, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        passage.camera_id,
+                        passage.track_id,
+                        getattr(passage, "vehicle_type", "vehicle"),
+                        getattr(passage, "vehicle_color", None),
+                        getattr(passage, "zone_id", None),
+                        getattr(passage, "plate_text", ""),
+                        getattr(passage, "plate_status", "SEARCHING"),
+                        float(getattr(passage, "plate_confidence", 0.0)),
+                        getattr(passage, "direction", "UNKNOWN"),
+                        float(getattr(passage, "first_seen", 0.0)),
+                        float(getattr(passage, "last_seen", 0.0)),
+                        float(getattr(passage, "duration", 0.0)),
+                        best_veh_path,
+                        best_plt_path,
+                        created_at,
+                    ),
+                )
+                conn.commit()
+                return cursor.lastrowid or 0
 
 
 # Global singleton instance

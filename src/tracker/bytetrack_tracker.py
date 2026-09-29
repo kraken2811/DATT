@@ -64,6 +64,28 @@ class PersonTracker:
         tracked_detections = self.tracker.update_with_detections(sv_dets)
         return tracked_detections
 
+    def predict(self) -> sv.Detections:
+        """Smoothly advance active tracks with Kalman prediction between detector updates."""
+        try:
+            from supervision.tracker.byte_tracker import core
+            if hasattr(self.tracker, "tracked_tracks") and self.tracker.tracked_tracks:
+                core.STrack.multi_predict(self.tracker.tracked_tracks, self.tracker.shared_kalman)
+                active = [t for t in self.tracker.tracked_tracks if t.is_activated]
+                if active:
+                    xyxy = np.array([t.tlbr for t in active], dtype=np.float32)
+                    tracker_id = np.array([int(t.external_track_id) for t in active], dtype=int)
+                    confidence = np.array([float(t.score) for t in active], dtype=np.float32)
+                    class_id = np.zeros(len(active), dtype=int)
+                    return sv.Detections(
+                        xyxy=xyxy,
+                        confidence=confidence,
+                        class_id=class_id,
+                        tracker_id=tracker_id,
+                    )
+        except Exception:
+            pass
+        return sv.Detections.empty()
+
     def reset(self) -> None:
         """Reset internal tracker state."""
         self.tracker.reset()
@@ -90,6 +112,7 @@ class CarTracker:
                 config, "MINIMUM_CONSECUTIVE_FRAMES", 2
             ),
         )
+        self._track_class_ids: dict[int, int] = {}
 
     def update(self, detections: Any) -> sv.Detections:
         """Update tracker state with new car detections."""
@@ -117,9 +140,38 @@ class CarTracker:
             )
 
         tracked_detections = self.tracker.update_with_detections(sv_dets)
+        if len(tracked_detections) > 0 and getattr(tracked_detections, "tracker_id", None) is not None:
+            cids = getattr(tracked_detections, "class_id", None)
+            for i, tid in enumerate(tracked_detections.tracker_id):
+                if tid is not None:
+                    cid = int(cids[i]) if cids is not None and i < len(cids) else 2
+                    self._track_class_ids[int(tid)] = cid
         return tracked_detections
+
+    def predict(self) -> sv.Detections:
+        """Smoothly advance active vehicle tracks with Kalman prediction between detector updates."""
+        try:
+            from supervision.tracker.byte_tracker import core
+            if hasattr(self.tracker, "tracked_tracks") and self.tracker.tracked_tracks:
+                core.STrack.multi_predict(self.tracker.tracked_tracks, self.tracker.shared_kalman)
+                active = [t for t in self.tracker.tracked_tracks if t.is_activated]
+                if active:
+                    xyxy = np.array([t.tlbr for t in active], dtype=np.float32)
+                    tracker_id = np.array([int(t.external_track_id) for t in active], dtype=int)
+                    confidence = np.array([float(t.score) for t in active], dtype=np.float32)
+                    class_id = np.array([self._track_class_ids.get(int(t.external_track_id), 2) for t in active], dtype=int)
+                    return sv.Detections(
+                        xyxy=xyxy,
+                        confidence=confidence,
+                        class_id=class_id,
+                        tracker_id=tracker_id,
+                    )
+        except Exception:
+            pass
+        return sv.Detections.empty()
 
     def reset(self) -> None:
         """Reset internal car tracker state."""
         self.tracker.reset()
+        self._track_class_ids.clear()
 

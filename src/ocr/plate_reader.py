@@ -106,6 +106,69 @@ def is_valid_plate_format(text: str) -> bool:
     return bool(match and int(match[1]) in provinces and int(match[3]) != 0)
 
 
+def order_quad_points(pts: np.ndarray) -> np.ndarray:
+    """Sort 4 quad corner points in consistent order: [top-left, top-right, bottom-right, bottom-left]."""
+    rect = np.zeros((4, 2), dtype=np.float32)
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+    return rect
+
+
+def fuse_plate_crops(crops: Sequence[np.ndarray]) -> np.ndarray | None:
+    """Deterministic multi-frame real evidence fusion across real observed plate crops.
+
+    Aligns crops using geometric registration (ECC / affine) to the sharpest reference
+    and computes a temporal median stack. Zero generative AI hallucination.
+    """
+    if not crops:
+        return None
+    valid_crops = [c for c in crops if c is not None and isinstance(c, np.ndarray) and c.size > 0 and c.shape[0] >= 8 and c.shape[1] >= 15]
+    if not valid_crops:
+        return None
+    if len(valid_crops) == 1:
+        return valid_crops[0]
+
+    def _sharpness(img: np.ndarray) -> float:
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+        return float(cv2.Laplacian(g, cv2.CV_32F).var())
+
+    sharpnesses = [_sharpness(c) for c in valid_crops]
+    ref_idx = int(np.argmax(sharpnesses))
+    ref_crop = valid_crops[ref_idx]
+    ref_h, ref_w = ref_crop.shape[:2]
+    ref_gray = cv2.cvtColor(ref_crop, cv2.COLOR_BGR2GRAY) if len(ref_crop.shape) == 3 else ref_crop
+
+    aligned_stack = [ref_crop.astype(np.float32)]
+
+    for i, c in enumerate(valid_crops):
+        if i == ref_idx:
+            continue
+        c_h, c_w = c.shape[:2]
+        if c_h != ref_h or c_w != ref_w:
+            c_res = cv2.resize(c, (ref_w, ref_h), interpolation=cv2.INTER_CUBIC)
+        else:
+            c_res = c.copy()
+
+        c_gray = cv2.cvtColor(c_res, cv2.COLOR_BGR2GRAY) if len(c_res.shape) == 3 else c_res
+
+        try:
+            warp_matrix = np.eye(2, 3, dtype=np.float32)
+            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.01)
+            _, warp_matrix = cv2.findTransformECC(ref_gray, c_gray, warp_matrix, cv2.MOTION_TRANSLATION, criteria, None, 5)
+            aligned = cv2.warpAffine(c_res, warp_matrix, (ref_w, ref_h), flags=cv2.INTER_CUBIC + cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REPLICATE)
+            aligned_stack.append(aligned.astype(np.float32))
+        except Exception:
+            aligned_stack.append(c_res.astype(np.float32))
+
+    fused = np.median(aligned_stack, axis=0).astype(np.uint8)
+    return fused
+
+
 class LicensePlateReader:
     """Thread-safe singleton for localized vehicle license plate detection and OCR."""
 
@@ -209,6 +272,114 @@ class LicensePlateReader:
                 self._reader_error = str(exc)
                 logger.warning("[OCR] Could not initialize EasyOCR reader: %s. Using classical CV fallback.", exc)
                 return False
+
+    def rectify_plate_perspective(
+        self,
+        vehicle_crop: np.ndarray,
+        plate_bbox: tuple[int, int, int, int] | Sequence[int],
+    ) -> tuple[np.ndarray, float]:
+        """Detect plate orientation/corners and apply perspective rectification / deskew into a normalized crop."""
+        if vehicle_crop is None or vehicle_crop.size == 0:
+            return vehicle_crop, 0.0
+
+        vh, vw = vehicle_crop.shape[:2]
+        px1, py1, px2, py2 = [int(v) for v in plate_bbox[:4]]
+        pw = max(0, px2 - px1)
+        ph = max(0, py2 - py1)
+        if pw < 10 or ph < 8:
+            return vehicle_crop[py1:py2, px1:px2], 0.0
+
+        pad_x = max(4, int(pw * 0.12))
+        pad_y = max(4, int(ph * 0.15))
+        rx1 = max(0, px1 - pad_x)
+        ry1 = max(0, py1 - pad_y)
+        rx2 = min(vw, px2 + pad_x)
+        ry2 = min(vh, py2 + pad_y)
+
+        roi = vehicle_crop[ry1:ry2, rx1:rx2]
+        if roi.size == 0 or roi.shape[0] < 10 or roi.shape[1] < 15:
+            return vehicle_crop[py1:py2, px1:px2], 0.0
+
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        if np.mean(thresh) > 127:
+            thresh_inv = cv2.bitwise_not(thresh)
+        else:
+            thresh_inv = thresh
+
+        contours, _ = cv2.findContours(thresh_inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best_quad = None
+        best_angle = 0.0
+        roi_area = roi.shape[0] * roi.shape[1]
+
+        valid_contours = []
+        for cnt in contours:
+            c_area = cv2.contourArea(cnt)
+            if c_area < roi_area * 0.10:
+                continue
+            rect = cv2.minAreaRect(cnt)
+            (cx, cy), (w, h), angle = rect
+            if w < 10 or h < 8:
+                continue
+            aspect = max(w, h) / max(1.0, min(w, h))
+            if 1.0 <= aspect <= 6.0:
+                valid_contours.append((cnt, c_area, rect))
+
+        if valid_contours:
+            valid_contours.sort(key=lambda x: x[1], reverse=True)
+            _, _, chosen_rect = valid_contours[0]
+            (cx, cy), (rw, rh), angle = chosen_rect
+            if rw < rh:
+                angle = angle - 90.0
+                rw, rh = rh, rw
+            while angle < -45.0:
+                angle += 90.0
+            while angle > 45.0:
+                angle -= 90.0
+            best_angle = angle
+            best_quad = cv2.boxPoints(chosen_rect)
+        else:
+            coords = np.column_stack(np.where(thresh_inv > 0))
+            if len(coords) > 30:
+                pts = np.fliplr(coords)
+                rect = cv2.minAreaRect(pts)
+                (cx, cy), (rw, rh), angle = rect
+                if rw < rh:
+                    angle = angle - 90.0
+                    rw, rh = rh, rw
+                while angle < -45.0:
+                    angle += 90.0
+                while angle > 45.0:
+                    angle -= 90.0
+                best_angle = angle
+                best_quad = cv2.boxPoints(rect)
+
+        if best_quad is not None and abs(best_angle) >= 1.5:
+            src_pts = order_quad_points(best_quad)
+            w_top = np.linalg.norm(src_pts[1] - src_pts[0])
+            w_bot = np.linalg.norm(src_pts[2] - src_pts[3])
+            dst_w = max(24, int(max(w_top, w_bot)))
+
+            h_left = np.linalg.norm(src_pts[3] - src_pts[0])
+            h_right = np.linalg.norm(src_pts[2] - src_pts[1])
+            dst_h = max(12, int(max(h_left, h_right)))
+
+            if dst_w < dst_h * 1.1:
+                dst_w, dst_h = dst_h, dst_w
+
+            dst_pts = np.array([
+                [0, 0],
+                [dst_w - 1, 0],
+                [dst_w - 1, dst_h - 1],
+                [0, dst_h - 1]
+            ], dtype=np.float32)
+
+            M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            rectified = cv2.warpPerspective(roi, M, (dst_w, dst_h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+            return rectified, round(float(best_angle), 1)
+
+        return vehicle_crop[py1:py2, px1:px2], 0.0
 
     def deskew_plate(self, crop: np.ndarray) -> tuple[np.ndarray, float]:
         """Detect tilt angle and apply perspective / affine deskew correction.
@@ -959,7 +1130,17 @@ class LicensePlateReader:
             px2 = min(vw, px2 + pad)
             py2 = min(vh, py2 + pad)
 
-            raw_tight_crop = vehicle_crop[py1:py2, px1:px2]
+            # Stage 0.5: Corner estimation & perspective rectification for angled plates
+            rectified_crop, rect_angle = self.rectify_plate_perspective(vehicle_crop, (px1, py1, px2, py2))
+            if abs(rect_angle) >= 1.5 and rectified_crop is not None and rectified_crop.size > 0:
+                raw_tight_crop = rectified_crop
+                logger.info(
+                    "[PLATE_PERSPECTIVE] track_id=%d frame_id=%d perspective rectification applied: angle=%.1f deg size=%dx%d",
+                    track_id, frame_id, rect_angle, raw_tight_crop.shape[1], raw_tight_crop.shape[0]
+                )
+            else:
+                raw_tight_crop = vehicle_crop[py1:py2, px1:px2]
+
             if raw_tight_crop.size == 0:
                 plate_det_res = None
             else:

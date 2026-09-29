@@ -110,6 +110,8 @@ def run_pipeline(
     # 1. Initialize Components
     logger.info("Initializing YOLODetector...")
     detector = YOLODetector(config)
+    logger.info("Warming up YOLODetector (persistent GPU/VRAM)...")
+    detector.warmup()
     logger.info(
         "Detector active on device: %s (%s, GPU: %s)",
         detector.device,
@@ -167,20 +169,17 @@ def run_pipeline(
     last_track_count = 0
     last_people_in_view = 0
     last_car_in_view = 0
-    # Per-stage timing (ms)
-    _t_decode_ms = 0.0
-    _t_yolo_ms = 0.0
-    _t_bytetrack_ms = 0.0
-    _t_plate_ms = 0.0
-    _t_render_ms = 0.0
-    _t_jpeg_ms = 0.0
-    _t_total_ms = 0.0
+    prev_loop_end = 0.0
+    last_detections = None
 
     try:
         while True:
             if stop_event is not None and stop_event.is_set():
                 logger.info("Stop event signaled. Halting AI pipeline loop.")
                 break
+
+            t_loop_t0 = time.perf_counter()
+            _t_loop_idle_ms = (t_loop_t0 - prev_loop_end) * 1000.0 if prev_loop_end > 0 else 0.0
 
             current_cam = camera_mgr.get_active_camera()
             if current_cam is None:
@@ -214,9 +213,14 @@ def run_pipeline(
                 # Pipeline has caught up with the switch; allow ERROR propagation again
                 shared_state.clear_switching()
 
-            # 1. Read newest frame from CameraManager
-            frame = camera_mgr.read(timeout=2.0)
-            if frame is None:
+            # 1. Read newest frame from CameraManager with metadata
+            t_read0 = time.perf_counter()
+            frame_res = camera_mgr.read_with_meta(timeout=2.0)
+            _t_source_read_ms = (time.perf_counter() - t_read0) * 1000.0
+            _t_source_wait_ms = getattr(camera_mgr, "last_source_wait_ms", 0.0)
+            _t_pacing_wait_ms = getattr(camera_mgr, "last_pacing_wait_ms", 0.0)
+
+            if frame_res is None or frame_res[0] is None:
                 if camera_mgr.status == "ERROR":
                     shared_state.set_status("ERROR", camera_mgr.error_reason)
                 elif camera_mgr.status == "VIDEO_FINISHED":
@@ -227,58 +231,81 @@ def run_pipeline(
                 time.sleep(0.001)
                 continue
 
-            # Start total pipeline timer
-            pipeline_t0 = time.perf_counter()
-            _t_decode_ms = (time.perf_counter() - pipeline_t0) * 1000  # decode already done by reader thread
+            frame, frame_seq, frame_pts = frame_res
+            curr_frame_id = frame_seq
 
-            # 2. Detect with YOLO (PyTorch CUDA) - exactly 1 inference pass
-            _t_yolo_t0 = time.perf_counter()
-            detections = detector.detect(frame)
-            last_yolo_ms = detector.last_yolo_ms
-            _t_yolo_ms = (time.perf_counter() - _t_yolo_t0) * 1000
+            # Frame prepare
+            t_prep0 = time.perf_counter()
+            if not isinstance(frame, np.ndarray) or frame.size == 0:
+                continue
+            _t_frame_prepare_ms = (time.perf_counter() - t_prep0) * 1000.0
 
-            # Split detections by class: person vs unified vehicles (car, truck, bus, motorcycle)
-            person_mask = detections.class_id == config.PERSON_CLASS_ID
-            vehicle_class_ids = getattr(config, "VEHICLE_CLASS_IDS", [2, 3, 5, 7])
-            vehicle_mask = np.isin(detections.class_id, vehicle_class_ids)
+            # 2. YOLO Cadence: target ~15 FPS detection cadence while video display is ~30 FPS
+            # Even total_frames runs detector; odd total_frames advances Kalman filters via predict()
+            is_detection_frame = (total_frames % 2 == 0)
 
-            person_dets = DetectionsData({
-                "xyxy": detections.xyxy[person_mask],
-                "confidence": detections.confidence[person_mask],
-                "class_id": detections.class_id[person_mask],
-            })
-            vehicle_dets = DetectionsData({
-                "xyxy": detections.xyxy[vehicle_mask],
-                "confidence": detections.confidence[vehicle_mask],
-                "class_id": detections.class_id[vehicle_mask],
-            })
+            if is_detection_frame:
+                _t_yolo_t0 = time.perf_counter()
+                detections = detector.detect(frame)
+                last_yolo_ms = detector.last_yolo_ms
+                _t_yolo_ms = (time.perf_counter() - _t_yolo_t0) * 1000.0
 
-            # 3. Update independent ByteTrack trackers
-            _t_bt_t0 = time.perf_counter()
-            tracks = tracker.update(person_dets)
-            vehicle_tracks = car_tracker.update(vehicle_dets)
-            car_tracks = vehicle_tracks  # Backward-compatible alias
-            _t_bytetrack_ms = (time.perf_counter() - _t_bt_t0) * 1000
+                person_mask = detections.class_id == config.PERSON_CLASS_ID
+                vehicle_class_ids = getattr(config, "VEHICLE_CLASS_IDS", [2, 3, 5, 7])
+                vehicle_mask = np.isin(detections.class_id, vehicle_class_ids)
 
-            # 4. Target Matcher (Associates registered targets with active ByteTrack person tracks)
+                person_dets = DetectionsData({
+                    "xyxy": detections.xyxy[person_mask],
+                    "confidence": detections.confidence[person_mask],
+                    "class_id": detections.class_id[person_mask],
+                })
+                vehicle_dets = DetectionsData({
+                    "xyxy": detections.xyxy[vehicle_mask],
+                    "confidence": detections.confidence[vehicle_mask],
+                    "class_id": detections.class_id[vehicle_mask],
+                })
+
+                _t_bt_t0 = time.perf_counter()
+                tracks = tracker.update(person_dets)
+                vehicle_tracks = car_tracker.update(vehicle_dets)
+                _t_bytetrack_ms = (time.perf_counter() - _t_bt_t0) * 1000.0
+                last_detections = detections
+            else:
+                _t_yolo_ms = 0.0
+                last_yolo_ms = 0.0
+                detections = last_detections if last_detections is not None else sv.Detections.empty()
+
+                _t_bt_t0 = time.perf_counter()
+                tracks = tracker.predict()
+                vehicle_tracks = car_tracker.predict()
+                _t_bytetrack_ms = (time.perf_counter() - _t_bt_t0) * 1000.0
+
+            car_tracks = vehicle_tracks
+
+            # 4. Target Matcher (face recognition)
             target_matches = target_matcher.match_tracks(
                 frame=frame,
                 tracks=tracks,
-                frame_id=total_frames,
+                frame_id=curr_frame_id,
                 native_frame=frame,
             )
             track_states = target_matcher.get_all_track_states()
+            _t_face_acq_ms = target_matcher.last_timings.get("acq_ms", 0.0)
+            _t_face_det_ms = target_matcher.last_timings.get("det_ms", 0.0)
+            _t_face_emb_ms = target_matcher.last_timings.get("emb_ms", 0.0)
+            _t_face_match_ms = target_matcher.last_timings.get("match_ms", 0.0)
 
-            # 4.1 Vehicle License Plate Recognition (non-blocking: enqueues OCR job, returns cached results)
-            _t_plate_t0 = time.perf_counter()
+            # 4.1 Vehicle License Plate Recognition (non-blocking)
             plate_results = vehicle_plate_manager.process_vehicle_tracks(
                 frame=frame,
                 vehicle_tracks=vehicle_tracks,
-                frame_id=total_frames,
+                frame_id=curr_frame_id,
             )
-            _t_plate_ms = (time.perf_counter() - _t_plate_t0) * 1000
+            _t_plate_sched_ms = vehicle_plate_manager.last_timings.get("sched_ms", 0.0)
+            _t_plate_enq_ms = vehicle_plate_manager.last_timings.get("enq_ms", 0.0)
 
             # 5. Counting Zone / Vehicles in View Mode Determination
+            t_cnt0 = time.perf_counter()
             is_zone_on = shared_state.zone_enabled
             total_tracked_vehicles = (
                 len(vehicle_tracks.tracker_id)
@@ -292,10 +319,6 @@ def run_pipeline(
             )
 
             if not is_zone_on:
-                # Mode: Full View (Zone OFF)
-                # - detect + track + render all visible vehicles
-                # - VEHICLES IN VIEW = number of vehicle tracks actually rendered
-                # - no polygon filtering or polygon rendering
                 visible_vehicle_tracks = vehicle_tracks
                 vehicles_in_view = total_tracked_vehicles
                 vehicles_in_zone = 0
@@ -304,11 +327,6 @@ def run_pipeline(
                 active_zone_polygon = None
                 in_zone_ids = None
             else:
-                # Mode: Selected Zone (Zone ON)
-                # - YOLO + ByteTrack tracks all vehicles
-                # - polygon/ROI clearly displayed
-                # - only vehicles inside polygon are counted
-                # - all tracks rendered with [ZONE] / [OUT] visual distinction
                 visible_vehicle_tracks = vehicle_tracks
                 car_in_view, in_zone_ids = car_counter.update_and_get_visible_ids(
                     vehicle_tracks, frame_shape=frame.shape
@@ -318,9 +336,22 @@ def run_pipeline(
                 car_count_label = "VEHICLES IN ZONE"
                 zone_mode_str = "Selected Zone"
                 active_zone_polygon = config.ZONE_POLYGON
+            _t_count_ms = (time.perf_counter() - t_cnt0) * 1000.0
+
+            # 5.1 Business Events & Vehicle Passage Tracking
+            event_manager.process_vehicle_frame(
+                camera_id=active_cam.id if active_cam else "camera_01",
+                vehicle_tracks=visible_vehicle_tracks,
+                plate_results=plate_results,
+                in_zone_ids=in_zone_ids,
+                zone_id="zone_1" if is_zone_on else None,
+                frame=frame,
+            )
+            _t_event_build_ms = event_manager.last_event_build_ms
+            _t_db_work_ms = event_manager.last_db_work_ms
 
             # Measure pipeline latency prior to UI rendering
-            last_pipeline_ms = (time.perf_counter() - pipeline_t0) * 1000
+            last_pipeline_ms = (time.perf_counter() - t_loop_t0) * 1000.0
 
             total_frames += 1
             yolo_latencies.append(last_yolo_ms)
@@ -348,24 +379,27 @@ def run_pipeline(
                     track_states=track_states,
                     plate_results=plate_results,
                 )
-                _t_render_ms = (time.perf_counter() - _t_render_t0) * 1000
+                _t_render_ms = (time.perf_counter() - _t_render_t0) * 1000.0
 
                 # Single JPEG encode per new frame (re-used by all streaming clients)
                 _t_jpeg_t0 = time.perf_counter()
                 ret_enc, jpeg_buf = cv2.imencode(".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 jpeg_bytes = jpeg_buf.tobytes() if ret_enc else b""
-                _t_jpeg_ms = (time.perf_counter() - _t_jpeg_t0) * 1000
+                _t_jpeg_ms = (time.perf_counter() - _t_jpeg_t0) * 1000.0
 
                 # Process occupancy events asynchronously
                 event_manager.process_frame(
-                    camera_id=active_cam.id,
+                    camera_id=active_cam.id if active_cam else "camera_01",
                     people_count=last_people_in_view,
                     annotated_frame=annotated_frame,
                 )
-                _t_total_ms = (time.perf_counter() - pipeline_t0) * 1000
-                _t_effective_fps = 1000.0 / max(_t_total_ms, 1.0)
+                _t_event_build_ms += event_manager.last_event_build_ms
+                _t_db_work_ms += event_manager.last_db_work_ms
 
+                t_pub0 = time.perf_counter()
                 shared_state.update(
+                    frame_id=curr_frame_id,
+                    frame_pts=frame_pts,
                     latest_frame=frame,
                     annotated_frame=annotated_frame,
                     people_count=last_people_in_view,
@@ -394,8 +428,8 @@ def run_pipeline(
                     jitter_buffer_ms=camera_mgr.jitter_buffer_ms,
                     last_decoded_frame_age=camera_mgr.last_decoded_frame_age,
                     last_paced_frame_age=camera_mgr.last_paced_frame_age,
-                    camera_id=active_cam.id,
-                    camera_name=active_cam.name,
+                    camera_id=active_cam.id if active_cam else "camera_01",
+                    camera_name=active_cam.name if active_cam else "",
                     zone_enabled=is_zone_on,
                     zone_mode=zone_mode_str,
                     car_count_label=car_count_label,
@@ -403,23 +437,69 @@ def run_pipeline(
                     vehicles_in_zone=vehicles_in_zone,
                     jpeg_bytes=jpeg_bytes,
                 )
+                _t_state_pub_ms = (time.perf_counter() - t_pub0) * 1000.0
+
+                _t_total_loop_ms = (time.perf_counter() - t_loop_t0) * 1000.0
+                _t_effective_fps = 1000.0 / max(_t_total_loop_ms, 1.0)
+
+                # Total measured stages
+                _t_lock_wait_ms = 0.0
+                _t_queue_wait_ms = 0.0
+                measured_stages_sum = (
+                    _t_source_read_ms
+                    + _t_frame_prepare_ms
+                    + _t_yolo_ms
+                    + _t_bytetrack_ms
+                    + _t_face_acq_ms
+                    + _t_face_det_ms
+                    + _t_face_emb_ms
+                    + _t_face_match_ms
+                    + _t_plate_sched_ms
+                    + _t_plate_enq_ms
+                    + _t_count_ms
+                    + _t_event_build_ms
+                    + _t_db_work_ms
+                    + _t_render_ms
+                    + _t_jpeg_ms
+                    + _t_state_pub_ms
+                    + _t_lock_wait_ms
+                    + _t_queue_wait_ms
+                )
+                unaccounted_ms = max(0.0, _t_total_loop_ms - measured_stages_sum)
 
                 logger.info(
-                    "[STAGE_TIMING] frame=%d source_fps=%.1f decode_ms=%.1f yolo_ms=%.1f bytetrack_ms=%.1f plate_enqueue_ms=%.1f render_ms=%.1f jpeg_ms=%.1f total_main_ms=%.1f effective_fps=%.1f ocr_worker_ms=%.1f ocr_queue_size=%d dropped_frames=%d",
-                    total_frames,
-                    camera_mgr.stream_fps,
-                    _t_decode_ms,
+                    "[STAGE_TIMING] frame=%d total_loop_ms=%.1f unaccounted_ms=%.2f | read=%.1f (wait=%.1f) prep=%.1f yolo=%.1f bt=%.1f | face[acq=%.1f det=%.1f emb=%.1f mat=%.1f] | plate[sched=%.1f enq=%.1f] | count=%.1f ev=%.1f db=%.2f | render=%.1f jpeg=%.1f state=%.1f idle=%.1f | eff_fps=%.1f cadence=%s",
+                    curr_frame_id,
+                    _t_total_loop_ms,
+                    unaccounted_ms,
+                    _t_source_read_ms,
+                    _t_source_wait_ms,
+                    _t_frame_prepare_ms,
                     _t_yolo_ms,
                     _t_bytetrack_ms,
-                    _t_plate_ms,
+                    _t_face_acq_ms,
+                    _t_face_det_ms,
+                    _t_face_emb_ms,
+                    _t_face_match_ms,
+                    _t_plate_sched_ms,
+                    _t_plate_enq_ms,
+                    _t_count_ms,
+                    _t_event_build_ms,
+                    _t_db_work_ms,
                     _t_render_ms,
                     _t_jpeg_ms,
-                    _t_total_ms,
+                    _t_state_pub_ms,
+                    _t_loop_idle_ms,
                     _t_effective_fps,
-                    vehicle_plate_manager.last_ocr_worker_ms,
-                    vehicle_plate_manager.ocr_queue_size,
-                    camera_mgr.dropped_frames,
+                    "DETECT" if is_detection_frame else "PREDICT",
                 )
+
+                logger.info(
+                    "[FRAME_SYNC] frame_id=%d pts=%.3f det_frame=%d track_frame=%d count_frame=%d render_frame=%d state_frame=%d sync=OK",
+                    curr_frame_id, frame_pts, curr_frame_id, curr_frame_id, curr_frame_id, curr_frame_id, curr_frame_id
+                )
+
+            prev_loop_end = time.perf_counter()
 
             # 7. Measure Processing FPS & Output Realtime HUD Log
             fps_updated = fps_meter.tick()

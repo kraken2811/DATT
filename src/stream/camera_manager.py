@@ -45,6 +45,9 @@ class CameraManager:
         self._status: str = "STOPPED"  # "STOPPED", "RUNNING", "SWITCHING", "ERROR"
         self._error_reason: str = ""
         self._last_camera_started_at: float = 0.0
+        self.last_source_wait_ms: float = 0.0
+        self.last_read_sequence: int = 0
+        self.last_read_pts: float = 0.0
 
     @property
     def status(self) -> str:
@@ -504,8 +507,12 @@ class CameraManager:
             reader = self._reader
 
         # Release lock during read() to allow switch_camera to execute concurrently
+        t0 = time.perf_counter()
         try:
             frame = reader.read(timeout=timeout)
+            self.last_source_wait_ms = (time.perf_counter() - t0) * 1000.0
+            self.last_read_sequence = int(getattr(reader, "_last_read_sequence", getattr(reader, "last_read_sequence", 0)))
+            self.last_read_pts = float(getattr(reader, "_last_frame_timestamp", getattr(reader, "last_frame_time", time.time())))
             diag = reader.diagnostics() if hasattr(reader, "diagnostics") else {}
             ffmpeg_alive = diag.get("ffmpeg_alive")
             reader_alive = diag.get("reader_alive", reader.stream_alive)
@@ -549,6 +556,11 @@ class CameraManager:
                 logger.error("[DATT-THREAD ERROR] thread_name=camera-manager exception_type=%s exception_message=%s",
                              type(exc).__name__, exc, exc_info=True)
             return None
+
+    def read_with_meta(self, timeout: float = 2.0) -> tuple[np.ndarray | None, int, float]:
+        """Read latest frame with its monotonic sequence ID and capture PTS timestamp."""
+        frame = self.read(timeout=timeout)
+        return frame, self.last_read_sequence, self.last_read_pts
 
     def _stop_reader_internal(self) -> None:
         """Internal helper to stop reader without mutating external status."""

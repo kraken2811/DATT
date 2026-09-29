@@ -32,6 +32,7 @@ DEVICE: str = "cuda:0"
 
 # Execution providers for ONNX Runtime compatibility
 PROVIDERS: list[Any] = [
+    "CUDAExecutionProvider",
     ("DmlExecutionProvider", {"device_id": 0}),
     "CPUExecutionProvider",
 ]
