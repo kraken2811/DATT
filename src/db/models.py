@@ -8,6 +8,7 @@ from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, Meta
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
+from pgvector.sqlalchemy import Vector
 
 
 def utc_now() -> datetime:
@@ -78,6 +79,16 @@ class Target(Identity, Base):
     reference_metadata: Mapped[dict[str, Any]] = mapped_column(JSON_DATA, default=dict)
     image_path: Mapped[str | None] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+class TargetEmbedding(Identity, Base):
+    __tablename__ = "target_embeddings"
+    target_id: Mapped[UUID] = mapped_column(ForeignKey("targets.id", ondelete="CASCADE"), index=True)
+    embedding: Mapped[Any] = mapped_column(Vector(512), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255))
+    model_version: Mapped[str | None] = mapped_column(String(255))
+    source_image_path: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
 
 

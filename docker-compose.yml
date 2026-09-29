@@ -1,7 +1,7 @@
 name: datt
 services:
   postgres:
-    image: postgres:17-bookworm
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-datt}
       POSTGRES_DB: ${POSTGRES_DB:-datt}

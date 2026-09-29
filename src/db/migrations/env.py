@@ -4,6 +4,7 @@ import os
 from alembic import context
 from sqlalchemy import JSON
 from sqlalchemy.engine import make_url
+from pgvector.sqlalchemy import Vector
 
 from src.db.database import Database
 from src.db.models import Base, UTCDateTime
@@ -16,7 +17,23 @@ def render_item(kind, obj, autogen_context):
     if kind == "type" and isinstance(obj, JSON):
         autogen_context.imports.add("from sqlalchemy.dialects import postgresql")
         return "sa.JSON().with_variant(postgresql.JSONB(), 'postgresql')"
+    if kind == "type" and isinstance(obj, Vector):
+        autogen_context.imports.add("from pgvector.sqlalchemy import Vector")
+        return f"Vector({obj.dim})"
     return False
+
+
+def compare_type(context, inspected_column, metadata_column, inspected_type, metadata_type):
+    # SQLite has no native VECTOR type and reflects Vector(N) as NUMERIC(precision=N)
+    if isinstance(metadata_type, Vector) and context.connection and context.connection.dialect.name == "sqlite":
+        return False
+    return None
+
+def include_object(object, name, type_, reflected, compare_to):
+    if type_ == "table" and name == "alembic_version":
+        return False
+    return True
+
 
 config = context.config
 url = os.environ.get("DATT_DATABASE_URL") or config.get_main_option("sqlalchemy.url")
@@ -26,17 +43,26 @@ if context.is_offline_mode():
     parsed = make_url(url)
     if parsed.drivername in ("postgres", "postgresql"):
         parsed = parsed.set(drivername="postgresql+psycopg")
-    context.configure(url=parsed, target_metadata=target_metadata, literal_binds=True, compare_type=True)
+    context.configure(url=parsed, target_metadata=target_metadata, literal_binds=True, compare_type=compare_type, include_object=include_object)
     with context.begin_transaction():
         context.run_migrations()
 else:
     database = Database(url)
     try:
         with database.engine.connect() as connection:
+            kwargs = {}
+            if connection.dialect.name == "postgresql":
+                from sqlalchemy import text as sa_text
+                schema = connection.scalar(sa_text("SELECT current_schema()"))
+                if schema:
+                    kwargs["version_table_schema"] = schema
             context.configure(connection=connection, target_metadata=target_metadata,
-                              compare_type=True, render_item=render_item,
-                              render_as_batch=connection.dialect.name == "sqlite")
+                              compare_type=compare_type, render_item=render_item,
+                              include_object=include_object,
+                              render_as_batch=connection.dialect.name == "sqlite",
+                              **kwargs)
             with context.begin_transaction():
                 context.run_migrations()
+            connection.commit()
     finally:
         database.dispose()

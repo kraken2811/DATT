@@ -1,5 +1,5 @@
 FROM python:3.11-slim-bookworm
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 ALEMBIC_CONFIG=/workspace/src/db/alembic.ini
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 ALEMBIC_CONFIG=/workspace/src/db/alembic.ini PYTHONPATH=/workspace
 ENV PYTEST_ADDOPTS="-o cache_dir=/tmp/pytest_cache"
 WORKDIR /workspace
 COPY src/db/requirements.txt src/db/requirements-dev.txt /tmp/
