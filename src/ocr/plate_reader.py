@@ -117,6 +117,7 @@ class LicensePlateReader:
         self._reader = None
         self._reader_initialized = False
         self._reader_error: str | None = None
+        self._device: str = "CPU"
         self._infer_lock = threading.Lock()
         self._ocr_context = threading.local()
 
@@ -135,6 +136,11 @@ class LicensePlateReader:
         else:
             logger.info("[PLATE_MODEL] PlateDetector unavailable – will use ROI heuristic fallback.")
 
+    @property
+    def device(self) -> str:
+        """Current execution device for EasyOCR ('CUDA' or 'CPU')."""
+        return self._device
+
     @classmethod
     def get_instance(cls) -> "LicensePlateReader":
         """Thread-safe singleton accessor."""
@@ -144,7 +150,7 @@ class LicensePlateReader:
             return cls._instance
 
     def initialize(self) -> bool:
-        """Initialize EasyOCR reader with download disabled if models pre-exist, or standard."""
+        """Initialize EasyOCR reader with GPU acceleration when CUDA is available, with safe CPU fallback."""
         with self._infer_lock:
             if self._reader_initialized:
                 return True
@@ -153,15 +159,50 @@ class LicensePlateReader:
 
             try:
                 import easyocr
+            except ImportError as exc:
+                self._reader_error = str(exc)
+                logger.warning("[OCR] Could not import easyocr: %s. Using classical CV fallback.", exc)
+                return False
 
-                logger.info("[OCR] Initializing EasyOCR reader (CPU mode)...")
-                # Try loading without downloading first, fallback to standard
+            # Safe CUDA availability detection
+            use_gpu = False
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    use_gpu = True
+            except Exception as torch_exc:
+                logger.debug("[OCR] PyTorch CUDA check failed: %s", torch_exc)
+                use_gpu = False
+
+            if use_gpu:
+                logger.info("[OCR] Initializing EasyOCR reader (GPU mode)...")
+                try:
+                    try:
+                        self._reader = easyocr.Reader(["en"], gpu=True, download_enabled=False)
+                    except Exception:
+                        self._reader = easyocr.Reader(["en"], gpu=True, download_enabled=True)
+
+                    self._device = "CUDA"
+                    self._reader_initialized = True
+                    logger.info("[OCR] EasyOCR device=CUDA")
+                    logger.info("[OCR] EasyOCR reader successfully initialized.")
+                    return True
+                except Exception as gpu_exc:
+                    logger.warning("[OCR] GPU initialization failed: %s", gpu_exc)
+                    logger.warning("[OCR] GPU initialization failed, falling back to CPU...")
+                    use_gpu = False
+
+            # CPU mode (fallback or CUDA unavailable)
+            logger.info("[OCR] Initializing EasyOCR reader (CPU mode)...")
+            try:
                 try:
                     self._reader = easyocr.Reader(["en"], gpu=False, download_enabled=False)
                 except Exception:
                     self._reader = easyocr.Reader(["en"], gpu=False, download_enabled=True)
 
+                self._device = "CPU"
                 self._reader_initialized = True
+                logger.info("[OCR] EasyOCR device=CPU")
                 logger.info("[OCR] EasyOCR reader successfully initialized.")
                 return True
             except Exception as exc:

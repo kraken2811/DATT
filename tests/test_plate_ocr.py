@@ -602,6 +602,73 @@ class TestPlateOCR(unittest.TestCase):
         finally:
             ocr_logger.removeHandler(handler)
 
+    def test_easyocr_gpu_initialization_when_cuda_available(self) -> None:
+        """CUDA available -> EasyOCR initialized with GPU enabled (gpu=True)."""
+        reader = LicensePlateReader(min_confidence=0.30)
+        with patch("torch.cuda.is_available", return_value=True):
+            with patch("easyocr.Reader") as mock_easyocr_cls:
+                mock_easyocr_cls.return_value = MagicMock()
+                with self.assertLogs("datt.ocr.plate_reader", level="INFO") as log_capture:
+                    res = reader.initialize()
+
+        self.assertTrue(res)
+        self.assertEqual(reader.device, "CUDA")
+        mock_easyocr_cls.assert_called_with(["en"], gpu=True, download_enabled=False)
+        output = "\n".join(log_capture.output)
+        self.assertIn("[OCR] Initializing EasyOCR reader (GPU mode)...", output)
+        self.assertIn("[OCR] EasyOCR device=CUDA", output)
+
+    def test_easyocr_cpu_fallback_when_cuda_unavailable(self) -> None:
+        """CUDA unavailable -> CPU fallback works safely (gpu=False)."""
+        reader = LicensePlateReader(min_confidence=0.30)
+        with patch("torch.cuda.is_available", return_value=False):
+            with patch("easyocr.Reader") as mock_easyocr_cls:
+                mock_easyocr_cls.return_value = MagicMock()
+                with self.assertLogs("datt.ocr.plate_reader", level="INFO") as log_capture:
+                    res = reader.initialize()
+
+        self.assertTrue(res)
+        self.assertEqual(reader.device, "CPU")
+        mock_easyocr_cls.assert_called_with(["en"], gpu=False, download_enabled=False)
+        output = "\n".join(log_capture.output)
+        self.assertIn("[OCR] Initializing EasyOCR reader (CPU mode)...", output)
+        self.assertIn("[OCR] EasyOCR device=CPU", output)
+
+    def test_easyocr_cpu_fallback_when_gpu_init_fails(self) -> None:
+        """GPU initialization failure -> falls back to CPU safely with warning."""
+        reader = LicensePlateReader(min_confidence=0.30)
+
+        def side_effect(*args, **kwargs):
+            if kwargs.get("gpu", False):
+                raise RuntimeError("CUDA out of memory / driver failure")
+            return MagicMock()
+
+        with patch("torch.cuda.is_available", return_value=True):
+            with patch("easyocr.Reader", side_effect=side_effect) as mock_easyocr_cls:
+                with self.assertLogs("datt.ocr.plate_reader", level="INFO") as log_capture:
+                    res = reader.initialize()
+
+        self.assertTrue(res)
+        self.assertEqual(reader.device, "CPU")
+        output = "\n".join(log_capture.output)
+        self.assertIn("[OCR] Initializing EasyOCR reader (GPU mode)...", output)
+        self.assertIn("[OCR] GPU initialization failed, falling back to CPU...", output)
+        self.assertIn("[OCR] Initializing EasyOCR reader (CPU mode)...", output)
+        self.assertIn("[OCR] EasyOCR device=CPU", output)
+
+    def test_easyocr_reader_initialized_only_once(self) -> None:
+        """Reader is initialized only once (singleton / idempotent)."""
+        reader = LicensePlateReader(min_confidence=0.30)
+        with patch("torch.cuda.is_available", return_value=False):
+            with patch("easyocr.Reader") as mock_easyocr_cls:
+                mock_easyocr_cls.return_value = MagicMock()
+                res1 = reader.initialize()
+                res2 = reader.initialize()
+
+        self.assertTrue(res1)
+        self.assertTrue(res2)
+        mock_easyocr_cls.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

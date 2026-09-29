@@ -474,9 +474,9 @@ class FaceEmbedder:
         sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
         # Quality Gate:
-        # <32 px  -> FACE_TOO_SMALL (protects against noise/blobs)
-        # >=32 px -> CAN_EMBED if confidence and sharpness satisfy quality floor
-        if face_size < 32.0:
+        # <28 px  -> FACE_TOO_SMALL (protects against noise/blobs)
+        # >=28 px -> CAN_EMBED if confidence and sharpness satisfy quality floor
+        if face_size < 28.0:
             gate_decision = "FACE_TOO_SMALL"
         else:
             if conf < 0.30 or sharpness < 12.0:
@@ -485,9 +485,9 @@ class FaceEmbedder:
                 gate_decision = "CAN_EMBED"
 
         # Composite quality score for BestFace replacement
-        # Rewards larger face size, higher sharpness, good confidence, and normal lighting
+        # Rewards larger face size (soft signal), higher sharpness, good confidence, and normal lighting
         quality_score = (
-            face_size * 1.0
+            min(face_size, 120.0) * 0.8
             + min(sharpness, 200.0) * 0.3
             + conf * 40.0
             + (10.0 if illumination == "NORMAL" else 0.0)
