@@ -52,6 +52,13 @@ class PlateCandidate:
     preprocessed_crop: np.ndarray
     sharpness: float
     quality_score: float
+    raw_text: str = ""
+    normalized_text: str = ""
+
+    def __post_init__(self):
+        if not self.raw_text:
+            self.raw_text = self.plate_text
+        self.normalized_text = normalize_plate_text(self.plate_text)
 
 
 LicensePlateCandidate = PlateCandidate
@@ -70,34 +77,33 @@ def clean_plate_text(raw_text: str) -> str:
     # Normalize slash, newline, and spaces between plate segments to hyphen
     cleaned = re.sub(r"[\s/]+", "-", cleaned)
     # Remove all characters except alphanumeric, hyphen, dot
-    cleaned = re.sub(r"[^A-Z0-9\-\.]", "", cleaned)
+    cleaned = cleaned  # Preserve unknown characters so validation can reject noise.
     # Collapse multiple consecutive hyphens or dots
     cleaned = re.sub(r"[\-\.]{2,}", "-", cleaned)
     # Strip leading/trailing hyphens or dots
     cleaned = cleaned.strip("-.")
 
-    # Vietnamese plate prefix heuristic: first 2 characters are province digits
-    # Correct common OCR misclassification of 'O'/'Q' for '0' in the first 2 positions
-    if len(cleaned) >= 3 and cleaned[0] in "0123456789" and cleaned[1] in "OQ":
-        cleaned = cleaned[0] + "0" + cleaned[2:]
-    elif len(cleaned) >= 3 and cleaned[0] in "OQ" and cleaned[1] in "0123456789":
-        cleaned = "0" + cleaned[1:]
-
     return cleaned
 
 
+def normalize_plate_text(raw_text: str) -> str:
+    """Remove presentation separators only. Never guess O/0, I/1, B/8, etc."""
+    return re.sub(r"[\s./-]", "", raw_text.upper())
+
+
 def is_valid_plate_format(text: str) -> bool:
-    """Validate whether cleaned text exhibits reasonable license plate characteristics."""
-    if len(text) < 3 or len(text) > 14:
+    """Conservative ordinary VN civilian plates, including legacy 4-digit plates.
+
+    Special diplomatic/military/temporary formats are intentionally unsupported.
+    Recognizes car series, legacy motorcycle letter+digit, and new two-letter series.
+    """
+    if not text or re.search(r"[^A-Za-z0-9\s./-]", text):
         return False
-    # Count alphanumeric characters
-    alnum_count = sum(1 for c in text if c.isalnum())
-    if alnum_count < 3:
-        return False
-    # Require at least one digit and at least one letter (most plates world-wide & VN/US)
-    has_digit = any(c.isdigit() for c in text)
-    has_alpha = any(c.isalpha() for c in text)
-    return has_digit or (has_alpha and alnum_count >= 4)
+    compact = normalize_plate_text(text)
+    provinces = {11, 12, *range(14, 30), *range(30, 42), 43, *range(47, 87),
+                 88, 89, 90, 92, 93, 94, 95, 97, 98, 99}
+    match = re.fullmatch(r"([0-9]{2})([ABCDEFGHKLMNPRSTUVXYZ](?:[ABCDEFGHKLMNPRSTUVXYZ]|[1-9])?)([0-9]{4,5})", compact)
+    return bool(match and int(match[1]) in provinces and int(match[3]) != 0)
 
 
 class LicensePlateReader:
@@ -111,7 +117,9 @@ class LicensePlateReader:
         self._reader = None
         self._reader_initialized = False
         self._reader_error: str | None = None
+        self._device: str = "CPU"
         self._infer_lock = threading.Lock()
+        self._ocr_context = threading.local()
 
         # Bounded debug sample tracking in scratch/plate_debug/
         self._debug_dir = Path("scratch/plate_debug")
@@ -128,6 +136,11 @@ class LicensePlateReader:
         else:
             logger.info("[PLATE_MODEL] PlateDetector unavailable – will use ROI heuristic fallback.")
 
+    @property
+    def device(self) -> str:
+        """Current execution device for EasyOCR ('CUDA' or 'CPU')."""
+        return self._device
+
     @classmethod
     def get_instance(cls) -> "LicensePlateReader":
         """Thread-safe singleton accessor."""
@@ -137,7 +150,7 @@ class LicensePlateReader:
             return cls._instance
 
     def initialize(self) -> bool:
-        """Initialize EasyOCR reader with download disabled if models pre-exist, or standard."""
+        """Initialize EasyOCR reader with GPU acceleration when CUDA is available, with safe CPU fallback."""
         with self._infer_lock:
             if self._reader_initialized:
                 return True
@@ -146,15 +159,50 @@ class LicensePlateReader:
 
             try:
                 import easyocr
+            except ImportError as exc:
+                self._reader_error = str(exc)
+                logger.warning("[OCR] Could not import easyocr: %s. Using classical CV fallback.", exc)
+                return False
 
-                logger.info("[OCR] Initializing EasyOCR reader (CPU mode)...")
-                # Try loading without downloading first, fallback to standard
+            # Safe CUDA availability detection
+            use_gpu = False
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    use_gpu = True
+            except Exception as torch_exc:
+                logger.debug("[OCR] PyTorch CUDA check failed: %s", torch_exc)
+                use_gpu = False
+
+            if use_gpu:
+                logger.info("[OCR] Initializing EasyOCR reader (GPU mode)...")
+                try:
+                    try:
+                        self._reader = easyocr.Reader(["en"], gpu=True, download_enabled=False)
+                    except Exception:
+                        self._reader = easyocr.Reader(["en"], gpu=True, download_enabled=True)
+
+                    self._device = "CUDA"
+                    self._reader_initialized = True
+                    logger.info("[OCR] EasyOCR device=CUDA")
+                    logger.info("[OCR] EasyOCR reader successfully initialized.")
+                    return True
+                except Exception as gpu_exc:
+                    logger.warning("[OCR] GPU initialization failed: %s", gpu_exc)
+                    logger.warning("[OCR] GPU initialization failed, falling back to CPU...")
+                    use_gpu = False
+
+            # CPU mode (fallback or CUDA unavailable)
+            logger.info("[OCR] Initializing EasyOCR reader (CPU mode)...")
+            try:
                 try:
                     self._reader = easyocr.Reader(["en"], gpu=False, download_enabled=False)
                 except Exception:
                     self._reader = easyocr.Reader(["en"], gpu=False, download_enabled=True)
 
+                self._device = "CPU"
                 self._reader_initialized = True
+                logger.info("[OCR] EasyOCR device=CPU")
                 logger.info("[OCR] EasyOCR reader successfully initialized.")
                 return True
             except Exception as exc:
@@ -335,6 +383,7 @@ class LicensePlateReader:
 
         Handles both 1-line plates and stacked 2-tier plates.
         """
+        self._ocr_context.parsed_raw = ""
         if not ocr_results:
             return "", 0.0
 
@@ -347,11 +396,12 @@ class LicensePlateReader:
             cxs = [pt[0] for pt in poly]
             cy = sum(cys) / len(cys)
             cx = sum(cxs) / len(cxs)
-            boxes.append({"cleaned": cleaned, "conf": float(conf), "cx": cx, "cy": cy})
+            boxes.append({"raw": raw_text, "cleaned": cleaned, "conf": float(conf), "cx": cx, "cy": cy})
 
         if not boxes:
             return "", 0.0
         if len(boxes) == 1:
+            self._ocr_context.parsed_raw = boxes[0]["raw"]
             return boxes[0]["cleaned"], boxes[0]["conf"]
 
         # Check vertical separation for 2-tier stacked plate
@@ -359,12 +409,14 @@ class LicensePlateReader:
         max_dy = by_y[-1]["cy"] - by_y[0]["cy"]
         if max_dy > 12:
             # 2-Tier plate (top line to bottom line)
+            self._ocr_context.parsed_raw = "\n".join(b["raw"] for b in by_y)
             merged = clean_plate_text("-".join(b["cleaned"] for b in by_y))
             avg_conf = sum(b["conf"] for b in by_y) / len(by_y)
             return merged, round(avg_conf, 3)
         else:
             # Horizontal boxes
             by_x = sorted(boxes, key=lambda b: b["cx"])
+            self._ocr_context.parsed_raw = " ".join(b["raw"] for b in by_x)
             merged = clean_plate_text("-".join(b["cleaned"] for b in by_x))
             avg_conf = sum(b["conf"] for b in by_x) / len(by_x)
             return merged, round(avg_conf, 3)
@@ -393,6 +445,7 @@ class LicensePlateReader:
         if self._reader is None:
             return default_vname, baseline_text, baseline_conf, default_img
 
+        self._ocr_context.selected_raw = baseline_text
         candidates = []
 
         # Baseline evaluation (from initial vehicle detection pass)
@@ -406,6 +459,7 @@ class LicensePlateReader:
             candidates.append({
                 "variant": "ENHANCED_GRAY",
                 "text": cleaned_base,
+                "raw": baseline_text,
                 "conf": baseline_conf,
                 "score": base_score,
                 "img": default_img,
@@ -437,6 +491,12 @@ class LicensePlateReader:
                 continue
 
             is_valid = is_valid_plate_format(text)
+            raw = getattr(self._ocr_context, "parsed_raw", text)
+            observation = {"raw_text": raw, "normalized_text": normalize_plate_text(text),
+                           "confidence": conf, "valid": is_valid, "variant": vname}
+            if hasattr(self._ocr_context, "observations"):
+                self._ocr_context.observations.append(observation)
+            logger.info("[PLATE_OCR_RAW] track=%s frame=%s observation=%s", track_id, frame_id, observation)
             alnum_cnt = sum(1 for c in text if c.isalnum())
             comp = min(alnum_cnt / 8.0, 1.0)
             bonus = 0.5 if (any(c.isalpha() for c in text) and any(c.isdigit() for c in text) and alnum_cnt >= 6) else 0.0
@@ -450,6 +510,7 @@ class LicensePlateReader:
             cand = {
                 "variant": vname,
                 "text": text,
+                "raw": getattr(self._ocr_context, "parsed_raw", text),
                 "conf": conf,
                 "score": score,
                 "img": img,
@@ -468,6 +529,7 @@ class LicensePlateReader:
                     "[PLATE_OCR] track_id=%d frame_id=%d CASCADE SUCCESS on variant=%s (text='%s', conf=%.3f) -> stopping cascade early",
                     track_id, frame_id, vname, text, conf,
                 )
+                self._ocr_context.selected_raw = cand["raw"]
                 return vname, text, conf, img
 
         if not candidates:
@@ -480,6 +542,7 @@ class LicensePlateReader:
             "[PLATE_OCR] track_id=%d frame_id=%d WINNER variant=%s text='%s' conf=%.3f score=%.2f",
             track_id, frame_id, winner["variant"], winner["text"], winner["conf"], winner["score"],
         )
+        self._ocr_context.selected_raw = winner["raw"]
         return winner["variant"], winner["text"], winner["conf"], winner["img"]
 
     def _save_debug_sample(
@@ -653,6 +716,7 @@ class LicensePlateReader:
 
                 candidates.append(PlateCandidate(
                     plate_text=merged_text,
+                    raw_text=f"{box_A['raw_text']}\n{box_B['raw_text']}",
                     confidence=round(comb_conf, 3),
                     bbox_vehicle=(bx1, by1, bx2, by2),
                     bbox_native=cand_bbox_native,
@@ -703,6 +767,7 @@ class LicensePlateReader:
 
                 candidates.append(PlateCandidate(
                     plate_text=merged_text,
+                    raw_text=f"{box_A['raw_text']}\n{box_B['raw_text']}",
                     confidence=round(comb_conf, 3),
                     bbox_vehicle=(bx1, by1, bx2, by2),
                     bbox_native=(int(round(vx1 + bx1)), int(round(vy1 + by1)), int(round(vx1 + bx2)), int(round(vy1 + by2))),
@@ -743,6 +808,7 @@ class LicensePlateReader:
 
             candidates.append(PlateCandidate(
                 plate_text=box["cleaned"],
+                raw_text=box["raw_text"],
                 confidence=round(box["conf"], 3),
                 bbox_vehicle=(bx1, by1, bx2, by2),
                 bbox_native=(int(round(vx1 + bx1)), int(round(vy1 + by1)), int(round(vx1 + bx2)), int(round(vy1 + by2))),
@@ -862,6 +928,7 @@ class LicensePlateReader:
         Returns:
             PlateCandidate if a plausible plate is recognized, else None.
         """
+        self._ocr_context.observations = []
         if vehicle_crop is None or vehicle_crop.size == 0:
             return None
 
@@ -968,6 +1035,7 @@ class LicensePlateReader:
 
                     best_cand = PlateCandidate(
                         plate_text=v_text,
+                        raw_text=getattr(self._ocr_context, "selected_raw", v_text),
                         confidence=round(v_conf, 3),
                         bbox_vehicle=(px1, py1, px2, py2),
                         bbox_native=(
@@ -1047,6 +1115,8 @@ class LicensePlateReader:
                 variant_selected = v_name
                 if v_text:
                     best_cand.plate_text = v_text
+                    best_cand.raw_text = getattr(self._ocr_context, "selected_raw", v_text)
+                    best_cand.normalized_text = normalize_plate_text(v_text)
                     best_cand.confidence = round(v_conf, 3)
                     best_cand.preprocessed_crop = v_img
             else:
@@ -1072,6 +1142,7 @@ class LicensePlateReader:
                     variant_selected = v_name
                     best_cand = PlateCandidate(
                         plate_text=v_text,
+                        raw_text=getattr(self._ocr_context, "selected_raw", v_text),
                         confidence=round(v_conf, 3),
                         bbox_vehicle=(0, 0, vw, vh),
                         bbox_native=(int(round(vx1)), int(round(vy1)), int(round(vx2)), int(round(vy2))),
