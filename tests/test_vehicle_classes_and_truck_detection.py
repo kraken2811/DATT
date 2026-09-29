@@ -137,7 +137,7 @@ class TestVehicleClassesAndTruckDetection(unittest.TestCase):
             self.assertIn(42, results)
             self.assertEqual(results[42].vehicle_class, "truck")
             self.assertEqual(results[42].candidate_text, "29C88888")
-            self.assertEqual(results[42].status, "CHECKING")
+            self.assertIn(results[42].status, ("CHECKING", "PROVISIONAL"))
 
     def test_5_motorcycle_eligible_for_plate_ocr(self) -> None:
         """Motorcycle (3) is tracked with [VEHICLE_DET] logged, and eligible for plate OCR."""

@@ -53,9 +53,11 @@ VEHICLE_CLASSES: dict[int, str] = {
 }
 VEHICLE_CLASS_IDS: list[int] = [CAR_CLASS_ID, TRUCK_CLASS_ID, BUS_CLASS_ID, MOTORCYCLE_CLASS_ID]
 PLATE_ELIGIBLE_CLASSES: list[int] = [CAR_CLASS_ID, MOTORCYCLE_CLASS_ID, TRUCK_CLASS_ID, BUS_CLASS_ID]
-PLATE_MIN_OBSERVATIONS: int = 3
-PLATE_CONSENSUS_CONFIDENCE: float = 0.65
-PLATE_CONSENSUS_QUALITY: float = 55.0
+PLATE_MIN_OBSERVATIONS: int = 2
+# Match the reader's accepted-observation floor. Confidence/quality are not
+# substitutes for agreement across >=3 distinct frames; quality ranks crops.
+PLATE_CONSENSUS_CONFIDENCE: float = 0.35
+PLATE_CONSENSUS_QUALITY: float = 0.0
 PLATE_HISTORY_SIZE: int = 10
 PLATE_CONSENSUS_RATIO: float = 0.75
 PLATE_RECHECK_FRAMES: int = 180

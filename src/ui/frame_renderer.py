@@ -85,7 +85,7 @@ def get_vehicle_track_label(
     """
     has_confirmed = (
         bool(plate_text)
-        and (plate_status == "RECOGNIZED" or (not plate_status and bool(plate_text)))
+        and (plate_status in ("PROVISIONAL", "CONFIRMED", "RECOGNIZED") or (not plate_status and bool(plate_text)))
     )
 
     if has_confirmed:

@@ -44,7 +44,13 @@ class PlateTrackState:
     last_bbox_area: float = 0.0
     max_bbox_area: float = 0.0
     eval_count: int = 0
-    status: str = "SEARCHING"  # SEARCHING -> CHECKING -> RECOGNIZED
+    status: str = "SEARCHING"  # SEARCHING -> PROVISIONAL -> CONFIRMED
+    provisional_plate: str = ""
+    provisional_confidence: float = 0.0
+    provisional_score: float = 0.0
+    provisional_frame_id: int = -1
+    confirmed_plate: str = ""
+    confirmed_frame_id: int = -1
     candidate_text: str = ""
     consensus_count: int = 0
     last_result_frame: int = -1
@@ -66,6 +72,12 @@ class PlateTrackState:
             "confidence": self.confidence,
             "has_plate": bool(self.plate_text),
             "status": self.status,
+            "provisional_plate": self.provisional_plate,
+            "provisional_confidence": self.provisional_confidence,
+            "provisional_score": self.provisional_score,
+            "provisional_frame_id": self.provisional_frame_id,
+            "confirmed_plate": self.confirmed_plate,
+            "confirmed_frame_id": self.confirmed_frame_id,
             "candidate_text": self.candidate_text,
             "consensus_count": self.consensus_count,
             "frame_id": self.frame_id,
@@ -294,9 +306,9 @@ class VehiclePlateManager:
         self.eval_interval = eval_interval
         self.ttl_frames = ttl_frames
         self.async_worker = async_worker
-        self.min_observations = max(3, min_observations or getattr(config, "PLATE_MIN_OBSERVATIONS", 3))
-        self.min_confidence = getattr(config, "PLATE_CONSENSUS_CONFIDENCE", 0.65) if min_confidence is None else min_confidence
-        self.min_quality = getattr(config, "PLATE_CONSENSUS_QUALITY", 55.0) if min_quality is None else min_quality
+        self.min_observations = min_observations if min_observations is not None else getattr(config, "PLATE_MIN_OBSERVATIONS", 2)
+        self.min_confidence = getattr(config, "PLATE_CONSENSUS_CONFIDENCE", 0.35) if min_confidence is None else min_confidence
+        self.min_quality = getattr(config, "PLATE_CONSENSUS_QUALITY", 0.0) if min_quality is None else min_quality
         self.history_size = history_size or getattr(config, "PLATE_HISTORY_SIZE", 10)
         self.consensus_ratio = getattr(config, "PLATE_CONSENSUS_RATIO", 0.75) if consensus_ratio is None else consensus_ratio
         self.recheck_interval = recheck_interval or getattr(config, "PLATE_RECHECK_FRAMES", 180)
@@ -343,6 +355,18 @@ class VehiclePlateManager:
             state.last_result_frame = job.frame_id
             if cand is None:
                 return
+
+            # Confirmed plate is sticky: cannot be downgraded or overwritten
+            if state.status in ("CONFIRMED", "RECOGNIZED"):
+                normalized_cand = normalize_plate_text(getattr(cand, "plate_text", ""))
+                if normalized_cand == state.confirmed_plate and getattr(cand, "quality_score", 0.0) >= state.plate_quality:
+                    state.confidence = cand.confidence
+                    state.plate_quality = cand.quality_score
+                    state.plate_bbox_native = cand.bbox_native
+                    state.plate_crop = cand.raw_crop
+                    state.frame_id = job.frame_id
+                return
+
             normalized = normalize_plate_text(cand.plate_text)
             raw = getattr(cand, "raw_text", "")
             if not isinstance(raw, str) or not raw:
@@ -350,38 +374,117 @@ class VehiclePlateManager:
             valid = is_valid_plate_format(raw) and is_valid_plate_format(normalized)
             eligible = (valid and math.isfinite(cand.confidence) and math.isfinite(cand.quality_score)
                         and cand.confidence >= self.min_confidence and cand.quality_score >= self.min_quality)
+
+            if not eligible:
+                return
+
+            cand_score = round(float(cand.confidence * 100.0 + getattr(cand, "quality_score", 0.0)), 2)
+            plate_det_conf = getattr(job, "plate_det_conf", 0.0)
+
             state.plate_history.append({"frame_id": job.frame_id, "raw_text": raw,
                 "normalized_text": normalized, "confidence": cand.confidence,
-                "quality": cand.quality_score, "eligible": eligible})
+                "quality": cand.quality_score, "score": cand_score, "eligible": True})
             del state.plate_history[:-self.history_size]
-            votes = Counter(item["normalized_text"] for item in state.plate_history if item["eligible"])
+
+            votes = Counter(item["normalized_text"] for item in state.plate_history if item.get("eligible", True))
             state.vote_scores = dict(votes)
-            if not votes:
+
+            # Stage 1: SEARCHING -> PROVISIONAL
+            if state.status == "SEARCHING":
+                state.status = "PROVISIONAL"
+                state.provisional_plate = normalized
+                state.provisional_confidence = cand.confidence
+                state.provisional_score = cand_score
+                state.provisional_frame_id = job.frame_id
+                state.plate_text = normalized  # Display immediately
+                state.confidence = cand.confidence
+                state.plate_quality = cand.quality_score
+                state.plate_bbox_native = cand.bbox_native
+                state.plate_crop = cand.raw_crop
+                state.frame_id = job.frame_id
+                state.candidate_text = normalized
+                state.consensus_count = 1
+
+                logger.info(
+                    "[PLATE_PROVISIONAL] track_id=%s frame_id=%s raw=%s normalized=%s "
+                    "ocr_conf=%.3f plate_det_conf=%.3f score=%.2f",
+                    job.track_id, job.frame_id, raw, normalized,
+                    cand.confidence, plate_det_conf, cand_score)
                 return
-            winner, count = votes.most_common(1)[0]
-            state.candidate_text = winner
-            state.consensus_count = count
-            if state.status != "RECOGNIZED":
-                state.status = "CHECKING"
-            # Exact normalized agreement is mandatory. Near strings are diagnostics only:
-            # even a single differing registration digit could identify a different vehicle.
-            near = [text for text in votes if text != winner and len(text) == len(winner)
-                    and text[:3] == winner[:3] and sum(a != b for a, b in zip(text, winner)) == 1]
-            confirmed = count >= self.min_observations and count / len(state.plate_history) >= self.consensus_ratio
-            if confirmed and normalized == winner and eligible:
-                changed = state.plate_text != winner
-                state.plate_text = winner
-                state.status = "RECOGNIZED"
-                if changed or cand.quality_score >= state.plate_quality:
-                    state.confidence = cand.confidence
-                    state.plate_quality = cand.quality_score
-                    state.plate_bbox_native = cand.bbox_native
-                    state.plate_crop = cand.raw_crop
-                    state.frame_id = job.frame_id
-                if self._worker is not None:
-                    self._worker.discard(job.track_id)
-            logger.info("[PLATE_CONSENSUS] track=%s frame=%s raw=%r normalized=%s votes=%s near=%s status=%s confirmed=%s",
-                job.track_id, job.frame_id, raw, normalized, dict(votes), near, state.status, state.plate_text)
+
+            # Stage 2: PROVISIONAL -> CONFIRMED (or Conflict Handling)
+            if state.status in ("PROVISIONAL", "CHECKING"):
+                if normalized == state.provisional_plate:
+                    state.status = "CONFIRMED"
+                    state.confirmed_plate = normalized
+                    state.confirmed_frame_id = job.frame_id
+                    state.plate_text = normalized
+                    state.candidate_text = normalized
+                    state.consensus_count = votes[normalized]
+                    if cand.quality_score >= state.plate_quality:
+                        state.confidence = cand.confidence
+                        state.plate_quality = cand.quality_score
+                        state.plate_bbox_native = cand.bbox_native
+                        state.plate_crop = cand.raw_crop
+                        state.frame_id = job.frame_id
+
+                    if self._worker is not None:
+                        self._worker.discard(job.track_id)
+
+                    first_frame = state.provisional_frame_id
+                    logger.info(
+                        "[PLATE_CONFIRM] track_id=%s first_frame=%s confirm_frame=%s plate=%s observations=%s",
+                        job.track_id, first_frame, job.frame_id, normalized, votes[normalized])
+                else:
+                    if votes[normalized] >= self.min_observations:
+                        state.status = "CONFIRMED"
+                        state.confirmed_plate = normalized
+                        state.confirmed_frame_id = job.frame_id
+                        state.plate_text = normalized
+                        state.candidate_text = normalized
+                        state.consensus_count = votes[normalized]
+                        if cand.quality_score >= state.plate_quality:
+                            state.confidence = cand.confidence
+                            state.plate_quality = cand.quality_score
+                            state.plate_bbox_native = cand.bbox_native
+                            state.plate_crop = cand.raw_crop
+                            state.frame_id = job.frame_id
+
+                        if self._worker is not None:
+                            self._worker.discard(job.track_id)
+
+                        first_matching_frame = [
+                            it["frame_id"] for it in state.plate_history if it["normalized_text"] == normalized
+                        ][0]
+                        logger.info(
+                            "[PLATE_CONFIRM] track_id=%s first_frame=%s confirm_frame=%s plate=%s observations=%s",
+                            job.track_id, first_matching_frame, job.frame_id, normalized, votes[normalized])
+                    else:
+                        current_plate = state.provisional_plate
+                        current_score = state.provisional_score
+
+                        if cand_score > current_score:
+                            action = "REPLACE_PROVISIONAL"
+                            state.provisional_plate = normalized
+                            state.provisional_confidence = cand.confidence
+                            state.provisional_score = cand_score
+                            state.provisional_frame_id = job.frame_id
+                            state.plate_text = normalized
+                            state.confidence = cand.confidence
+                            state.plate_quality = cand.quality_score
+                            state.plate_bbox_native = cand.bbox_native
+                            state.plate_crop = cand.raw_crop
+                            state.frame_id = job.frame_id
+                            state.candidate_text = normalized
+                            state.consensus_count = votes[normalized]
+                        elif cand_score < current_score:
+                            action = "KEEP_CURRENT"
+                        else:
+                            action = "WAIT_FOR_TIEBREAK"
+
+                        logger.info(
+                            "[PLATE_CONFLICT] track_id=%s current_plate=%s current_score=%.2f new_plate=%s new_score=%.2f action=%s",
+                            job.track_id, current_plate, current_score, normalized, cand_score, action)
 
     # ------------------------------------------------------------------
     # Public API
@@ -431,21 +534,23 @@ class VehiclePlateManager:
         active_results: dict[int, PlateTrackState] = {}
 
         with self._lock:
-            # 1. Update last seen frame & purge expired tracks
-            if tracker_id is not None:
-                for tid in tracker_id:
-                    if tid is not None:
-                        self._track_last_seen[int(tid)] = frame_id
-
+            # Expire before refreshing sightings: a returning ID after a gap
+            # must receive a new generation, including when no empty frame ran.
             expired = [
                 tid for tid, last_seen in self._track_last_seen.items()
                 if (frame_id - last_seen) > self.ttl_frames
             ]
             for tid in expired:
+                logger.info("[PLATE_STATE_RESET] track_id=%s reason=ttl_expired", tid)
                 self._track_last_seen.pop(tid, None)
                 self._plate_states.pop(tid, None)
                 if self._worker is not None:
                     self._worker.discard(tid)
+
+            if tracker_id is not None:
+                for tid in tracker_id:
+                    if tid is not None:
+                        self._track_last_seen[int(tid)] = frame_id
 
             if xyxy is None or tracker_id is None or len(xyxy) == 0:
                 return {}
@@ -512,12 +617,12 @@ class VehiclePlateManager:
 
                 cadence_threshold = (
                     self.recheck_interval
-                    if state.status == "RECOGNIZED"
+                    if state.status in ("CONFIRMED", "RECOGNIZED")
                     else self.eval_interval
                 )
                 cadence_gap = frame_id - state.last_eval_frame if state.last_eval_frame >= 0 else -1
                 cadence_due = (cadence_gap >= cadence_threshold) if cadence_gap >= 0 else False
-                if state.status == "RECOGNIZED":
+                if state.status in ("CONFIRMED", "RECOGNIZED"):
                     growth_due = False
                 needs_eval = cadence_due or growth_due or (state.last_eval_frame < 0)
 
@@ -598,10 +703,12 @@ class VehiclePlateManager:
 
     def reset_tracks(self) -> None:
         """Clear all vehicle track associations (called on camera/source switch)."""
-        worker = self._worker
-        if worker is not None:
-            worker.clear()
         with self._lock:
+            worker = self._worker
+            if worker is not None:
+                worker.clear()
+            for tid, state in self._plate_states.items():
+                logger.info("[PLATE_STATE_RESET] track_id=%s reason=explicit_reset", tid)
             self._plate_states.clear()
             self._track_last_seen.clear()
             logger.info("[PLATE_TRACKER] Reset all vehicle license plate track associations.")

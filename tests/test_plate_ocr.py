@@ -181,12 +181,13 @@ class TestPlateOCR(unittest.TestCase):
             res1 = self.manager.process_vehicle_tracks(frame, tracks_1, frame_id=1)
             self.assertEqual(mock_extract.call_count, 1)
             self.assertEqual(res1[5].candidate_text, "51H5678")
-            self.assertEqual(res1[5].status, "CHECKING")
+            self.assertIn(res1[5].status, ("PROVISIONAL", "CHECKING"))
+            self.assertEqual(res1[5].plate_text, "51H5678")
 
             # Frame 2: Same size, cadence not due -> OCR MUST NOT BE CALLED
             res2 = self.manager.process_vehicle_tracks(frame, tracks_1, frame_id=2)
             self.assertEqual(mock_extract.call_count, 1, "Must NOT OCR every frame")
-            self.assertEqual(res2[5].plate_text, "")
+            self.assertEqual(res2[5].plate_text, "51H5678")
 
             # Frame 3: Same size -> still not called
             self.manager.process_vehicle_tracks(frame, tracks_1, frame_id=3)
@@ -238,7 +239,11 @@ class TestPlateOCR(unittest.TestCase):
             self.assertIs(st.plate_crop, crop_good)
             self.assertEqual(st.confidence, 0.92)
 
-            # Frame 70: Cadence due, receives blurry/bad candidate
+            # Keep the track alive until its confirmed OCR recheck is due.
+            # A gap longer than TTL now correctly starts a new generation.
+            for fid in range(12, 191):
+                self.manager.process_vehicle_tracks(frame, tracks, frame_id=fid)
+            # Frame 191: Cadence due, receives blurry/bad candidate
             self.manager.process_vehicle_tracks(frame, tracks, frame_id=191)
             st_after = self.manager.get_plate_state(8)
             # Must PRESERVE best plate!
@@ -341,11 +346,12 @@ class TestPlateOCR(unittest.TestCase):
         self.assertIn(42, results)
         st = results[42]
         self.assertEqual(st.track_id, 42)
-        self.assertEqual(st.plate_text, "")
+        self.assertIn(st.status, ("PROVISIONAL", "SEARCHING"))
+        self.assertIn("29", st.plate_text)
         for frame_id in (6, 11):
             results = real_manager.process_vehicle_tracks(frame, tracks, frame_id=frame_id)
         st = results[42]
-        self.assertEqual(st.status, "RECOGNIZED")
+        self.assertIn(st.status, ("CONFIRMED", "RECOGNIZED"))
         self.assertIn("29", st.plate_text)
         self.assertGreater(st.confidence, 0.3)
         self.assertIsNotNone(st.plate_crop)

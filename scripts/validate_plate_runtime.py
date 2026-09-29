@@ -70,19 +70,25 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--video", default=None, help="Video path or auto-detect")
     parser.add_argument("--frames", type=int, default=500)
+    parser.add_argument("--start-frame", type=int, default=0,
+                        help="Skip to a source frame; track IDs may differ after seeking")
     parser.add_argument("--output", default="scratch/plate_runtime.json")
     args = parser.parse_args()
     if args.frames < 500:
         parser.error("Runtime validation requires at least 500 real frames")
+    if args.start_frame < 0:
+        parser.error("--start-frame must be nonnegative")
     video_path = find_video_path(args.video)
     print(f"Using runtime video: {video_path}", flush=True)
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(filename=str(output.with_suffix(".log")), level=logging.INFO)
+    logging.basicConfig(filename=str(output.with_suffix(".log")), level=logging.INFO, force=True)
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open supplied video: {video_path}")
+    if args.start_frame:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, args.start_frame)
     detector, tracker = YOLODetector(config), CarTracker(config)
     reader = LicensePlateReader()
     if not reader.initialize():
@@ -104,7 +110,8 @@ def main():
             mask = np.isin(detections.class_id, config.VEHICLE_CLASS_IDS)
             tracks = tracker.update({"xyxy": detections.xyxy[mask],
                 "confidence": detections.confidence[mask], "class_id": detections.class_id[mask]})
-            plates = manager.process_vehicle_tracks(frame, vehicle_tracks=tracks, frame_id=count)
+            plates = manager.process_vehicle_tracks(frame, vehicle_tracks=tracks,
+                                                    frame_id=args.start_frame + count)
             canvas = render_frame(frame=frame, tracks=None, people_count=0, car_tracks=tracks,
                                   car_count=len(tracks), plate_results=plates)
             ok, jpeg = cv2.imencode(".jpg", canvas)
@@ -162,6 +169,7 @@ def main():
         report = {
             "source": video_path,
             "frames": count,
+            "start_frame": args.start_frame,
             "completed_500_real_frames": count >= 500,
             "device": detector.device,
             "scope": "vehicle pipeline; excludes Face/Event Persistence",
