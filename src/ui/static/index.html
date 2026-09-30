@@ -142,8 +142,8 @@
                 <div class="custom-source-card video-library-card">
                     <div class="source-card-header library-header-row">
                         <div>
-                            <h3>🎞️ Thư Viện Video (Video Library)</h3>
-                            <p>Chọn video đã lưu trong cơ sở dữ liệu để chạy AI hoặc tải lên video MP4 mới.</p>
+                            <h3>📁 LOCAL VIDEO</h3>
+                            <p>Chọn video đã lưu trong thư viện để chạy AI hoặc tải lên video MP4 mới.</p>
                         </div>
                         <button type="button" id="btnOpenUploadModal" class="primary-btn highlight-btn">
                             <span class="btn-icon">➕</span> Upload Video
@@ -153,7 +153,10 @@
                     <!-- Video Library List -->
                     <div class="video-library-container">
                         <div class="library-toolbar">
-                            <span id="videoLibraryCountBadge" class="badge">0 videos</span>
+                            <div class="library-toolbar-title">
+                                <span class="toolbar-title-text">🎞️ VIDEO LIBRARY</span>
+                                <span id="videoLibraryCountBadge" class="badge">0 videos</span>
+                            </div>
                             <div style="display:flex; gap: 8px; align-items: center;">
                                 <label class="checkbox-label" style="font-size: 0.8rem; margin: 0;">
                                     <input type="checkbox" id="localVideoLoop" checked>
@@ -612,9 +615,9 @@
                 <div id="modalUploadFeedback" class="feedback-msg"></div>
             </div>
             <div class="modal-footer">
-                <button type="button" id="btnCancelUploadModal" class="secondary-btn">Hủy</button>
+                <button type="button" id="btnCancelUploadModal" class="secondary-btn">Hủy / Đóng</button>
                 <button type="button" id="btnUploadAndConnect" class="primary-btn highlight-btn" disabled>
-                    <span class="btn-icon">🚀</span> Tải lên & Lưu vào Thư viện
+                    <span class="btn-icon">🚀</span> Upload Video
                 </button>
             </div>
         </div>

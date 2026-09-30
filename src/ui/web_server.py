@@ -839,7 +839,39 @@ async def preview_feed(request: Request) -> Response:
 @app.get("/targets")
 @app.get("/api/targets")
 async def get_targets() -> JSONResponse:
-    """Retrieve all registered targets."""
+    """Retrieve all registered targets (hydrated from PostgreSQL on restart)."""
+    if not target_manager.list_targets():
+        try:
+            from src.db.database import Database
+            from src.db.repositories import TargetRepository, TargetEmbeddingRepository
+            import numpy as np
+            db = Database()
+            with db.transaction() as session:
+                t_repo = TargetRepository(session)
+                te_repo = TargetEmbeddingRepository(session)
+                for db_t in t_repo.list(active=True):
+                    emb_arr = None
+                    src_img = db_t.image_path
+                    embs = te_repo.list(target_id=db_t.id)
+                    if embs:
+                        emb_arr = np.asarray(embs[0].embedding, dtype=np.float32)
+                        if embs[0].source_image_path:
+                            src_img = embs[0].source_image_path
+                    ref_meta = db_t.reference_metadata or {}
+                    color = ref_meta.get("clothing_color")
+                    threshold = float(ref_meta.get("threshold", 0.45))
+                    target_manager.add_target_from_db(
+                        target_id=str(db_t.id),
+                        name=db_t.name,
+                        face_embedding=emb_arr,
+                        clothing_color=color,
+                        face_threshold=threshold,
+                        source_image_path=src_img,
+                        db_id=str(db_t.id),
+                    )
+        except Exception as exc:
+            logger.debug("Failed restoring targets from DB: %s", exc)
+
     targets = [t.to_dict() for t in target_manager.list_targets()]
     return JSONResponse(content={"status": "ok", "targets": targets}, status_code=200)
 
@@ -1087,9 +1119,36 @@ async def register_target(request: Request) -> JSONResponse:
 @app.delete("/targets/{target_id}")
 @app.delete("/api/targets/{target_id}")
 async def delete_target(target_id: str, request: Request) -> JSONResponse:
-    """Remove a registered target by ID."""
+    """Remove a registered target by ID from memory, DB, and filesystem."""
     b_url = get_backend_url(request).rstrip("/")
     removed = target_manager.remove_target(target_id)
+
+    # Delete from PostgreSQL and unlink image file
+    try:
+        from uuid import UUID
+        from src.db.database import Database
+        from src.db.repositories import TargetRepository
+        db = Database()
+        with db.transaction() as session:
+            t_repo = TargetRepository(session)
+            try:
+                t_uuid = UUID(target_id)
+                rec = t_repo.get(t_uuid)
+                if rec:
+                    img_path = rec.image_path
+                    t_repo.delete(t_uuid)
+                    removed = True
+                    if img_path:
+                        try:
+                            p = (PROJECT_ROOT / img_path).resolve()
+                            if str(p).startswith(str(UPLOAD_TARGET_DIR.resolve())) and p.is_file():
+                                p.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+            except ValueError:
+                pass
+    except Exception as db_err:
+        logger.warning("[TARGET_DELETE_DB] Could not delete target from DB: %s", db_err)
 
     # Also notify backend server if remote
     try:
@@ -1114,8 +1173,21 @@ async def delete_target(target_id: str, request: Request) -> JSONResponse:
 async def get_target_image(target_id: str) -> Response:
     """Serve original target face image."""
     target = target_manager.get_target(target_id)
-    if target and target.source_image_path:
-        img_path = (PROJECT_ROOT / target.source_image_path).resolve()
+    img_path_str = target.source_image_path if target else None
+    if not img_path_str:
+        try:
+            from uuid import UUID
+            from src.db.database import Database
+            from src.db.repositories import TargetRepository
+            db = Database()
+            with db.transaction() as session:
+                rec = TargetRepository(session).get(UUID(target_id))
+                if rec and rec.image_path:
+                    img_path_str = rec.image_path
+        except Exception:
+            pass
+    if img_path_str:
+        img_path = (PROJECT_ROOT / img_path_str).resolve()
         if img_path.is_file():
             return FileResponse(str(img_path))
     return Response(status_code=404)

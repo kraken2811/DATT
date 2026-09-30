@@ -613,16 +613,18 @@
      * Primary Camera Selection & Connection Verification Sequence.
      * Criteria: frames_received > 0, frame_age_seconds < 5.0, stream_alive is true.
      */
-    window.dattSelectCamera = async function (name, streamUrl, sourceType, provider, videoSourceId) {
+    window.dattSelectCamera = async function (name, streamUrl, sourceType, provider, videoSourceId, loop) {
         await closePreview();
 
+        const isLoop = (loop !== undefined && loop !== null) ? Boolean(loop) : (DOM.localVideoLoop ? DOM.localVideoLoop.checked : true);
         const sourceData = {
             name: name,
             source: streamUrl,
             stream_url: streamUrl,
             source_type: sourceType || "direct_hls",
             provider: provider || "Caltrans",
-            video_source_id: videoSourceId || null
+            video_source_id: videoSourceId || null,
+            loop: isLoop
         };
         state.connectingSourceData = sourceData;
 
@@ -640,7 +642,8 @@
                     url: sourceData.source,
                     name: sourceData.name,
                     provider: sourceData.provider,
-                    video_source_id: sourceData.video_source_id
+                    video_source_id: sourceData.video_source_id,
+                    loop: sourceData.loop
                 })
             });
 
@@ -901,31 +904,37 @@
         }
 
         DOM.videoLibraryList.innerHTML = videos.map(v => {
-            const sizeStr = formatBytes(v.file_size_bytes || 0);
-            const durationStr = v.duration_seconds ? `${Math.round(v.duration_seconds)}s` : "";
+            const sizeStr = v.file_size_bytes ? formatBytes(v.file_size_bytes) : "";
+            const durationSec = v.duration_sec !== undefined && v.duration_sec !== null ? v.duration_sec : v.duration_seconds;
+            const durationStr = durationSec ? `${Math.round(durationSec)}s` : "";
             const resStr = (v.width && v.height) ? `${v.width}x${v.height}` : "";
             const metaBadges = [sizeStr, durationStr, resStr].filter(Boolean).map(m => `<span class="video-card-badge">${escapeHtml(m)}</span>`).join("");
             const dateStr = v.created_at ? new Date(v.created_at).toLocaleString() : "";
             const safeName = escapeHtml(v.original_filename || "Video");
             const safePath = escapeHtml(v.storage_path || "");
             const safeId = escapeHtml(v.id || "");
+            const rawStatus = (v.status || "ready").toUpperCase();
+            const statusClass = rawStatus === "READY" ? "badge-status-ready" : "badge-status-other";
 
             return `
                 <div class="video-card" data-id="${safeId}">
-                    <div class="video-card-thumb">
-                        <span class="thumb-icon">🎬</span>
+                    <div class="video-card-header">
+                        <div class="video-card-icon">🎬</div>
+                        <div class="video-card-info">
+                            <div class="video-card-title" title="${safeName}">${safeName}</div>
+                            <div class="video-card-status-row">
+                                <span class="video-status-badge ${statusClass}">● ${rawStatus}</span>
+                                ${dateStr ? `<span class="video-card-date" title="Ngày tải lên">${dateStr}</span>` : ""}
+                            </div>
+                        </div>
                     </div>
-                    <div class="video-card-content">
-                        <div class="video-card-title" title="${safeName}">${safeName}</div>
-                        <div class="video-card-meta">${metaBadges}</div>
-                        <div class="video-card-date">${dateStr}</div>
-                    </div>
+                    ${metaBadges ? `<div class="video-card-meta">${metaBadges}</div>` : ""}
                     <div class="video-card-actions">
-                        <button type="button" class="primary-btn btn-sm btn-select-video" title="Chọn chạy AI" onclick="window.dattSelectLibraryVideo('${safeName}', '${safePath}', '${safeId}')">
-                            ▶️ Chọn
+                        <button type="button" class="primary-btn btn-sm btn-select-video" title="Sử dụng video này chạy AI" onclick="window.dattSelectLibraryVideo('${safeName}', '${safePath}', '${safeId}')">
+                            <span class="btn-icon">▶️</span> Select / Use Video
                         </button>
-                        <button type="button" class="secondary-btn btn-sm btn-delete-video" title="Xóa video" onclick="window.dattDeleteVideoSource('${safeId}')">
-                            🗑️
+                        <button type="button" class="secondary-btn btn-sm btn-delete-video" title="Xóa video khỏi hệ thống" onclick="window.dattDeleteVideoSource('${safeId}')">
+                            🗑️ Delete
                         </button>
                     </div>
                 </div>
@@ -934,7 +943,8 @@
     }
 
     window.dattSelectLibraryVideo = function(name, path, id) {
-        window.dattSelectCamera(`Local: ${name}`, path, "local", "Local Video", id);
+        const loop = DOM.localVideoLoop ? DOM.localVideoLoop.checked : true;
+        window.dattSelectCamera(`Local: ${name}`, path, "local", "Local Video", id, loop);
     };
 
     window.dattDeleteVideoSource = async function(id) {
@@ -1087,16 +1097,13 @@
                                 if (DOM.uploadProgressBarFill) DOM.uploadProgressBarFill.style.width = "100%";
                                 if (DOM.uploadProgressText) DOM.uploadProgressText.textContent = "100%";
 
-                                // Refresh video library
+                                // Refresh video library automatically from backend
                                 await loadVideoLibrary();
 
                                 // Close modal after brief pause
                                 setTimeout(() => {
                                     closeUploadModal();
-                                    // Trigger camera selection with server path and video_source_id
-                                    const displayName = `Local: ${res.filename || selectedFile.name}`;
-                                    window.dattSelectCamera(displayName, res.server_path, "local", "Local Video", res.video_source_id || res.id);
-                                }, 400);
+                                }, 500);
                                 return;
                             }
                         } catch (e) {}
@@ -1668,6 +1675,24 @@
 
         if (DOM.registerTargetBtn) {
             DOM.registerTargetBtn.addEventListener("click", registerTarget);
+        }
+
+        if (DOM.applySourceBtn) {
+            DOM.applySourceBtn.addEventListener("click", () => {
+                const sType = DOM.sourceTypeSelect ? DOM.sourceTypeSelect.value : "local";
+                const sPath = DOM.sourceInput ? DOM.sourceInput.value.trim() : "";
+                const sLoop = DOM.sourceLoopCheckbox ? DOM.sourceLoopCheckbox.checked : true;
+                if (!sPath) {
+                    if (DOM.sourceFeedback) {
+                        DOM.sourceFeedback.className = "feedback-msg error";
+                        DOM.sourceFeedback.textContent = "Vui lòng nhập đường dẫn tệp hoặc URL luồng.";
+                    }
+                    return;
+                }
+                if (DOM.sourceFeedback) DOM.sourceFeedback.textContent = "";
+                const displayName = `Source: ${sPath.split(/[\\/]/).pop() || sPath}`;
+                window.dattSelectCamera(displayName, sPath, sType, "Custom Source", null, sLoop);
+            });
         }
 
         if (DOM.zoneToggleCheckbox) {

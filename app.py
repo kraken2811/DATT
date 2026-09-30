@@ -327,7 +327,10 @@ def run_pipeline(
             )
 
             # Count and render the same current-frame person IDs.
-            counter.polygon = np.asarray(config.ZONE_POLYGON, dtype=np.int32) if is_zone_on else None
+            counter.polygon = (
+                np.asarray(config.ZONE_POLYGON, dtype=np.int32)
+                if is_zone_on and config.ZONE_POLYGON is not None else None
+            )
             people_in_view, visible_person_ids = counter.update_and_get_visible_ids(
                 tracks, frame_shape=frame.shape
             )

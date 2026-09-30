@@ -269,6 +269,31 @@ class TargetManager:
             for tid, t in self._targets.items():
                 t.is_selected = (tid in id_set) if id_set else True
 
+    def add_target_from_db(
+        self,
+        target_id: str,
+        name: str,
+        face_embedding: np.ndarray | None = None,
+        clothing_color: str | None = None,
+        face_threshold: float = DEFAULT_FACE_THRESHOLD,
+        source_image_path: str | None = None,
+        db_id: str | None = None,
+    ) -> Target:
+        """Add or restore an existing target loaded from database."""
+        with self._lock:
+            target = Target(
+                id=target_id,
+                name=name,
+                face_embedding=face_embedding,
+                clothing_color=clothing_color,
+                face_threshold=face_threshold,
+                has_face=face_embedding is not None,
+                source_image_path=source_image_path,
+                db_id=db_id or target_id,
+            )
+            self._targets[target_id] = target
+            return target
+
     def clear(self) -> None:
         with self._lock:
             self._targets.clear()

@@ -380,16 +380,42 @@ class CameraManager:
                     )
 
                 elif stype in ("local", "file", "mp4"):
-                    file_path = Path(src_str)
-                    if not file_path.is_file():
-                        alt_path = Path(__file__).resolve().parent.parent.parent / src_str
-                        if alt_path.is_file():
-                            file_path = alt_path
-                        else:
-                            raise FileNotFoundError(f"Local video file not found: {file_path}")
-
-                    # Attempt DB lookup if video_source_id is not explicitly provided
+                    proj_root = Path(__file__).resolve().parent.parent.parent
+                    file_path = None
                     v_src_id_str = str(video_source_id) if video_source_id else None
+
+                    # 1. If video_source_id is provided, resolve directly from DB record first
+                    if v_src_id_str:
+                        try:
+                            from uuid import UUID
+                            from src.db.database import Database
+                            from src.db.repositories import VideoSourceRepository
+                            db = Database()
+                            with db.transaction() as session:
+                                repo = VideoSourceRepository(session)
+                                vs_rec = repo.get(UUID(v_src_id_str))
+                                if vs_rec and vs_rec.storage_path:
+                                    candidate = (proj_root / vs_rec.storage_path).resolve()
+                                    if candidate.is_file():
+                                        file_path = candidate
+                                        logger.info(
+                                            "[VIDEO_SOURCE_RESOLVED_DB] source_id=%s storage_path='%s' absolute_path='%s'",
+                                            v_src_id_str, vs_rec.storage_path, file_path,
+                                        )
+                        except Exception as exc:
+                            logger.debug("CameraManager: Could not resolve video_source_id from DB: %s", exc)
+
+                    # 2. Fall back to resolving from src_str if not already resolved from DB
+                    if file_path is None:
+                        file_path = Path(src_str)
+                        if not file_path.is_file():
+                            alt_path = (proj_root / src_str).resolve()
+                            if alt_path.is_file():
+                                file_path = alt_path
+                            else:
+                                raise FileNotFoundError(f"Local video file not found: {file_path}")
+
+                    # 3. Attempt DB lookup if video_source_id is still not resolved
                     if not v_src_id_str:
                         try:
                             from src.db.database import Database
@@ -400,7 +426,6 @@ class CameraManager:
                                 repo = VideoSourceRepository(session)
                                 vs_rec = repo.get_by_storage_path(rel_query)
                                 if not vs_rec:
-                                    proj_root = Path(__file__).resolve().parent.parent.parent
                                     try:
                                         rel = str(file_path.resolve().relative_to(proj_root.resolve())).replace("\\", "/")
                                         vs_rec = repo.get_by_storage_path(rel)
@@ -419,7 +444,7 @@ class CameraManager:
                         id=f"local_{time.time()}",
                         name=cam_name,
                         type="file",
-                        url=str(file_path),
+                        url=str(file_path.resolve()),
                         width=reader.width or 1280,
                         height=reader.height or 720,
                         description=f"Local MP4 file (loop={loop})",
@@ -518,6 +543,7 @@ class CameraManager:
                 "name": cam.name if cam else None,
                 "type": cam.type if cam else None,
                 "url": cam.url if cam else None,
+                "video_source_id": getattr(cam, "video_source_id", None) if cam else None,
                 "status": self.status,
                 "stream_fps": self.stream_fps,
                 "stream_alive": self.stream_alive,
