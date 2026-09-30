@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 import numpy as np
 
 from src.events.db_worker import DatabaseWorker
-from src.events.event_dto import BusinessEventDTO, VehiclePassageDTO
+from src.events.event_dto import BusinessEventDTO, FaceEventDTO, VehiclePassageDTO
 from src.events.event_storage import EventStorage, event_storage
 from src.runtime.shared_state import SharedRuntimeState, shared_state
 from src.utils.logger import logger
@@ -42,6 +42,17 @@ CLASS_MAP = {
 }
 
 
+def _parse_uuid(val: Any) -> UUID | None:
+    if val is None:
+        return None
+    if isinstance(val, UUID):
+        return val
+    try:
+        return UUID(str(val))
+    except Exception:
+        return None
+
+
 @dataclass
 class VehiclePassage:
     """One vehicle passage / session record in RAM.
@@ -58,6 +69,7 @@ class VehiclePassage:
     vehicle_type_confidence: float | None = None
     vehicle_color_confidence: float | None = None
     zone_id: str | None = None
+    video_source_id: UUID | None = None
     plate_text: str = ""
     plate_status: str = "SEARCHING"
     plate_confidence: float = 0.0
@@ -103,6 +115,7 @@ class VehiclePassage:
             track_id=self.track_id,
             first_seen_at=first_dt,
             last_seen_at=last_dt,
+            video_source_id=self.video_source_id,
             vehicle_type=self.vehicle_type,
             vehicle_color=self.vehicle_color,
             vehicle_type_confidence=self.vehicle_type_confidence,
@@ -151,6 +164,7 @@ class EventManager:
         self._last_report_time: float = time.time()
 
         self._active_passages: dict[int, VehiclePassage] = {}
+        self._emitted_face_tracks: set[str] = set()
         self.last_event_build_ms: float = 0.0
         self.last_db_work_ms: float = 0.0
 
@@ -162,6 +176,7 @@ class EventManager:
         camera_id: str,
         people_count: int,
         annotated_frame: np.ndarray | None = None,
+        video_source_id: UUID | str | None = None,
     ) -> dict[str, Any] | None:
         """Evaluate occupancy count on new frame and trigger event if changed."""
         t_eb_0 = time.perf_counter()
@@ -220,6 +235,7 @@ class EventManager:
             id=uuid4(),
             passage_id=None,
             camera_id=camera_id,
+            video_source_id=_parse_uuid(video_source_id),
             event_type="PEOPLE_COUNT_CHANGED",
             event_time=now,
             idempotency_key=f"PEOPLE:{camera_id}:{timestamp_str}",
@@ -245,10 +261,12 @@ class EventManager:
         in_zone_ids: Any = None,
         zone_id: str | None = None,
         frame: np.ndarray | None = None,
+        video_source_id: UUID | str | None = None,
     ) -> list[dict[str, Any]]:
         """Evaluate vehicle passage lifecycle and emit business events (non-blocking)."""
         t_eb_0 = time.perf_counter()
         now_ts = time.time()
+        v_src_uuid = _parse_uuid(video_source_id)
         emitted_events: list[dict[str, Any]] = []
 
         active_tracker_ids = set()
@@ -291,6 +309,7 @@ class EventManager:
                         session_key=session_key,
                         camera_id=camera_id,
                         track_id=tid_int,
+                        video_source_id=v_src_uuid,
                         vehicle_type=v_type,
                         vehicle_type_confidence=v_conf,
                         first_seen=now_ts,
@@ -317,6 +336,7 @@ class EventManager:
                         id=uuid4(),
                         passage_id=passage.id,
                         camera_id=camera_id,
+                        video_source_id=passage.video_source_id,
                         zone_id=passage.zone_id,
                         track_id=tid_int,
                         event_type="VEHICLE_ENTER",
@@ -372,6 +392,7 @@ class EventManager:
                             id=uuid4(),
                             passage_id=passage.id,
                             camera_id=camera_id,
+                            video_source_id=passage.video_source_id,
                             zone_id=passage.zone_id,
                             track_id=tid_int,
                             event_type="PLATE_RECOGNIZED",
@@ -405,6 +426,7 @@ class EventManager:
                             id=uuid4(),
                             passage_id=passage.id,
                             camera_id=camera_id,
+                            video_source_id=passage.video_source_id,
                             zone_id=passage.zone_id,
                             track_id=tid_int,
                             event_type="ZONE_ENTER",
@@ -431,6 +453,7 @@ class EventManager:
                             id=uuid4(),
                             passage_id=passage.id,
                             camera_id=camera_id,
+                            video_source_id=passage.video_source_id,
                             zone_id=passage.zone_id,
                             track_id=tid_int,
                             event_type="ZONE_EXIT",
@@ -452,6 +475,13 @@ class EventManager:
         for tid in expired_ids:
             passage = self._active_passages.pop(tid)
             passage.exited = True
+            if passage.vehicle_color is None and passage.best_vehicle_image is not None:
+                try:
+                    from src.recognition.color_extractor import extract_vehicle_color
+                    passage.vehicle_color = extract_vehicle_color(passage.best_vehicle_image)
+                except Exception:
+                    passage.vehicle_color = "other/unknown"
+
             ev = {
                 "type": "VEHICLE_EXIT",
                 "track_id": tid,
@@ -466,6 +496,7 @@ class EventManager:
                 id=uuid4(),
                 passage_id=passage.id,
                 camera_id=camera_id,
+                video_source_id=passage.video_source_id,
                 zone_id=passage.zone_id,
                 track_id=tid,
                 event_type="VEHICLE_EXIT",
@@ -489,13 +520,106 @@ class EventManager:
         self.last_db_work_ms = t_db_accum
         return emitted_events
 
+    def process_face_matches(
+        self,
+        camera_id: str,
+        target_matches: dict[int, Any] | None,
+        track_states: dict[int, Any] | None = None,
+        tracks: Any = None,
+        frame: np.ndarray | None = None,
+        video_source_id: UUID | str | None = None,
+        frame_id: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Process target matcher face recognition results and emit FaceEvents asynchronously."""
+        if not target_matches:
+            return []
+
+        emitted: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+        v_src_uuid = _parse_uuid(video_source_id)
+
+        track_boxes = {}
+        if tracks is not None:
+            t_ids = getattr(tracks, "tracker_id", None)
+            xyxy = getattr(tracks, "xyxy", None)
+            if t_ids is not None and xyxy is not None:
+                for idx, tid_val in enumerate(t_ids):
+                    if tid_val is not None:
+                        track_boxes[int(tid_val)] = xyxy[idx]
+
+        for tid, match in target_matches.items():
+            if match is None:
+                continue
+            decision = getattr(match, "decision", "FACE_MATCH")
+            match_type = getattr(match, "match_type", "")
+            if decision != "FACE_MATCH" and match_type not in ("FACE_MATCH", "FULL_MATCH"):
+                continue
+
+            target_id_str = getattr(match, "target_id", "")
+            dedup_key = f"{camera_id}:{tid}:{target_id_str}"
+            if dedup_key in self._emitted_face_tracks:
+                continue
+            self._emitted_face_tracks.add(dedup_key)
+
+            target_uuid = _parse_uuid(target_id_str)
+            target_name = getattr(match, "target_name", "")
+            score = float(getattr(match, "score", 0.0))
+
+            face_crop = None
+            if frame is not None:
+                box = track_boxes.get(int(tid))
+                if box is not None:
+                    bx1, by1, bx2, by2 = [max(0, int(v)) for v in box[:4]]
+                    h, w = frame.shape[:2]
+                    bx2, by2 = min(w, bx2), min(h, by2)
+                    head_h = max(20, int((by2 - by1) * 0.55))
+                    face_y2 = min(h, by1 + head_h)
+                    if (bx2 - bx1) >= 20 and (face_y2 - by1) >= 20:
+                        face_crop = frame[by1:face_y2, bx1:bx2].copy()
+
+            dto = FaceEventDTO(
+                id=uuid4(),
+                track_id=int(tid),
+                camera_id=camera_id,
+                target_id=target_uuid,
+                target_name=target_name,
+                similarity=score,
+                decision=decision,
+                video_source_id=v_src_uuid,
+                frame_id=frame_id,
+                created_at=now,
+            )
+            self.db_worker.enqueue_face_event(dto, face_crop=face_crop, is_critical=True)
+            ev = {
+                "type": "FACE_MATCH",
+                "id": str(dto.id),
+                "track_id": int(tid),
+                "target_id": str(target_uuid) if target_uuid else target_id_str,
+                "target_name": target_name,
+                "similarity": score,
+                "decision": decision,
+                "camera_id": camera_id,
+                "video_source_id": str(v_src_uuid) if v_src_uuid else None,
+                "timestamp": now.timestamp(),
+            }
+            emitted.append(ev)
+
+        return emitted
+
     def reset(self) -> None:
         """Reset internal tracking count and finalize any active passages."""
         now_ts = time.time()
+        self._emitted_face_tracks.clear()
         for tid, passage in list(self._active_passages.items()):
             passage.exited = True
             passage.last_seen = now_ts
             passage.duration = max(0.0, now_ts - passage.first_seen)
+            if passage.vehicle_color is None and passage.best_vehicle_image is not None:
+                try:
+                    from src.recognition.color_extractor import extract_vehicle_color
+                    passage.vehicle_color = extract_vehicle_color(passage.best_vehicle_image)
+                except Exception:
+                    passage.vehicle_color = "other/unknown"
             dto = passage.to_dto(is_final=True)
             self.db_worker.enqueue_passage(
                 dto,
@@ -530,6 +654,7 @@ class EventManager:
         self._last_camera_id = None
         self._last_saved_count = None
         self._candidate_count = None
+
 
     def stop(self) -> None:
         """Cleanly terminate background worker, draining any queued items."""

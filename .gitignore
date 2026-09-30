@@ -39,7 +39,10 @@ logs/*
 !logs/.gitkeep
 *.log
 *.bak
+*.db
 data/*.db
+data/uploads/*
+!data/uploads/.gitkeep
 data/events/*
 !data/events/.gitkeep
 

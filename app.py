@@ -40,7 +40,7 @@ def log_realtime_hud(
     processing_fps: float,
     yolo_latency_ms: float,
     pipeline_latency_ms: float,
-    detection_count: int,
+    detection_count: int | None,
     track_count: int,
     people_in_view: int,
     car_in_view: int = 0,
@@ -62,7 +62,7 @@ def log_realtime_hud(
         "Processing FPS:   %.1f\n"
         "YOLO latency:     %.1f ms\n"
         "Pipeline latency: %.1f ms\n"
-        "Detection count:  %d\n"
+        "Detection count:  %s\n"
         "Track count:      %d\n"
         "People in view:   %d\n"
         "Cars in view:     %d\n"
@@ -200,6 +200,8 @@ def run_pipeline(
                     current_cam.id,
                 )
                 active_cam = current_cam
+                last_detections = None
+                total_frames = 0
                 tracker.reset()
                 car_tracker.reset()
                 target_matcher.reset_tracks()
@@ -295,6 +297,17 @@ def run_pipeline(
             _t_face_emb_ms = target_matcher.last_timings.get("emb_ms", 0.0)
             _t_face_match_ms = target_matcher.last_timings.get("match_ms", 0.0)
 
+            # 4.05 Persist Face Recognition Events (non-blocking)
+            event_manager.process_face_matches(
+                camera_id=active_cam.id if active_cam else "camera_01",
+                target_matches=target_matches,
+                track_states=track_states,
+                tracks=tracks,
+                frame=frame,
+                video_source_id=getattr(active_cam, "video_source_id", None),
+                frame_id=curr_frame_id,
+            )
+
             # 4.1 Vehicle License Plate Recognition (non-blocking)
             plate_results = vehicle_plate_manager.process_vehicle_tracks(
                 frame=frame,
@@ -313,10 +326,14 @@ def run_pipeline(
                 else 0
             )
 
-            # People Occupancy
+            # Count and render the same current-frame person IDs.
+            counter.polygon = np.asarray(config.ZONE_POLYGON, dtype=np.int32) if is_zone_on else None
             people_in_view, visible_person_ids = counter.update_and_get_visible_ids(
                 tracks, frame_shape=frame.shape
             )
+
+            if getattr(tracks, "tracker_id", None) is not None:
+                tracks = tracks[np.isin(tracks.tracker_id, list(visible_person_ids))]
 
             if not is_zone_on:
                 visible_vehicle_tracks = vehicle_tracks
@@ -346,6 +363,7 @@ def run_pipeline(
                 in_zone_ids=in_zone_ids,
                 zone_id="zone_1" if is_zone_on else None,
                 frame=frame,
+                video_source_id=getattr(active_cam, "video_source_id", None),
             )
             _t_event_build_ms = event_manager.last_event_build_ms
             _t_db_work_ms = event_manager.last_db_work_ms
@@ -357,7 +375,7 @@ def run_pipeline(
             yolo_latencies.append(last_yolo_ms)
             pipeline_latencies.append(last_pipeline_ms)
 
-            last_det_count = len(detections)
+            last_det_count = len(detections) if is_detection_frame else None
             last_track_count = len(tracks) + total_tracked_vehicles
             last_people_in_view = people_in_view
             last_car_in_view = vehicles_in_view
@@ -392,6 +410,7 @@ def run_pipeline(
                     camera_id=active_cam.id if active_cam else "camera_01",
                     people_count=last_people_in_view,
                     annotated_frame=annotated_frame,
+                    video_source_id=getattr(active_cam, "video_source_id", None),
                 )
                 _t_event_build_ms += event_manager.last_event_build_ms
                 _t_db_work_ms += event_manager.last_db_work_ms
@@ -495,8 +514,8 @@ def run_pipeline(
                 )
 
                 logger.info(
-                    "[FRAME_SYNC] frame_id=%d pts=%.3f det_frame=%d track_frame=%d count_frame=%d render_frame=%d state_frame=%d sync=OK",
-                    curr_frame_id, frame_pts, curr_frame_id, curr_frame_id, curr_frame_id, curr_frame_id, curr_frame_id
+                    "[FRAME_SYNC] frame_id=%d pts=%.3f det_frame=%d track_frame=%d count_frame=%d render_frame=%d state_frame=%d",
+                    curr_frame_id, frame_pts, curr_frame_id if is_detection_frame else -1, curr_frame_id, curr_frame_id, curr_frame_id, curr_frame_id
                 )
 
             prev_loop_end = time.perf_counter()

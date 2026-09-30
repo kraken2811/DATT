@@ -56,17 +56,24 @@ class Target:
     clothing_color: str | None = None  # 'red', 'blue', 'green', 'yellow', 'black', 'white'
     face_threshold: float = DEFAULT_FACE_THRESHOLD
     has_face: bool = False
+    source_image_path: str | None = None
+    db_id: str | None = None
+    is_selected: bool = True
     created_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "db_id": self.db_id or self.id,
             "name": self.name,
             "has_face": self.face_embedding is not None,
             "clothing_color": self.clothing_color,
             "face_threshold": self.face_threshold,
+            "source_image_path": self.source_image_path,
+            "is_selected": self.is_selected,
             "created_at": self.created_at,
         }
+
 
 
 @dataclass
@@ -153,6 +160,7 @@ class TargetManager:
         clothing_color: str | None = None,
         face_threshold: float = DEFAULT_FACE_THRESHOLD,
         target_id: str | None = None,
+        source_image_path: str | None = None,
     ) -> Target:
         """Register a new target with optional face and/or clothing color.
 
@@ -206,7 +214,7 @@ class TargetManager:
         if emb is None and clean_color is None:
             raise ValueError("Target must have at least a valid face image or a clothing color")
 
-        tid = target_id or str(uuid.uuid4())[:8]
+        tid = target_id or str(uuid.uuid4())
 
         target = Target(
             id=tid,
@@ -215,6 +223,7 @@ class TargetManager:
             clothing_color=clean_color,
             face_threshold=max(0.1, min(0.95, face_threshold)),
             has_face=(emb is not None),
+            source_image_path=source_image_path,
         )
 
         with self._lock:
@@ -245,9 +254,25 @@ class TargetManager:
         with self._lock:
             return list(self._targets.values())
 
+    def set_target_selection(self, target_id: str, is_selected: bool) -> bool:
+        """Update selection status of a target."""
+        with self._lock:
+            if target_id in self._targets:
+                self._targets[target_id].is_selected = is_selected
+                return True
+            return False
+
+    def select_targets(self, target_ids: Sequence[str]) -> None:
+        """Select specific targets or all if target_ids is empty."""
+        with self._lock:
+            id_set = set(target_ids)
+            for tid, t in self._targets.items():
+                t.is_selected = (tid in id_set) if id_set else True
+
     def clear(self) -> None:
         with self._lock:
             self._targets.clear()
+
 
 
 class TargetMatcher:
@@ -440,7 +465,7 @@ class TargetMatcher:
 
         export_if_requested(frame, tracks, frame_id, native_frame, face_embedder)
 
-        targets = self.manager.list_targets()
+        targets = [t for t in self.manager.list_targets() if getattr(t, "is_selected", True)]
         if not targets or tracks is None:
             self.last_timings["total_ms"] = (time.perf_counter() - t_mt_0) * 1000.0
             return {}

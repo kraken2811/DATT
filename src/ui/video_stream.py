@@ -123,6 +123,8 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
 
         if path == "/video_feed":
             self.handle_video_feed()
+        elif path == "/frame_packet":
+            self.handle_frame_packet()
         elif path == "/telemetry":
             self.handle_telemetry()
         elif path == "/status":
@@ -182,9 +184,20 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self._execute_register_target(data)
         elif path in ("/zone_mode", "/api/zone_mode", "/set_zone_mode"):
             self._execute_set_zone_mode(data)
+        elif "/targets/" in path and path.endswith("/select"):
+            parts = path.strip("/").split("/")
+            target_id = parts[parts.index("targets") + 1]
+            is_sel = bool(data.get("selected", True))
+            target_manager.set_target_selection(target_id, is_sel)
+            self._send_json_response({"status": "ok", "target_id": target_id, "selected": is_sel})
+        elif path in ("/targets/select", "/api/targets/select"):
+            t_ids = data.get("target_ids", [])
+            target_manager.select_targets(t_ids)
+            self._send_json_response({"status": "ok", "selected_ids": t_ids})
         else:
             self.send_response(404)
             self.end_headers()
+
 
     def do_DELETE(self) -> None:
         """Route DELETE requests (remove target)."""
@@ -332,6 +345,23 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"\r\n")
         self.wfile.flush()
 
+    def handle_frame_packet(self) -> None:
+        packet = self.state.get_frame_packet()
+        self.send_response(200 if packet else 204)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Expose-Headers", "X-Frame-Telemetry")
+        if packet:
+            jpeg, metrics = packet
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("X-Frame-Telemetry", json.dumps(metrics, ensure_ascii=True))
+            self.send_header("Content-Length", str(len(jpeg)))
+        else:
+            self.send_header("Content-Length", "0")
+        self.end_headers()
+        if packet:
+            self.wfile.write(jpeg)
+
     def handle_telemetry(self) -> None:
         """Return realtime telemetry JSON."""
         telemetry = self.state.get_telemetry().to_dict()
@@ -471,9 +501,12 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self._send_json_response({"status": "error", "message": "Missing 'source' parameter"}, code=400)
             return
 
+        v_src_id = data.get("video_source_id")
         try:
             self.state.clear_frames(increment_generation=True)
-            cam_info = self.camera_manager.set_video_source(source_type=stype, source=src, loop=loop, name=name)
+            cam_info = self.camera_manager.set_video_source(
+                source_type=stype, source=src, loop=loop, name=name, video_source_id=v_src_id
+            )
             self.state.set_camera(cam_info.id, cam_info.name)
             self._send_json_response({
                 "status": "ok",
@@ -511,6 +544,21 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                 self._send_json_response({"status": "error", "code": "IMAGE_DECODE_FAILED", "message": f"Invalid base64 image: {exc}"}, code=400)
                 return
 
+        source_image_path = data.get("source_image_path")
+        target_disk_path = None
+        if img_bytes and not source_image_path:
+            import re
+            upload_dir = PROJECT_ROOT / "data" / "uploads" / "targets"
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            unique_name = f"{uuid.uuid4().hex[:8]}_backend_target.jpg"
+            target_disk_path = upload_dir / unique_name
+            try:
+                with open(target_disk_path, "wb") as f_out:
+                    f_out.write(img_bytes)
+                source_image_path = f"data/uploads/targets/{unique_name}"
+            except Exception as e:
+                logger.debug("Failed writing target image bytes on backend: %s", e)
+
         try:
             target = target_manager.register_target(
                 name=name,
@@ -518,13 +566,53 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                 clothing_color=color,
                 face_threshold=threshold,
                 target_id=target_id,
+                source_image_path=source_image_path,
             )
+
+            if target.face_embedding is not None:
+                try:
+                    from src.db.database import Database
+                    from src.db.repositories import TargetRepository, TargetEmbeddingRepository
+                    from uuid import UUID as _UUID, uuid4 as _uuid4
+                    db = Database()
+                    with db.transaction() as session:
+                        t_repo = TargetRepository(session)
+                        try:
+                            t_uuid = _UUID(target.id)
+                        except Exception:
+                            t_uuid = _uuid4()
+                        db_t = t_repo.get(t_uuid)
+                        if db_t is None:
+                            db_t = t_repo.create(
+                                id=t_uuid,
+                                name=target.name,
+                                target_type="face",
+                                image_path=source_image_path,
+                                reference_metadata={
+                                    "clothing_color": target.clothing_color,
+                                    "threshold": target.face_threshold,
+                                },
+                                active=True,
+                            )
+                        te_repo = TargetEmbeddingRepository(session)
+                        te_repo.create(
+                            target_id=db_t.id,
+                            embedding=target.face_embedding,
+                            model_name="arcface",
+                            model_version="1.0",
+                            source_image_path=source_image_path,
+                        )
+                except Exception as db_exc:
+                    logger.debug("[BACKEND_TARGET_DB] Note persisting target to DB: %s", db_exc)
+
             self._send_json_response({
                 "status": "ok",
                 "target": target.to_dict(),
                 "message": f"Target '{target.name}' registered successfully",
             })
         except TargetRegistrationError as exc:
+            if target_disk_path and target_disk_path.is_file():
+                target_disk_path.unlink(missing_ok=True)
             self._send_json_response({
                 "status": "error",
                 "code": exc.code,
@@ -707,6 +795,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         self.state.set_switching()
         self.state.clear_frames(increment_generation=True)
 
+        v_src_id = data.get("video_source_id")
         try:
             cam_info = self.camera_manager.set_video_source(
                 source_type=stype,
@@ -714,6 +803,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                 loop=loop,
                 name=name,
                 headers=headers,
+                video_source_id=v_src_id,
             )
             self.state.set_camera(cam_info.id, cam_info.name)
             self.state.set_status("RUNNING")
@@ -837,7 +927,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         <h1>DATT — AI People Counter Monitor</h1>
         <div class="grid">
             <div class="card stream-box">
-                <img src="/video_feed" alt="Realtime AI Video Feed">
+                <canvas id="packet-video" style="width:100%" width="1280" height="720"></canvas>
             </div>
             <div class="card">
                 <div class="metric">
@@ -887,9 +977,15 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
         }
         async function updateTelemetry() {
             try {
-                const res = await fetch('/telemetry');
-                if (res.ok) {
-                    const data = await res.json();
+                const res = await fetch('/frame_packet', {cache: 'no-store'});
+                if (res.ok && res.status !== 204) {
+                    const data = JSON.parse(res.headers.get('X-Frame-Telemetry'));
+                    const bitmap = await createImageBitmap(await res.blob());
+                    await new Promise(resolve => requestAnimationFrame(() => {
+                    const canvas = document.getElementById('packet-video');
+                    canvas.width = bitmap.width;
+                    canvas.height = bitmap.height;
+                    canvas.getContext('2d').drawImage(bitmap, 0, 0);
                     document.getElementById('val-people').innerText = data.people_count;
                     document.getElementById('val-cars').innerText = data.car_count;
                     document.getElementById('lbl-cars').innerText = data.car_count_label || (data.zone_enabled ? 'VEHICLES IN ZONE' : 'VEHICLES IN VIEW');
@@ -908,10 +1004,14 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                         toggle.checked = !!data.zone_enabled;
                         document.getElementById('zone-mode-desc').innerText = data.zone_enabled ? 'ON = Selected Zone' : 'OFF = Full View';
                     }
+                    bitmap.close();
+                    resolve();
+                    }));
                 }
             } catch (e) {}
+            finally { setTimeout(updateTelemetry, 33); }
         }
-        setInterval(updateTelemetry, 200);
+        updateTelemetry();
     </script>
 </body>
 </html>"""

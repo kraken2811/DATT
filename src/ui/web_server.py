@@ -351,11 +351,19 @@ async def set_video_source(request: Request) -> JSONResponse:
             status_code=400,
         )
 
+    v_src_id = body.get("video_source_id") or body.get("id")
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 f"{b_url}/set_video_source",
-                json={"type": stype, "source": source, "loop": loop, "name": name},
+                json={
+                    "type": stype,
+                    "source": source,
+                    "loop": loop,
+                    "name": name,
+                    "video_source_id": v_src_id,
+                },
             )
             return JSONResponse(content=resp.json(), status_code=resp.status_code)
     except Exception as exc:
@@ -382,6 +390,78 @@ async def get_video_source(request: Request) -> JSONResponse:
         content={"status": "ok", "source": {"type": "default", "status": "RUNNING"}},
         status_code=200,
     )
+
+
+@app.get("/video_sources")
+@app.get("/api/video_sources")
+async def get_video_sources() -> JSONResponse:
+    """Retrieve persisted video sources from DB."""
+    try:
+        from src.db.database import Database
+        from src.db.repositories import VideoSourceRepository
+        db = Database()
+        with db.transaction() as session:
+            sources = VideoSourceRepository(session).list()
+            return JSONResponse(
+                content={
+                    "status": "ok",
+                    "sources": [
+                        {
+                            "id": str(s.id),
+                            "original_filename": s.original_filename,
+                            "storage_path": s.storage_path,
+                            "status": s.status,
+                            "file_size_bytes": s.file_size_bytes,
+                            "duration_sec": s.duration_sec,
+                            "fps": s.fps,
+                            "width": s.width,
+                            "height": s.height,
+                            "created_at": s.created_at.isoformat() if s.created_at else None,
+                        }
+                        for s in sources
+                    ],
+                },
+                status_code=200,
+            )
+    except Exception as exc:
+        logger.debug("Failed listing video sources: %s", exc)
+        return JSONResponse(content={"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.delete("/video_sources/{source_id}")
+@app.delete("/api/video_sources/{source_id}")
+async def delete_video_source(source_id: str) -> JSONResponse:
+    """Safely delete video source from DB and local storage."""
+    try:
+        from uuid import UUID
+        from src.db.database import Database
+        from src.db.repositories import VideoSourceRepository
+        db = Database()
+        storage_path = None
+        with db.transaction() as session:
+            repo = VideoSourceRepository(session)
+            try:
+                src_uuid = UUID(str(source_id))
+            except ValueError:
+                return JSONResponse(content={"status": "error", "message": "Invalid video source UUID"}, status_code=400)
+            rec = repo.get(src_uuid)
+            if rec is None:
+                return JSONResponse(content={"status": "error", "message": "Video source not found"}, status_code=404)
+            storage_path = rec.storage_path
+            repo.delete(src_uuid)
+
+        # Unlink file if inside UPLOAD_VIDEO_DIR
+        if storage_path:
+            try:
+                p = (PROJECT_ROOT / storage_path).resolve()
+                if str(p).startswith(str(UPLOAD_VIDEO_DIR.resolve())) and p.is_file():
+                    p.unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning("[VIDEO_DELETE] Could not unlink file %s: %s", storage_path, e)
+
+        return JSONResponse(content={"status": "ok", "message": "Video source deleted successfully"}, status_code=200)
+    except Exception as exc:
+        return JSONResponse(content={"status": "error", "message": str(exc)}, status_code=500)
 
 
 # -----------------------------------------------------------------------------
@@ -577,7 +657,11 @@ async def get_camera_thumbnail(
 # -----------------------------------------------------------------------------
 
 UPLOAD_DIR = PROJECT_ROOT / "data" / "uploads"
+UPLOAD_VIDEO_DIR = UPLOAD_DIR / "videos"
+UPLOAD_TARGET_DIR = UPLOAD_DIR / "targets"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_TARGET_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi"}
 MAX_VIDEO_SIZE = 500 * 1024 * 1024  # 500 MB
 
@@ -605,7 +689,8 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
 
     sanitized_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", original_filename)
     unique_filename = f"{uuid.uuid4().hex[:8]}_{sanitized_name}"
-    target_path = UPLOAD_DIR / unique_filename
+    target_path = UPLOAD_VIDEO_DIR / unique_filename
+    rel_storage_path = f"data/uploads/videos/{unique_filename}"
 
     total_size = 0
     try:
@@ -637,24 +722,57 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
             status_code=400,
         )
 
-    # Clean old temporary uploads safely (keep last 5 files, remove older than 2 hours)
+    width, height, fps, duration = None, None, None, None
     try:
-        now = time.time()
-        existing_files = sorted(
-            UPLOAD_DIR.glob("*"),
-            key=lambda f: f.stat().st_mtime,
-            reverse=True,
-        )
-        for old_f in existing_files[5:]:
-            if old_f != target_path and (now - old_f.stat().st_mtime) > 7200:
-                old_f.unlink(missing_ok=True)
+        cap = cv2.VideoCapture(str(target_path))
+        if cap.isOpened():
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if w > 0 and h > 0:
+                width, height = w, h
+            fps_val = float(cap.get(cv2.CAP_PROP_FPS))
+            frame_cnt = float(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if fps_val > 0:
+                fps = round(fps_val, 2)
+                if frame_cnt > 0:
+                    duration = round(frame_cnt / fps_val, 2)
+            cap.release()
     except Exception as e:
-        logger.debug("Failed cleaning old uploads: %s", e)
+        logger.debug("Failed extracting video metadata: %s", e)
+
+    video_source_id = None
+    try:
+        from src.db.database import Database
+        from src.db.repositories import VideoSourceRepository
+        db = Database()
+        with db.transaction() as session:
+            repo = VideoSourceRepository(session)
+            vs_rec = repo.create(
+                original_filename=original_filename,
+                storage_path=rel_storage_path,
+                status="ready",
+                file_size_bytes=total_size,
+                duration_sec=duration,
+                fps=fps,
+                width=width,
+                height=height,
+                video_metadata={"unique_filename": unique_filename},
+            )
+            video_source_id = str(vs_rec.id)
+            logger.info(
+                "[VIDEO_UPLOAD_PERSISTED] id=%s original='%s' storage_path='%s'",
+                video_source_id, original_filename, rel_storage_path,
+            )
+    except Exception as db_exc:
+        logger.warning("[VIDEO_UPLOAD_DB_ERROR] Could not persist video source to DB: %s", db_exc)
 
     return JSONResponse(
         content={
             "status": "ok",
+            "id": video_source_id,
+            "video_source_id": video_source_id,
             "filename": original_filename,
+            "storage_path": rel_storage_path,
             "server_path": str(target_path.resolve()),
             "size": total_size,
         },
@@ -848,13 +966,70 @@ async def register_target(request: Request) -> JSONResponse:
             status_code=400,
         )
 
+    target_disk_path = None
+    rel_target_image_path = None
+    if raw_img_bytes and len(raw_img_bytes) > 0:
+        sanitized_img_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", upload_filename or "target.jpg")
+        if not Path(sanitized_img_name).suffix:
+            sanitized_img_name += ".jpg"
+        unique_target_filename = f"{uuid.uuid4().hex[:8]}_{sanitized_img_name}"
+        target_disk_path = UPLOAD_TARGET_DIR / unique_target_filename
+        try:
+            with open(target_disk_path, "wb") as f_out:
+                f_out.write(raw_img_bytes)
+            rel_target_image_path = f"data/uploads/targets/{unique_target_filename}"
+        except Exception as io_err:
+            logger.warning("[TARGET_STORAGE] Failed saving original target image: %s", io_err)
+
     try:
         target = target_manager.register_target(
             name=name,
             face_image=img,
             clothing_color=color,
             face_threshold=threshold,
+            source_image_path=rel_target_image_path,
         )
+
+        if target.face_embedding is not None:
+            try:
+                from src.db.database import Database
+                from src.db.repositories import TargetRepository, TargetEmbeddingRepository
+                from uuid import UUID as _UUID, uuid4 as _uuid4
+                db = Database()
+                with db.transaction() as session:
+                    t_repo = TargetRepository(session)
+                    try:
+                        t_uuid = _UUID(target.id)
+                    except Exception:
+                        t_uuid = _uuid4()
+                    db_t = t_repo.get(t_uuid)
+                    if db_t is None:
+                        db_t = t_repo.create(
+                            id=t_uuid,
+                            name=target.name,
+                            target_type="face",
+                            image_path=rel_target_image_path,
+                            reference_metadata={
+                                "clothing_color": target.clothing_color,
+                                "threshold": target.face_threshold,
+                            },
+                            active=True,
+                        )
+                    te_repo = TargetEmbeddingRepository(session)
+                    te_repo.create(
+                        target_id=db_t.id,
+                        embedding=target.face_embedding,
+                        model_name="arcface",
+                        model_version="1.0",
+                        source_image_path=rel_target_image_path,
+                    )
+                    target.db_id = str(db_t.id)
+                    logger.info(
+                        "[TARGET_PERSISTED_DB] target_id=%s db_id=%s source_image_path='%s'",
+                        target.id, db_t.id, rel_target_image_path,
+                    )
+            except Exception as db_exc:
+                logger.warning("[TARGET_DB_PERSIST_ERROR] Could not persist target to DB: %s", db_exc)
 
         # Notify backend AI server (:8000) if active so live AI pipeline has the target
         b_url = get_backend_url(request).rstrip("/")
@@ -865,6 +1040,7 @@ async def register_target(request: Request) -> JSONResponse:
                 "name": target.name,
                 "color": target.clothing_color,
                 "threshold": target.face_threshold,
+                "source_image_path": rel_target_image_path,
             }
             if raw_img_bytes:
                 sync_payload["face_image_base64"] = base64.b64encode(raw_img_bytes).decode("ascii")
@@ -884,6 +1060,8 @@ async def register_target(request: Request) -> JSONResponse:
             status_code=200,
         )
     except TargetRegistrationError as exc:
+        if target_disk_path and target_disk_path.is_file():
+            target_disk_path.unlink(missing_ok=True)
         return JSONResponse(
             content={
                 "status": "error",
@@ -931,8 +1109,61 @@ async def delete_target(target_id: str, request: Request) -> JSONResponse:
     )
 
 
+@app.get("/targets/{target_id}/image")
+@app.get("/api/targets/{target_id}/image")
+async def get_target_image(target_id: str) -> Response:
+    """Serve original target face image."""
+    target = target_manager.get_target(target_id)
+    if target and target.source_image_path:
+        img_path = (PROJECT_ROOT / target.source_image_path).resolve()
+        if img_path.is_file():
+            return FileResponse(str(img_path))
+    return Response(status_code=404)
+
+
+@app.post("/targets/{target_id}/select")
+@app.post("/api/targets/{target_id}/select")
+async def toggle_target_select(target_id: str, request: Request) -> JSONResponse:
+    """Select or deselect a target for active video search."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    is_sel = bool(body.get("selected", True))
+    ok = target_manager.set_target_selection(target_id, is_sel)
+    b_url = get_backend_url(request).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            await client.post(f"{b_url}/api/targets/{target_id}/select", json={"selected": is_sel})
+    except Exception:
+        pass
+    if ok:
+        return JSONResponse(content={"status": "ok", "target_id": target_id, "selected": is_sel}, status_code=200)
+    return JSONResponse(content={"status": "error", "message": "Target not found"}, status_code=404)
+
+
+@app.post("/targets/select")
+@app.post("/api/targets/select")
+async def bulk_select_targets(request: Request) -> JSONResponse:
+    """Set selected targets list."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    target_ids = body.get("target_ids", [])
+    target_manager.select_targets(target_ids)
+    b_url = get_backend_url(request).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            await client.post(f"{b_url}/api/targets/select", json={"target_ids": target_ids})
+    except Exception:
+        pass
+    return JSONResponse(content={"status": "ok", "selected_ids": target_ids}, status_code=200)
+
+
 # Cache mapping event_id -> snapshot_path for fast lookup
 event_snapshot_cache: dict[str, str] = {}
+
 
 
 # -----------------------------------------------------------------------------
@@ -1023,9 +1254,163 @@ async def get_events(request: Request) -> JSONResponse:
         )
 
 
+@app.get("/events/vehicles")
+@app.get("/api/events/vehicles")
+async def get_vehicle_events(request: Request) -> JSONResponse:
+    """Query vehicle events from DB."""
+    try:
+        from uuid import UUID
+        from src.db.database import Database
+        from src.db.repositories import VehicleEventRepository
+        limit = min(max(int(request.query_params.get("limit", 50)), 1), 500)
+        offset = max(int(request.query_params.get("offset", 0)), 0)
+        v_class = request.query_params.get("vehicle_class")
+        v_color = request.query_params.get("vehicle_color")
+        v_src = request.query_params.get("video_source_id")
+        v_src_uuid = UUID(v_src) if v_src else None
+        t_id = request.query_params.get("track_id")
+        track_id = int(t_id) if t_id is not None else None
+
+        db = Database()
+        with db.transaction() as session:
+            repo = VehicleEventRepository(session)
+            events = repo.query_events(
+                vehicle_class=v_class,
+                vehicle_color=v_color,
+                video_source_id=v_src_uuid,
+                track_id=track_id,
+                limit=limit,
+                offset=offset,
+            )
+            return JSONResponse(
+                content={
+                    "status": "ok",
+                    "events": [
+                        {
+                            "id": str(e.id),
+                            "video_source_id": str(e.video_source_id) if e.video_source_id else None,
+                            "detection_event_id": str(e.detection_event_id) if e.detection_event_id else None,
+                            "vehicle_class": e.vehicle_class,
+                            "vehicle_color": e.vehicle_color,
+                            "track_id": e.track_id,
+                            "zone_id": e.zone_id,
+                            "vehicle_image_path": e.vehicle_image_path,
+                            "first_seen": e.first_seen.isoformat() if e.first_seen else None,
+                            "last_seen": e.last_seen.isoformat() if e.last_seen else None,
+                        }
+                        for e in events
+                    ],
+                },
+                status_code=200,
+            )
+    except Exception as exc:
+        return JSONResponse(content={"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.get("/events/plates")
+@app.get("/api/events/plates")
+async def get_plate_events(request: Request) -> JSONResponse:
+    """Query plate events from DB."""
+    try:
+        from uuid import UUID
+        from src.db.database import Database
+        from src.db.repositories import PlateEventRepository
+        limit = min(max(int(request.query_params.get("limit", 50)), 1), 500)
+        offset = max(int(request.query_params.get("offset", 0)), 0)
+        ve_id = request.query_params.get("vehicle_event_id")
+        ve_uuid = UUID(ve_id) if ve_id else None
+        p_text = request.query_params.get("plate_text")
+        status = request.query_params.get("status")
+
+        db = Database()
+        with db.transaction() as session:
+            repo = PlateEventRepository(session)
+            events = repo.query_events(
+                vehicle_event_id=ve_uuid,
+                plate_text=p_text,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+            return JSONResponse(
+                content={
+                    "status": "ok",
+                    "events": [
+                        {
+                            "id": str(e.id),
+                            "vehicle_event_id": str(e.vehicle_event_id),
+                            "plate_text": e.plate_text,
+                            "confidence": e.confidence,
+                            "plate_crop_path": e.plate_crop_path,
+                            "status": e.status,
+                            "created_at": e.created_at.isoformat() if e.created_at else None,
+                        }
+                        for e in events
+                    ],
+                },
+                status_code=200,
+            )
+    except Exception as exc:
+        return JSONResponse(content={"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.get("/events/faces")
+@app.get("/api/events/faces")
+async def get_face_events(request: Request) -> JSONResponse:
+    """Query face recognition events from DB."""
+    try:
+        from uuid import UUID
+        from src.db.database import Database
+        from src.db.repositories import FaceEventRepository
+        limit = min(max(int(request.query_params.get("limit", 50)), 1), 500)
+        offset = max(int(request.query_params.get("offset", 0)), 0)
+        t_id = request.query_params.get("target_id")
+        target_uuid = UUID(t_id) if t_id else None
+        v_src = request.query_params.get("video_source_id")
+        v_src_uuid = UUID(v_src) if v_src else None
+        decision = request.query_params.get("decision")
+        tr_id = request.query_params.get("track_id")
+        track_id = int(tr_id) if tr_id is not None else None
+
+        db = Database()
+        with db.transaction() as session:
+            repo = FaceEventRepository(session)
+            events = repo.query_events(
+                target_id=target_uuid,
+                video_source_id=v_src_uuid,
+                track_id=track_id,
+                decision=decision,
+                limit=limit,
+                offset=offset,
+            )
+            return JSONResponse(
+                content={
+                    "status": "ok",
+                    "events": [
+                        {
+                            "id": str(e.id),
+                            "target_id": str(e.target_id) if e.target_id else None,
+                            "video_source_id": str(e.video_source_id) if e.video_source_id else None,
+                            "track_id": e.track_id,
+                            "frame_id": e.frame_id,
+                            "similarity": e.similarity,
+                            "decision": e.decision,
+                            "face_crop_path": e.face_crop_path,
+                            "created_at": e.created_at.isoformat() if e.created_at else None,
+                        }
+                        for e in events
+                    ],
+                },
+                status_code=200,
+            )
+    except Exception as exc:
+        return JSONResponse(content={"status": "error", "message": str(exc)}, status_code=500)
+
+
 # -----------------------------------------------------------------------------
 # Snapshot API
 # -----------------------------------------------------------------------------
+
 
 @app.get("/event_snapshot")
 @app.get("/api/event_snapshot")
@@ -1096,6 +1481,24 @@ async def get_event_snapshot(request: Request) -> Response:
 # -----------------------------------------------------------------------------
 # Video Stream API (Native MJPEG Relay)
 # -----------------------------------------------------------------------------
+
+@app.get("/frame_packet")
+@app.get("/api/frame_packet")
+async def frame_packet(request: Request) -> Response:
+    """Relay one indivisible image/metrics response without resampling telemetry."""
+    try:
+        client = get_backend_http_client()
+        response = await client.get(
+            f"{get_backend_url(request).rstrip('/')}/frame_packet", timeout=3.0
+        )
+        headers = {"Cache-Control": "no-store"}
+        if "X-Frame-Telemetry" in response.headers:
+            headers["X-Frame-Telemetry"] = response.headers["X-Frame-Telemetry"]
+        return Response(content=response.content, status_code=response.status_code,
+                        media_type="image/jpeg", headers=headers)
+    except httpx.HTTPError:
+        return Response(status_code=503, headers={"Cache-Control": "no-store"})
+
 
 @app.get("/video_feed")
 @app.get("/api/video_feed")

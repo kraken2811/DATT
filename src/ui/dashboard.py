@@ -226,8 +226,8 @@ def main() -> None:
     with col_video:
         st.markdown("##### 📹 Live Camera Stream (server-relayed MJPEG)")
         video_feed_url = f"{server_url.rstrip('/')}/video_feed"
-        render_video(video_feed_url)
-        st.caption("Server-side MJPEG relay; latest-frame display, target 30 FPS.")
+        video_placeholder = st.empty()
+        st.caption("Image and metrics from the same published frame.")
 
     with col_metrics:
         st.markdown("##### 📊 Realtime AI Telemetry")
@@ -243,8 +243,16 @@ def main() -> None:
 
     @st.fragment(run_every=sleep_sec)
     def refresh_telemetry_and_events():
-        telem = fetch_json(f"{server_url.rstrip('/')}/telemetry")
+        telem = None
+        try:
+            with urllib.request.urlopen(f"{server_url.rstrip('/')}/frame_packet", timeout=2.0) as response:
+                if response.status == 200:
+                    telem = json.loads(response.headers["X-Frame-Telemetry"])
+                    video_placeholder.image(response.read(), use_container_width=True)
+        except Exception:
+            pass
         if telem is None:
+            video_placeholder.empty()
             telem = {
                 "status": "DISCONNECTED",
                 "error_message": "Connecting to AI pipeline server...",
@@ -299,7 +307,7 @@ def main() -> None:
 
             # Counts
             m1, m2 = st.columns(2)
-            m1.metric("Detections", telem.get("detection_count", 0))
+            m1.metric("Detections", telem.get("detection_count") if telem.get("detection_count") is not None else "?")
             m2.metric("Active Tracks", telem.get("track_count", 0))
 
             # FPS

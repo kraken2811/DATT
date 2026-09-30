@@ -97,7 +97,15 @@
         btnConnectYouTube: document.getElementById("btnConnectYouTube"),
         ytFeedback: document.getElementById("ytFeedback"),
 
-        // Local Video Tab Elements (Upload flow)
+        // Local Video Tab & Video Library Elements
+        btnOpenUploadModal: document.getElementById("btnOpenUploadModal"),
+        uploadVideoModal: document.getElementById("uploadVideoModal"),
+        btnCloseUploadModal: document.getElementById("btnCloseUploadModal"),
+        btnCancelUploadModal: document.getElementById("btnCancelUploadModal"),
+        videoLibraryCountBadge: document.getElementById("videoLibraryCountBadge"),
+        btnRefreshVideoLibrary: document.getElementById("btnRefreshVideoLibrary"),
+        videoLibraryList: document.getElementById("videoLibraryList"),
+        modalUploadFeedback: document.getElementById("modalUploadFeedback"),
         localUploadDropzone: document.getElementById("localUploadDropzone"),
         localVideoFileInput: document.getElementById("localVideoFileInput"),
         btnBrowseVideo: document.getElementById("btnBrowseVideo"),
@@ -177,11 +185,19 @@
         applySourceBtn: document.getElementById("applySourceBtn"),
         sourceFeedback: document.getElementById("sourceFeedback"),
 
-        // Target Registration Elements
+        // Target Registration & Management Elements
+        btnOpenAddPersonModal: document.getElementById("btnOpenAddPersonModal"),
+        addPersonModal: document.getElementById("addPersonModal"),
+        btnCloseAddPersonModal: document.getElementById("btnCloseAddPersonModal"),
+        btnCancelAddPersonModal: document.getElementById("btnCancelAddPersonModal"),
         targetNameInput: document.getElementById("targetNameInput"),
         targetColorSelect: document.getElementById("targetColorSelect"),
         targetFaceInput: document.getElementById("targetFaceInput"),
         targetFaceFilename: document.getElementById("targetFaceFilename"),
+        targetFacePreviewContainer: document.getElementById("targetFacePreviewContainer"),
+        targetFacePreview: document.getElementById("targetFacePreview"),
+        targetThresholdInput: document.getElementById("targetThresholdInput"),
+        addPersonFeedback: document.getElementById("addPersonFeedback"),
         registerTargetBtn: document.getElementById("registerTargetBtn"),
         targetFeedback: document.getElementById("targetFeedback"),
         targetCount: document.getElementById("targetCount"),
@@ -263,14 +279,14 @@
      */
     function startMonitoringTimers() {
         stopMonitoringTimers();
-        pollTelemetry();
+        startFramePackets();
         pollEvents();
         loadTargets();
-        state.telemetryTimer = setInterval(pollTelemetry, CONFIG.telemetryIntervalMs);
         state.eventsTimer = setInterval(pollEvents, CONFIG.eventsIntervalMs);
     }
 
     function stopMonitoringTimers() {
+        stopFramePackets();
         if (state.telemetryTimer) {
             clearInterval(state.telemetryTimer);
             state.telemetryTimer = null;
@@ -308,6 +324,9 @@
                 }
                 if (targetId === "tab-youtube") {
                     fetchConfigCameras();
+                }
+                if (targetId === "tab-local") {
+                    loadVideoLibrary();
                 }
             });
         });
@@ -594,7 +613,7 @@
      * Primary Camera Selection & Connection Verification Sequence.
      * Criteria: frames_received > 0, frame_age_seconds < 5.0, stream_alive is true.
      */
-    window.dattSelectCamera = async function (name, streamUrl, sourceType, provider) {
+    window.dattSelectCamera = async function (name, streamUrl, sourceType, provider, videoSourceId) {
         await closePreview();
 
         const sourceData = {
@@ -602,7 +621,8 @@
             source: streamUrl,
             stream_url: streamUrl,
             source_type: sourceType || "direct_hls",
-            provider: provider || "Caltrans"
+            provider: provider || "Caltrans",
+            video_source_id: videoSourceId || null
         };
         state.connectingSourceData = sourceData;
 
@@ -619,7 +639,8 @@
                     source: sourceData.source,
                     url: sourceData.source,
                     name: sourceData.name,
-                    provider: sourceData.provider
+                    provider: sourceData.provider,
+                    video_source_id: sourceData.video_source_id
                 })
             });
 
@@ -840,17 +861,124 @@
     }
 
     /**
-     * Local Video Tab Setup (Real Browser File Upload Flow).
+     * Local Video Tab Setup (Video Library & Persistent Storage Flow).
      */
+    async function loadVideoLibrary() {
+        if (!DOM.videoLibraryList) return;
+        try {
+            const resp = await fetch(apiUrl("/api/video_sources"));
+            if (resp.ok) {
+                const data = await resp.json();
+                renderVideoLibrary(data.sources || []);
+            }
+        } catch (e) {
+            console.warn("Failed to load video library:", e);
+        }
+    }
+
+    function formatBytes(bytes) {
+        if (!bytes || bytes === 0) return "0 Bytes";
+        const k = 1024;
+        const sizes = ["Bytes", "KB", "MB", "GB"];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+    }
+
+    function renderVideoLibrary(videos) {
+        if (DOM.videoLibraryCountBadge) {
+            DOM.videoLibraryCountBadge.textContent = `${videos.length} video${videos.length === 1 ? '' : 's'}`;
+        }
+        if (!DOM.videoLibraryList) return;
+        if (videos.length === 0) {
+            DOM.videoLibraryList.innerHTML = `
+                <div class="video-library-empty">
+                    <span class="empty-icon">📂</span>
+                    <p>Chưa có video nào trong thư viện.</p>
+                    <p style="font-size: 0.8rem; color: #94a3b8;">Bấm "+ Upload Video" ở trên để tải lên video MP4 mới.</p>
+                </div>
+            `;
+            return;
+        }
+
+        DOM.videoLibraryList.innerHTML = videos.map(v => {
+            const sizeStr = formatBytes(v.file_size_bytes || 0);
+            const durationStr = v.duration_seconds ? `${Math.round(v.duration_seconds)}s` : "";
+            const resStr = (v.width && v.height) ? `${v.width}x${v.height}` : "";
+            const metaBadges = [sizeStr, durationStr, resStr].filter(Boolean).map(m => `<span class="video-card-badge">${escapeHtml(m)}</span>`).join("");
+            const dateStr = v.created_at ? new Date(v.created_at).toLocaleString() : "";
+            const safeName = escapeHtml(v.original_filename || "Video");
+            const safePath = escapeHtml(v.storage_path || "");
+            const safeId = escapeHtml(v.id || "");
+
+            return `
+                <div class="video-card" data-id="${safeId}">
+                    <div class="video-card-thumb">
+                        <span class="thumb-icon">🎬</span>
+                    </div>
+                    <div class="video-card-content">
+                        <div class="video-card-title" title="${safeName}">${safeName}</div>
+                        <div class="video-card-meta">${metaBadges}</div>
+                        <div class="video-card-date">${dateStr}</div>
+                    </div>
+                    <div class="video-card-actions">
+                        <button type="button" class="primary-btn btn-sm btn-select-video" title="Chọn chạy AI" onclick="window.dattSelectLibraryVideo('${safeName}', '${safePath}', '${safeId}')">
+                            ▶️ Chọn
+                        </button>
+                        <button type="button" class="secondary-btn btn-sm btn-delete-video" title="Xóa video" onclick="window.dattDeleteVideoSource('${safeId}')">
+                            🗑️
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join("");
+    }
+
+    window.dattSelectLibraryVideo = function(name, path, id) {
+        window.dattSelectCamera(`Local: ${name}`, path, "local", "Local Video", id);
+    };
+
+    window.dattDeleteVideoSource = async function(id) {
+        if (!confirm("Bạn có chắc chắn muốn xóa video này khỏi hệ thống và cơ sở dữ liệu?")) return;
+        try {
+            const resp = await fetch(apiUrl(`/api/video_sources/${encodeURIComponent(id)}`), {
+                method: "DELETE"
+            });
+            if (resp.ok) {
+                await loadVideoLibrary();
+            } else {
+                const err = await resp.json().catch(() => ({}));
+                alert(`Không thể xóa: ${err.message || resp.statusText}`);
+            }
+        } catch (e) {
+            alert(`Lỗi mạng: ${e.message}`);
+        }
+    };
+
     function initLocalVideoTab() {
         let selectedFile = null;
 
-        function formatBytes(bytes) {
-            if (bytes === 0) return "0 Bytes";
-            const k = 1024;
-            const sizes = ["Bytes", "KB", "MB", "GB"];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+        // Modal triggers
+        if (DOM.btnOpenUploadModal && DOM.uploadVideoModal) {
+            DOM.btnOpenUploadModal.addEventListener("click", () => {
+                DOM.uploadVideoModal.style.display = "flex";
+                if (DOM.modalUploadFeedback) DOM.modalUploadFeedback.textContent = "";
+                if (DOM.uploadProgressBarContainer) DOM.uploadProgressBarContainer.style.display = "none";
+                if (DOM.localFileInfoCard) DOM.localFileInfoCard.style.display = "none";
+                if (DOM.btnUploadAndConnect) DOM.btnUploadAndConnect.disabled = true;
+                selectedFile = null;
+                if (DOM.localVideoFileInput) DOM.localVideoFileInput.value = "";
+            });
+        }
+
+        const closeUploadModal = () => {
+            if (DOM.uploadVideoModal) DOM.uploadVideoModal.style.display = "none";
+        };
+
+        if (DOM.btnCloseUploadModal) DOM.btnCloseUploadModal.addEventListener("click", closeUploadModal);
+        if (DOM.btnCancelUploadModal) DOM.btnCancelUploadModal.addEventListener("click", closeUploadModal);
+
+        if (DOM.btnRefreshVideoLibrary) {
+            DOM.btnRefreshVideoLibrary.addEventListener("click", () => loadVideoLibrary());
         }
 
         function handleFileSelection(file) {
@@ -858,9 +986,9 @@
             const allowed = [".mp4", ".mov", ".mkv", ".avi"];
             const ext = "." + file.name.split(".").pop().toLowerCase();
             if (!allowed.includes(ext)) {
-                if (DOM.localFeedback) {
-                    DOM.localFeedback.className = "feedback-msg error";
-                    DOM.localFeedback.textContent = `Định dạng tệp "${ext}" không được hỗ trợ. Vui lòng chọn MP4, MOV, MKV hoặc AVI.`;
+                if (DOM.modalUploadFeedback) {
+                    DOM.modalUploadFeedback.className = "feedback-msg error";
+                    DOM.modalUploadFeedback.textContent = `Định dạng tệp "${ext}" không được hỗ trợ. Vui lòng chọn MP4, MOV, MKV hoặc AVI.`;
                 }
                 return;
             }
@@ -877,7 +1005,7 @@
             if (DOM.uploadProgressBarFill) DOM.uploadProgressBarFill.style.width = "0%";
             if (DOM.uploadProgressText) DOM.uploadProgressText.textContent = "0%";
             if (DOM.btnUploadAndConnect) DOM.btnUploadAndConnect.disabled = false;
-            if (DOM.localFeedback) DOM.localFeedback.textContent = "";
+            if (DOM.modalUploadFeedback) DOM.modalUploadFeedback.textContent = "";
         }
 
         if (DOM.btnBrowseVideo) {
@@ -916,9 +1044,9 @@
         if (DOM.btnUploadAndConnect) {
             DOM.btnUploadAndConnect.addEventListener("click", () => {
                 if (!selectedFile) {
-                    if (DOM.localFeedback) {
-                        DOM.localFeedback.className = "feedback-msg error";
-                        DOM.localFeedback.textContent = "Vui lòng chọn tệp video trước khi upload.";
+                    if (DOM.modalUploadFeedback) {
+                        DOM.modalUploadFeedback.className = "feedback-msg error";
+                        DOM.modalUploadFeedback.textContent = "Vui lòng chọn tệp video trước khi upload.";
                     }
                     return;
                 }
@@ -931,7 +1059,7 @@
                     DOM.localFileStatusBadge.textContent = "Đang tải lên...";
                     DOM.localFileStatusBadge.className = "file-status-badge uploading";
                 }
-                if (DOM.localFeedback) DOM.localFeedback.textContent = "";
+                if (DOM.modalUploadFeedback) DOM.modalUploadFeedback.textContent = "";
 
                 const formData = new FormData();
                 formData.append("file", selectedFile);
@@ -947,7 +1075,7 @@
                     }
                 };
 
-                xhr.onload = () => {
+                xhr.onload = async () => {
                     if (xhr.status === 200) {
                         try {
                             const res = JSON.parse(xhr.responseText);
@@ -959,9 +1087,16 @@
                                 if (DOM.uploadProgressBarFill) DOM.uploadProgressBarFill.style.width = "100%";
                                 if (DOM.uploadProgressText) DOM.uploadProgressText.textContent = "100%";
 
-                                // Trigger camera selection with server path
-                                const displayName = `Local: ${res.filename || selectedFile.name}`;
-                                window.dattSelectCamera(displayName, res.server_path, "local", "Local Video");
+                                // Refresh video library
+                                await loadVideoLibrary();
+
+                                // Close modal after brief pause
+                                setTimeout(() => {
+                                    closeUploadModal();
+                                    // Trigger camera selection with server path and video_source_id
+                                    const displayName = `Local: ${res.filename || selectedFile.name}`;
+                                    window.dattSelectCamera(displayName, res.server_path, "local", "Local Video", res.video_source_id || res.id);
+                                }, 400);
                                 return;
                             }
                         } catch (e) {}
@@ -978,9 +1113,9 @@
                         const err = JSON.parse(xhr.responseText);
                         if (err.message) errorMsg = err.message;
                     } catch (e) {}
-                    if (DOM.localFeedback) {
-                        DOM.localFeedback.className = "feedback-msg error";
-                        DOM.localFeedback.textContent = errorMsg;
+                    if (DOM.modalUploadFeedback) {
+                        DOM.modalUploadFeedback.className = "feedback-msg error";
+                        DOM.modalUploadFeedback.textContent = errorMsg;
                     }
                 };
 
@@ -990,9 +1125,9 @@
                         DOM.localFileStatusBadge.textContent = "Lỗi kết nối ✗";
                         DOM.localFileStatusBadge.className = "file-status-badge error";
                     }
-                    if (DOM.localFeedback) {
-                        DOM.localFeedback.className = "feedback-msg error";
-                        DOM.localFeedback.textContent = "Lỗi mạng khi tải lên tệp video.";
+                    if (DOM.modalUploadFeedback) {
+                        DOM.modalUploadFeedback.className = "feedback-msg error";
+                        DOM.modalUploadFeedback.textContent = "Lỗi mạng khi tải lên tệp video.";
                     }
                 };
 
@@ -1048,58 +1183,91 @@
     /**
      * Video Stream MJPEG Reconnect Logic.
      */
+    let frameEpoch = 0;
+    let frameController = null;
+    let frameTimer = null;
+
+    function stopFramePackets() {
+        frameEpoch++;
+        if (frameController) frameController.abort();
+        frameController = null;
+        clearTimeout(frameTimer);
+    }
+
     function triggerVideoRefresh() {
-        if (!DOM.videoFeed) return;
-        DOM.videoErrorOverlay.style.display = "none";
-        DOM.videoFeed.src = `/video_feed?t=${Date.now()}`;
-    }
-
-    function setupVideoStream() {
-        if (!DOM.videoFeed) return;
-
-        DOM.videoFeed.onerror = function () {
-            DOM.videoErrorOverlay.style.display = "flex";
-            if (!state.videoReconnectTimer) {
-                state.videoReconnectTimer = setTimeout(() => {
-                    state.videoReconnectTimer = null;
-                    if (state.uiState === UI_STATE.MONITORING) {
-                        triggerVideoRefresh();
-                    }
-                }, CONFIG.videoReconnectDelayMs);
-            }
-        };
-
-        DOM.videoFeed.onload = function () {
-            DOM.videoErrorOverlay.style.display = "none";
-            if (state.videoReconnectTimer) {
-                clearTimeout(state.videoReconnectTimer);
-                state.videoReconnectTimer = null;
-            }
-        };
-    }
-
-    /**
-     * Poll Realtime AI Telemetry.
-     */
-    async function pollTelemetry() {
-        const startTime = performance.now();
-        try {
-            const response = await fetch(apiUrl("/telemetry"), {
-                headers: { "Accept": "application/json" }
-            });
-            const latencyMs = Math.round(performance.now() - startTime);
-            DOM.pingLatency.textContent = `${latencyMs} ms`;
-
-            if (response.ok) {
-                const data = await response.json();
-                state.consecutiveErrors = 0;
-                applyTelemetry(data);
-            } else {
-                handleTelemetryError();
-            }
-        } catch (err) {
-            handleTelemetryError();
+        // startMonitoringTimers owns the single image/metrics request loop.
+        stopFramePackets();
+        const ctx = DOM.videoFeed.getContext("2d");
+        ctx.clearRect(0, 0, DOM.videoFeed.width, DOM.videoFeed.height);
+        for (const element of [DOM.metricPeopleCount, DOM.metricCarCount,
+            DOM.metricDetections, DOM.metricTracks]) {
+            if (element) element.textContent = "?";
         }
+    }
+
+    function setupVideoStream() {}
+
+    function startFramePackets() {
+        stopFramePackets();
+        const epoch = frameEpoch;
+        let lastKey = null;
+        async function nextFrame() {
+            if (epoch !== frameEpoch || state.uiState !== UI_STATE.MONITORING) return;
+            const started = performance.now();
+            const controller = new AbortController();
+            frameController = controller;
+            const timeout = setTimeout(() => controller.abort(), 5000);
+            let failed = false;
+            try {
+                const response = await fetch(apiUrl("/frame_packet"), {
+                    cache: "no-store", signal: controller.signal
+                });
+                if (epoch !== frameEpoch) return;
+                if (response.status === 204) {
+                    DOM.videoErrorOverlay.style.display = "flex";
+                    return;
+                }
+                if (!response.ok) throw new Error(`Frame HTTP ${response.status}`);
+                const metrics = JSON.parse(response.headers.get("X-Frame-Telemetry"));
+                const key = `${metrics.source_generation}:${metrics.frame_id}`;
+                const blob = await response.blob();
+                if (epoch !== frameEpoch) return;
+                if (key !== lastKey) {
+                    const bitmap = await createImageBitmap(blob);
+                    try {
+                        await new Promise(resolve => requestAnimationFrame(() => {
+                            try {
+                                if (epoch !== frameEpoch) return;
+                                const canvas = DOM.videoFeed;
+                                if (canvas.width !== bitmap.width) canvas.width = bitmap.width;
+                                if (canvas.height !== bitmap.height) canvas.height = bitmap.height;
+                                canvas.getContext("2d").drawImage(bitmap, 0, 0);
+                                applyTelemetry(metrics);
+                                canvas.dataset.frameId = String(metrics.frame_id);
+                                canvas.dataset.sourceGeneration = String(metrics.source_generation);
+                                lastKey = key;
+                            } finally { resolve(); }
+                        }));
+                    } finally { bitmap.close(); }
+                }
+                if (epoch !== frameEpoch) return;
+                DOM.videoErrorOverlay.style.display = "none";
+                DOM.pingLatency.textContent = `${Math.round(performance.now() - started)} ms`;
+                state.consecutiveErrors = 0;
+            } catch (error) {
+                failed = true;
+                if (epoch === frameEpoch) {
+                    DOM.videoErrorOverlay.style.display = "flex";
+                    handleTelemetryError();
+                }
+            } finally {
+                clearTimeout(timeout);
+                if (epoch === frameEpoch) {
+                    frameTimer = setTimeout(nextFrame, failed ? 500 : Math.max(0, 33 - (performance.now() - started)));
+                }
+            }
+        }
+        nextFrame();
     }
 
     function applyTelemetry(data) {
@@ -1131,7 +1299,7 @@
         if (DOM.zoneToggleCheckbox && document.activeElement !== DOM.zoneToggleCheckbox) {
             DOM.zoneToggleCheckbox.checked = !!data.zone_enabled;
         }
-        DOM.metricDetections.textContent = data.detection_count || 0;
+        DOM.metricDetections.textContent = data.detection_count == null ? "?" : data.detection_count;
         DOM.metricTracks.textContent = data.track_count || 0;
         DOM.metricProcessingFps.textContent = Number(data.processing_fps || 0).toFixed(1);
         DOM.metricStreamFps.textContent = Number(data.stream_fps || 0).toFixed(1);
@@ -1261,7 +1429,7 @@
     }
 
     /**
-     * Target Registration & Management.
+     * Target Registration & Management (Target Person Flow).
      */
     async function loadTargets() {
         try {
@@ -1270,32 +1438,74 @@
                 const data = await resp.json();
                 renderTargets(data.targets || []);
             }
-        } catch (e) {}
+        } catch (e) {
+            console.warn("Failed to load targets:", e);
+        }
     }
 
     function renderTargets(targets) {
-        DOM.targetCount.textContent = targets.length;
+        if (DOM.targetCount) {
+            DOM.targetCount.textContent = targets.length;
+        }
+        if (!DOM.targetsList) return;
         if (targets.length === 0) {
-            DOM.targetsList.innerHTML = '<div class="target-item-empty">No active targets registered.</div>';
+            DOM.targetsList.innerHTML = '<div class="target-item-empty">Chưa có người nào được đăng ký. Bấm "+ Add Person" để đăng ký đối tượng tìm kiếm.</div>';
             return;
         }
 
         DOM.targetsList.innerHTML = targets.map(t => {
+            const isSelected = t.is_selected !== false;
+            const activeClass = isSelected ? "active-target" : "inactive-target";
+            const checkIcon = isSelected ? "✓" : "○";
             const colorBadge = t.clothing_color ? `<span class="target-badge badge-color">${escapeHtml(t.clothing_color)}</span>` : "";
-            const faceBadge = t.has_face_feature ? `<span class="target-badge badge-face">Face ID</span>` : "";
+            const faceBadge = (t.has_face || t.has_face_feature) ? `<span class="target-badge badge-face">ArcFace 512D</span>` : "";
+            const thumbUrl = t.source_image_path ? apiUrl(`/api/targets/${encodeURIComponent(t.id)}/image`) : "";
+            const thumbHtml = thumbUrl
+                ? `<img class="target-thumb" src="${thumbUrl}" alt="${escapeHtml(t.name)}" onerror="this.outerHTML='<span class=\\'target-avatar-icon\\'>👤</span>';">`
+                : `<span class="target-avatar-icon">👤</span>`;
+
             return `
-                <div class="target-item">
+                <div class="target-item ${activeClass}" onclick="window.dattToggleTargetSelection('${escapeHtml(t.id)}', ${!isSelected})">
+                    <div class="target-thumb-wrap">
+                        ${thumbHtml}
+                    </div>
                     <div class="target-info">
                         <span class="target-name">${escapeHtml(t.name)}</span>
-                        <div class="target-badges">${faceBadge}${colorBadge}</div>
+                        <div class="target-badges">
+                            ${faceBadge}${colorBadge}
+                            <span class="target-status-pill ${isSelected ? 'pill-selected' : 'pill-deselected'}">
+                                ${isSelected ? 'Đang tìm kiếm' : 'Tạm bỏ qua'}
+                            </span>
+                        </div>
                     </div>
-                    <button type="button" class="target-del-btn" title="Remove Target" onclick="window.dattDeleteTarget('${escapeHtml(t.id)}')">✖</button>
+                    <div class="target-actions-wrap" onclick="event.stopPropagation();">
+                        <button type="button" class="target-toggle-btn ${isSelected ? 'selected' : ''}" title="${isSelected ? 'Bỏ chọn' : 'Chọn tìm'}" onclick="window.dattToggleTargetSelection('${escapeHtml(t.id)}', ${!isSelected})">
+                            ${checkIcon}
+                        </button>
+                        <button type="button" class="target-del-btn" title="Xóa Target" onclick="window.dattDeleteTarget('${escapeHtml(t.id)}')">✖</button>
+                    </div>
                 </div>
             `;
         }).join("");
     }
 
+    window.dattToggleTargetSelection = async function(targetId, selectState) {
+        try {
+            const resp = await fetch(apiUrl(`/api/targets/${encodeURIComponent(targetId)}/select`), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ selected: selectState })
+            });
+            if (resp.ok) {
+                await loadTargets();
+            }
+        } catch (e) {
+            console.warn("Failed to toggle target selection:", e);
+        }
+    };
+
     window.dattDeleteTarget = async function(targetId) {
+        if (!confirm("Bạn có chắc chắn muốn xóa đối tượng này?")) return;
         try {
             const resp = await fetch(apiUrl(`/api/targets/${encodeURIComponent(targetId)}`), {
                 method: "DELETE"
@@ -1306,25 +1516,71 @@
         } catch (err) {}
     };
 
+    function initAddPersonModal() {
+        if (DOM.btnOpenAddPersonModal && DOM.addPersonModal) {
+            DOM.btnOpenAddPersonModal.addEventListener("click", () => {
+                DOM.addPersonModal.style.display = "flex";
+                if (DOM.addPersonFeedback) DOM.addPersonFeedback.textContent = "";
+                if (DOM.targetFacePreviewContainer) DOM.targetFacePreviewContainer.style.display = "none";
+                if (DOM.targetFaceFilename) DOM.targetFaceFilename.textContent = "Chọn hoặc kéo thả ảnh chân dung (JPG, PNG)";
+                if (DOM.targetNameInput) DOM.targetNameInput.value = "";
+                if (DOM.targetFaceInput) DOM.targetFaceInput.value = "";
+            });
+        }
+
+        const closeAddPerson = () => {
+            if (DOM.addPersonModal) DOM.addPersonModal.style.display = "none";
+        };
+
+        if (DOM.btnCloseAddPersonModal) DOM.btnCloseAddPersonModal.addEventListener("click", closeAddPerson);
+        if (DOM.btnCancelAddPersonModal) DOM.btnCancelAddPersonModal.addEventListener("click", closeAddPerson);
+
+        if (DOM.targetFaceInput) {
+            DOM.targetFaceInput.addEventListener("change", (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    if (DOM.targetFaceFilename) DOM.targetFaceFilename.textContent = file.name;
+                    const reader = new FileReader();
+                    reader.onload = (loadEvt) => {
+                        if (DOM.targetFacePreview) DOM.targetFacePreview.src = loadEvt.target.result;
+                        if (DOM.targetFacePreviewContainer) DOM.targetFacePreviewContainer.style.display = "block";
+                    };
+                    reader.readAsDataURL(file);
+                } else {
+                    if (DOM.targetFaceFilename) DOM.targetFaceFilename.textContent = "Chọn hoặc kéo thả ảnh chân dung (JPG, PNG)";
+                    if (DOM.targetFacePreviewContainer) DOM.targetFacePreviewContainer.style.display = "none";
+                }
+            });
+        }
+    }
+
     async function registerTarget() {
-        const name = DOM.targetNameInput.value.trim();
-        const color = DOM.targetColorSelect.value;
-        const file = DOM.targetFaceInput.files[0];
+        const name = DOM.targetNameInput ? DOM.targetNameInput.value.trim() : "";
+        const color = DOM.targetColorSelect ? DOM.targetColorSelect.value : "";
+        const threshold = DOM.targetThresholdInput ? DOM.targetThresholdInput.value : "0.45";
+        const file = DOM.targetFaceInput ? DOM.targetFaceInput.files[0] : null;
+
+        const feedbackEl = DOM.addPersonFeedback || DOM.targetFeedback;
 
         if (!name) {
-            DOM.targetFeedback.className = "feedback-msg error";
-            DOM.targetFeedback.textContent = "Target name is required.";
+            if (feedbackEl) {
+                feedbackEl.className = "feedback-msg error";
+                feedbackEl.textContent = "Họ và tên / Mã nhận dạng là bắt buộc.";
+            }
             return;
         }
 
         const formData = new FormData();
         formData.append("name", name);
         if (color) formData.append("color", color);
+        if (threshold) formData.append("threshold", threshold);
         if (file) formData.append("face_image", file);
 
-        DOM.registerTargetBtn.disabled = true;
-        DOM.targetFeedback.className = "feedback-msg";
-        DOM.targetFeedback.textContent = "Registering...";
+        if (DOM.registerTargetBtn) DOM.registerTargetBtn.disabled = true;
+        if (feedbackEl) {
+            feedbackEl.className = "feedback-msg";
+            feedbackEl.textContent = "Đang trích xuất đặc trưng khuôn mặt (SCRFD + ArcFace 512D)...";
+        }
 
         try {
             const resp = await fetch(apiUrl("/api/register_target"), {
@@ -1333,21 +1589,31 @@
             });
             const data = await resp.json();
             if (resp.ok && data.status === "ok") {
-                DOM.targetFeedback.className = "feedback-msg success";
-                DOM.targetFeedback.textContent = `Registered: ${data.target.name}`;
-                DOM.targetNameInput.value = "";
-                DOM.targetFaceInput.value = "";
-                DOM.targetFaceFilename.textContent = "Face Image (Optional)";
+                if (feedbackEl) {
+                    feedbackEl.className = "feedback-msg success";
+                    feedbackEl.textContent = `Đăng ký thành công: ${data.target.name}`;
+                }
                 await loadTargets();
+
+                setTimeout(() => {
+                    if (DOM.addPersonModal) DOM.addPersonModal.style.display = "none";
+                    if (DOM.targetNameInput) DOM.targetNameInput.value = "";
+                    if (DOM.targetFaceInput) DOM.targetFaceInput.value = "";
+                    if (DOM.targetFacePreviewContainer) DOM.targetFacePreviewContainer.style.display = "none";
+                }, 500);
             } else {
-                DOM.targetFeedback.className = "feedback-msg error";
-                DOM.targetFeedback.textContent = data.message || "Registration failed.";
+                if (feedbackEl) {
+                    feedbackEl.className = "feedback-msg error";
+                    feedbackEl.textContent = data.message || "Đăng ký đối tượng thất bại.";
+                }
             }
         } catch (err) {
-            DOM.targetFeedback.className = "feedback-msg error";
-            DOM.targetFeedback.textContent = `Error: ${err.message}`;
+            if (feedbackEl) {
+                feedbackEl.className = "feedback-msg error";
+                feedbackEl.textContent = `Lỗi mạng: ${err.message}`;
+            }
         } finally {
-            DOM.registerTargetBtn.disabled = false;
+            if (DOM.registerTargetBtn) DOM.registerTargetBtn.disabled = false;
         }
     }
 
@@ -1398,6 +1664,7 @@
         initPreviewModal();
         initErrorActions();
         setupVideoStream();
+        initAddPersonModal();
 
         if (DOM.registerTargetBtn) {
             DOM.registerTargetBtn.addEventListener("click", registerTarget);
@@ -1418,13 +1685,8 @@
             });
         }
 
-        if (DOM.targetFaceInput) {
-            DOM.targetFaceInput.addEventListener("change", (e) => {
-                const file = e.target.files[0];
-                DOM.targetFaceFilename.textContent = file ? file.name : "Face Image (Optional)";
-            });
-        }
-
+        loadTargets();
+        loadVideoLibrary();
         checkInitialAppState();
     }
 

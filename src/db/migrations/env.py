@@ -36,7 +36,19 @@ def include_object(object, name, type_, reflected, compare_to):
 
 
 config = context.config
-url = os.environ.get("DATT_DATABASE_URL") or config.get_main_option("sqlalchemy.url")
+url = os.environ.get("DATT_DATABASE_URL")
+if not url:
+    from pathlib import Path
+    env_file = Path(__file__).resolve().parent.parent.parent.parent / ".env"
+    if env_file.is_file():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("DATT_DATABASE_URL=") and len(line) > len("DATT_DATABASE_URL="):
+                val = line.split("=", 1)[1].strip().strip("'\"")
+                if val:
+                    url = val
+                    break
+url = url or config.get_main_option("sqlalchemy.url")
 target_metadata = Base.metadata
 
 if context.is_offline_mode():

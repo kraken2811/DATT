@@ -159,3 +159,88 @@ class ClothingColorExtractor:
 
 # Convenience singleton instance
 clothing_color_extractor = ClothingColorExtractor()
+
+VEHICLE_COLOR_NAMES = (
+    "white",
+    "black",
+    "gray/silver",
+    "red",
+    "blue",
+    "green",
+    "yellow",
+    "other/unknown",
+)
+
+
+def extract_vehicle_color(crop: np.ndarray | None) -> str:
+    """Classify basic vehicle color from a cropped vehicle image using HSV.
+
+    Categories:
+    - 'white'
+    - 'black'
+    - 'gray/silver'
+    - 'red'
+    - 'blue'
+    - 'green'
+    - 'yellow'
+    - 'other/unknown'
+    """
+    if crop is None or not isinstance(crop, np.ndarray) or crop.size == 0:
+        return "other/unknown"
+
+    h, w = crop.shape[:2]
+    if h < 10 or w < 10:
+        return "other/unknown"
+
+    # Focus on the vehicle body (exclude windshield/sky at top and wheels/asphalt at bottom)
+    y1 = int(h * 0.20)
+    y2 = int(h * 0.80)
+    x1 = int(w * 0.15)
+    x2 = int(w * 0.85)
+
+    if (y2 - y1) < 5 or (x2 - x1) < 5:
+        body = crop
+    else:
+        body = crop[y1:y2, x1:x2]
+
+    if body.size == 0:
+        return "other/unknown"
+
+    hsv = cv2.cvtColor(body, cv2.COLOR_BGR2HSV)
+    H = hsv[:, :, 0]
+    S = hsv[:, :, 1]
+    V = hsv[:, :, 2]
+
+    # Achromatic masks
+    black_mask = V < 55
+    white_mask = (S < 45) & (V >= 170)
+    gray_mask = (S < 45) & (V >= 55) & (V < 170)
+
+    # Chromatic mask
+    chromatic_mask = ~black_mask & ~white_mask & ~gray_mask & (S >= 40) & (V >= 50)
+
+    # Color classifications in OpenCV HSV (H in [0, 180])
+    red_mask = chromatic_mask & ((H <= 10) | (H >= 165))
+    yellow_mask = chromatic_mask & ((H > 10) & (H <= 35))
+    green_mask = chromatic_mask & ((H > 35) & (H <= 85))
+    blue_mask = chromatic_mask & ((H > 85) & (H < 165))
+
+    counts = {
+        "black": int(np.count_nonzero(black_mask)),
+        "white": int(np.count_nonzero(white_mask)),
+        "gray/silver": int(np.count_nonzero(gray_mask)),
+        "red": int(np.count_nonzero(red_mask)),
+        "yellow": int(np.count_nonzero(yellow_mask)),
+        "green": int(np.count_nonzero(green_mask)),
+        "blue": int(np.count_nonzero(blue_mask)),
+    }
+
+    classified_pixels = sum(counts.values())
+    if classified_pixels < 25:
+        return "other/unknown"
+
+    dominant_color, dominant_count = max(counts.items(), key=lambda item: item[1])
+    if dominant_count / classified_pixels >= 0.18:
+        return dominant_color
+
+    return "other/unknown"

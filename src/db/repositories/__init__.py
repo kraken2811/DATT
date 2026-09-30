@@ -10,7 +10,7 @@ from typing import Any, Sequence
 
 from .base import Repository
 from ..models import (
-    Camera, Zone, Target, TargetEmbedding,
+    Camera, VideoSource, Zone, Target, TargetEmbedding,
     DetectionEvent, VehicleEvent, PlateEvent, FaceEvent,
     VehiclePassage, BusinessEvent,
 )
@@ -36,6 +36,26 @@ class CameraRepository(Repository[Camera]):
     model = Camera
 
 
+class VideoSourceRepository(Repository[VideoSource]):
+    model = VideoSource
+
+    def get_by_storage_path(self, storage_path: str) -> VideoSource | None:
+        statement = select(self.model).where(self.model.storage_path == storage_path)
+        return self.session.scalars(statement).first()
+
+    def query_sources(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[VideoSource]:
+        statement = select(self.model)
+        if status is not None:
+            statement = statement.where(self.model.status == status)
+        return self._page(statement.order_by(self.model.created_at.desc(), self.model.id), limit, offset)
+
+
 class ZoneRepository(Repository[Zone]):
     model = Zone
 
@@ -43,16 +63,34 @@ class ZoneRepository(Repository[Zone]):
 class TargetRepository(Repository[Target]):
     model = Target
 
+    def create(self, **values) -> Target:
+        explicit_id = values.pop("id", None)
+        self._validate_fields(values)
+        if explicit_id is not None:
+            item = self.model(id=explicit_id, **values)
+        else:
+            item = self.model(**values)
+        self.session.add(item)
+        self.session.flush()
+        return item
+
+
 
 class DetectionEventRepository(Repository[DetectionEvent]):
     model = DetectionEvent
 
     def query(self, *, camera_id: UUID | None = None, event_type: str | None = None,
-              track_id: int | None = None, since: datetime | None = None,
-              until: datetime | None = None, limit: int = 100, offset: int = 0):
+              track_id: int | None = None, video_source_id: UUID | None = None,
+              since: datetime | None = None, until: datetime | None = None,
+              limit: int = 100, offset: int = 0):
         """Newest first; UTC time interval is [since, until)."""
         statement = select(self.model)
-        for name, value in (("camera_id", camera_id), ("event_type", event_type), ("track_id", track_id)):
+        for name, value in (
+            ("camera_id", camera_id),
+            ("event_type", event_type),
+            ("track_id", track_id),
+            ("video_source_id", video_source_id),
+        ):
             if value is not None:
                 statement = statement.where(getattr(self.model, name) == value)
         if since is not None:
@@ -65,13 +103,140 @@ class DetectionEventRepository(Repository[DetectionEvent]):
 class VehicleEventRepository(Repository[VehicleEvent]):
     model = VehicleEvent
 
+    def create(self, **values) -> VehicleEvent:
+        explicit_id = values.pop("id", None)
+        explicit_created = values.pop("created_at", None)
+        self._validate_fields(values)
+        if explicit_id is not None:
+            item = self.model(id=explicit_id, **values)
+        else:
+            item = self.model(**values)
+        if explicit_created is not None:
+            item.created_at = explicit_created
+        self.session.add(item)
+        self.session.flush()
+        return item
+
+    def query_events(
+        self,
+        *,
+        track_id: int | None = None,
+        vehicle_class: str | None = None,
+        vehicle_color: str | None = None,
+        zone_id: str | None = None,
+        video_source_id: UUID | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[VehicleEvent]:
+        statement = select(self.model)
+        if track_id is not None:
+            statement = statement.where(self.model.track_id == track_id)
+        if vehicle_class is not None:
+            statement = statement.where(self.model.vehicle_class == vehicle_class)
+        if vehicle_color is not None:
+            statement = statement.where(self.model.vehicle_color == vehicle_color)
+        if zone_id is not None:
+            statement = statement.where(self.model.zone_id == zone_id)
+        if video_source_id is not None:
+            statement = statement.where(self.model.video_source_id == video_source_id)
+        if since is not None:
+            statement = statement.where(self.model.first_seen >= since)
+        if until is not None:
+            statement = statement.where(self.model.first_seen < until)
+        return self._page(statement.order_by(self.model.first_seen.desc(), self.model.id), limit, offset)
+
 
 class PlateEventRepository(Repository[PlateEvent]):
     model = PlateEvent
 
+    def create(self, **values) -> PlateEvent:
+        explicit_id = values.pop("id", None)
+        explicit_created = values.pop("created_at", None)
+        self._validate_fields(values)
+        if explicit_id is not None:
+            item = self.model(id=explicit_id, **values)
+        else:
+            item = self.model(**values)
+        if explicit_created is not None:
+            item.created_at = explicit_created
+        self.session.add(item)
+        self.session.flush()
+        return item
+
+    def get_by_vehicle_event(self, vehicle_event_id: UUID) -> list[PlateEvent]:
+        statement = select(self.model).where(self.model.vehicle_event_id == vehicle_event_id)
+        return list(self.session.scalars(statement))
+
+    def query_events(
+        self,
+        *,
+        vehicle_event_id: UUID | None = None,
+        plate_text: str | None = None,
+        status: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[PlateEvent]:
+        statement = select(self.model)
+        if vehicle_event_id is not None:
+            statement = statement.where(self.model.vehicle_event_id == vehicle_event_id)
+        if plate_text is not None:
+            statement = statement.where(self.model.plate_text.ilike(f"%{plate_text}%"))
+        if status is not None:
+            statement = statement.where(self.model.status == status)
+        if since is not None:
+            statement = statement.where(self.model.created_at >= since)
+        if until is not None:
+            statement = statement.where(self.model.created_at < until)
+        return self._page(statement.order_by(self.model.created_at.desc(), self.model.id), limit, offset)
+
 
 class FaceEventRepository(Repository[FaceEvent]):
     model = FaceEvent
+
+    def create(self, **values) -> FaceEvent:
+        explicit_id = values.pop("id", None)
+        explicit_created = values.pop("created_at", None)
+        self._validate_fields(values)
+        if explicit_id is not None:
+            item = self.model(id=explicit_id, **values)
+        else:
+            item = self.model(**values)
+        if explicit_created is not None:
+            item.created_at = explicit_created
+        self.session.add(item)
+        self.session.flush()
+        return item
+
+    def query_events(
+        self,
+        *,
+        target_id: UUID | None = None,
+        track_id: int | None = None,
+        video_source_id: UUID | None = None,
+        decision: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[FaceEvent]:
+        statement = select(self.model)
+        if target_id is not None:
+            statement = statement.where(self.model.target_id == target_id)
+        if track_id is not None:
+            statement = statement.where(self.model.track_id == track_id)
+        if video_source_id is not None:
+            statement = statement.where(self.model.video_source_id == video_source_id)
+        if decision is not None:
+            statement = statement.where(self.model.decision == decision)
+        if since is not None:
+            statement = statement.where(self.model.created_at >= since)
+        if until is not None:
+            statement = statement.where(self.model.created_at < until)
+        return self._page(statement.order_by(self.model.created_at.desc(), self.model.id), limit, offset)
 
 
 class VehiclePassageRepository(Repository[VehiclePassage]):
@@ -117,6 +282,7 @@ class VehiclePassageRepository(Repository[VehiclePassage]):
         *,
         plate_text: str | None = None,
         camera_id: str | None = None,
+        video_source_id: UUID | None = None,
         zone_id: str | None = None,
         vehicle_type: str | None = None,
         since: datetime | None = None,
@@ -129,6 +295,8 @@ class VehiclePassageRepository(Repository[VehiclePassage]):
             statement = statement.where(self.model.plate_text == plate_text)
         if camera_id is not None:
             statement = statement.where(self.model.camera_id == camera_id)
+        if video_source_id is not None:
+            statement = statement.where(self.model.video_source_id == video_source_id)
         if zone_id is not None:
             statement = statement.where(self.model.zone_id == zone_id)
         if vehicle_type is not None:
@@ -195,6 +363,7 @@ class BusinessEventRepository(Repository[BusinessEvent]):
         self,
         *,
         camera_id: str | None = None,
+        video_source_id: UUID | None = None,
         event_type: str | None = None,
         passage_id: UUID | None = None,
         plate_text: str | None = None,
@@ -206,6 +375,8 @@ class BusinessEventRepository(Repository[BusinessEvent]):
         statement = select(self.model)
         if camera_id is not None:
             statement = statement.where(self.model.camera_id == camera_id)
+        if video_source_id is not None:
+            statement = statement.where(self.model.video_source_id == video_source_id)
         if event_type is not None:
             statement = statement.where(self.model.event_type == event_type)
         if passage_id is not None:
@@ -293,6 +464,7 @@ class TargetEmbeddingRepository(Repository[TargetEmbedding]):
 __all__ = [
     "VectorSearchResult",
     "CameraRepository",
+    "VideoSourceRepository",
     "ZoneRepository",
     "TargetRepository",
     "DetectionEventRepository",

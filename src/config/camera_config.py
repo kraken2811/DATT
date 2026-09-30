@@ -25,6 +25,7 @@ class CameraInfo:
     width: int = 1280
     height: int = 720
     description: str = ""
+    video_source_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize camera metadata to dictionary."""

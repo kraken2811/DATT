@@ -24,4 +24,7 @@ easyocr>=1.7.1,<2
 
 # Phase 5: Face Recognition & Embedding (InsightFace CUDA GPU)
 insightface>=0.7.3
-onnxruntime-gpu>=1.18.0
+# Colab Torch cu128 / cuDNN 9: PyPI ORT >=1.27 defaults to CUDA 13.
+# After installation, remove overlapping CPU ORT and reinstall this GPU wheel;
+# see docs/insightface_cuda_audit.md. Do not upgrade ORT independently.
+onnxruntime-gpu==1.26.0

@@ -17,8 +17,17 @@ import cv2
 import numpy as np
 
 from src.db.database import Database
-from src.db.repositories import BusinessEventRepository, VehiclePassageRepository
-from src.events.event_dto import BusinessEventDTO, VehiclePassageDTO
+from src.db.repositories import (
+    BusinessEventRepository,
+    CameraRepository,
+    DetectionEventRepository,
+    FaceEventRepository,
+    PlateEventRepository,
+    VehicleEventRepository,
+    VehiclePassageRepository,
+)
+from src.events.event_dto import BusinessEventDTO, FaceEventDTO, VehiclePassageDTO
+from src.recognition.color_extractor import extract_vehicle_color
 
 logger = logging.getLogger("datt.events.db_worker")
 
@@ -91,6 +100,20 @@ class DatabaseWorker:
         success = self._put_task(task, is_critical=is_critical)
         self.enqueue_latencies.append((time.perf_counter() - t0) * 1000.0)
         return success
+
+    def enqueue_face_event(
+        self,
+        dto: FaceEventDTO,
+        face_crop: np.ndarray | None = None,
+        is_critical: bool = True,
+    ) -> bool:
+        """Enqueue a FaceEventDTO non-blockingly."""
+        t0 = time.perf_counter()
+        task = ("FACE_EVENT", dto, face_crop)
+        success = self._put_task(task, is_critical=is_critical)
+        self.enqueue_latencies.append((time.perf_counter() - t0) * 1000.0)
+        return success
+
 
     def _put_task(self, task: tuple[str, Any, Any], is_critical: bool) -> bool:
         try:
@@ -168,6 +191,7 @@ class DatabaseWorker:
         # Coalesce passages by session_key: keep only latest state
         passages_by_key: dict[str, tuple[VehiclePassageDTO, Any]] = {}
         events: list[BusinessEventDTO] = []
+        face_events_list: list[tuple[FaceEventDTO, Any]] = []
 
         for task_type, item, aux in batch:
             if task_type == "PASSAGE":
@@ -177,6 +201,9 @@ class DatabaseWorker:
                 passages_by_key[dto.session_key] = (dto, aux)
             elif task_type == "BUSINESS_EVENT":
                 events.append(item)
+            elif task_type == "FACE_EVENT":
+                face_events_list.append((item, aux))
+
 
         try:
             with self.db.transaction() as session:
@@ -196,7 +223,10 @@ class DatabaseWorker:
                         dest = self.snapshot_dir / fn
                         try:
                             cv2.imwrite(str(dest), veh_crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                            best_veh_path = f"data/events/{fn}"
+                            try:
+                                best_veh_path = str(dest.relative_to(PROJECT_ROOT)).replace("\\", "/")
+                            except Exception:
+                                best_veh_path = f"data/events/{fn}"
                         except Exception as e:
                             logger.warning("[DBWorker] Failed to save vehicle crop: %s", e)
 
@@ -205,18 +235,30 @@ class DatabaseWorker:
                         dest = self.snapshot_dir / fn
                         try:
                             cv2.imwrite(str(dest), plt_crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                            best_plt_path = f"data/events/{fn}"
+                            try:
+                                best_plt_path = str(dest.relative_to(PROJECT_ROOT)).replace("\\", "/")
+                            except Exception:
+                                best_plt_path = f"data/events/{fn}"
                         except Exception as e:
                             logger.warning("[DBWorker] Failed to save plate crop: %s", e)
+
+                    # Determine vehicle color
+                    v_color = dto.vehicle_color
+                    if not v_color and veh_crop is not None and getattr(veh_crop, "size", 0) > 0:
+                        try:
+                            v_color = extract_vehicle_color(veh_crop)
+                        except Exception:
+                            v_color = "other/unknown"
 
                     passage_repo.upsert_passage(
                         session_key=dto.session_key,
                         id=dto.id,
                         camera_id=dto.camera_id,
+                        video_source_id=dto.video_source_id,
                         zone_id=dto.zone_id,
                         track_id=dto.track_id,
                         vehicle_type=dto.vehicle_type,
-                        vehicle_color=dto.vehicle_color,
+                        vehicle_color=v_color,
                         vehicle_type_confidence=dto.vehicle_type_confidence,
                         vehicle_color_confidence=dto.vehicle_color_confidence,
                         plate_text=dto.plate_text,
@@ -231,12 +273,76 @@ class DatabaseWorker:
                         finalized_at=dto.finalized_at,
                     )
 
+                    # When a vehicle track completes, persist ONE complete VehicleEvent (+ PlateEvent if plate recognized)
+                    if dto.is_final:
+                        veh_event_repo = VehicleEventRepository(session)
+                        plate_event_repo = PlateEventRepository(session)
+                        det_event_repo = DetectionEventRepository(session)
+                        cam_repo = CameraRepository(session)
+
+                        existing_ve = veh_event_repo.get(dto.id)
+                        if existing_ve is None:
+                            det_id = None
+                            try:
+                                cam_uuid = None
+                                try:
+                                    cam_uuid = UUID(str(dto.camera_id))
+                                except Exception:
+                                    pass
+
+                                if cam_uuid is not None:
+                                    cam_rec = cam_repo.get(cam_uuid)
+                                    if cam_rec is None:
+                                        cam_rec = cam_repo.create(
+                                            id=cam_uuid,
+                                            name=str(dto.camera_id),
+                                            source_type="live",
+                                            source=str(dto.camera_id),
+                                        )
+                                    det_ev = det_event_repo.create(
+                                        camera_id=cam_rec.id,
+                                        video_source_id=dto.video_source_id,
+                                        event_type="vehicle",
+                                        frame_id=0,
+                                        timestamp=dto.last_seen_at,
+                                        track_id=dto.track_id,
+                                        class_name=dto.vehicle_type,
+                                        snapshot_path=best_veh_path,
+                                    )
+                                    det_id = det_ev.id
+                            except Exception as det_err:
+                                logger.debug("[DBWorker] Detection event creation optional: %s", det_err)
+
+                            ve = veh_event_repo.create(
+                                id=dto.id,
+                                detection_event_id=det_id,
+                                video_source_id=dto.video_source_id,
+                                vehicle_class=dto.vehicle_type,
+                                track_id=dto.track_id,
+                                zone_id=dto.zone_id,
+                                vehicle_color=v_color,
+                                vehicle_image_path=best_veh_path,
+                                first_seen=dto.first_seen_at,
+                                last_seen=dto.last_seen_at,
+                            )
+
+                            if dto.plate_text or best_plt_path:
+                                plate_event_repo.create(
+                                    vehicle_event_id=ve.id,
+                                    plate_text=dto.plate_text or "",
+                                    confidence=dto.plate_confidence,
+                                    plate_crop_path=best_plt_path,
+                                    status=dto.plate_status or "confirmed",
+                                    created_at=dto.last_seen_at,
+                                )
+
                 # Persist business events idempotently
                 for ev_dto in events:
                     event_repo.insert_idempotent(
                         id=ev_dto.id,
                         passage_id=ev_dto.passage_id,
                         camera_id=ev_dto.camera_id,
+                        video_source_id=ev_dto.video_source_id,
                         zone_id=ev_dto.zone_id,
                         track_id=ev_dto.track_id,
                         event_type=ev_dto.event_type,
@@ -247,6 +353,37 @@ class DatabaseWorker:
                         idempotency_key=ev_dto.idempotency_key,
                         metadata=ev_dto.metadata,
                     )
+
+                # Persist face recognition events
+                if face_events_list:
+                    face_repo = FaceEventRepository(session)
+                    for f_dto, f_crop in face_events_list:
+                        f_path = f_dto.face_crop_path
+                        if f_crop is not None and getattr(f_crop, "size", 0) > 0 and not f_path:
+                            ts_compact = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
+                            fn = f"face_{ts_compact}_{f_dto.camera_id}_t{f_dto.track_id}.jpg"
+                            dest = self.snapshot_dir / fn
+                            try:
+                                cv2.imwrite(str(dest), f_crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                                try:
+                                    f_path = str(dest.relative_to(PROJECT_ROOT)).replace("\\", "/")
+                                except Exception:
+                                    f_path = f"data/events/{fn}"
+                            except Exception as e:
+                                logger.warning("[DBWorker] Failed to save face crop: %s", e)
+
+                        face_repo.create(
+                            id=f_dto.id,
+                            target_id=f_dto.target_id,
+                            video_source_id=f_dto.video_source_id,
+                            track_id=f_dto.track_id,
+                            frame_id=f_dto.frame_id,
+                            similarity=f_dto.similarity,
+                            decision=f_dto.decision,
+                            face_crop_path=f_path,
+                            created_at=f_dto.created_at,
+                        )
+
 
             write_ms = (time.perf_counter() - t_w0) * 1000.0
             self.last_write_ms = write_ms

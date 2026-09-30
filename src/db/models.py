@@ -62,6 +62,21 @@ class Camera(Identity, Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
 
 
+class VideoSource(Identity, Base):
+    __tablename__ = "video_sources"
+    original_filename: Mapped[str] = mapped_column(String(255))
+    storage_path: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(50), default="ready", index=True)
+    file_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    video_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON_DATA, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+
+
 class Zone(Identity, Base):
     __tablename__ = "zones"
     camera_id: Mapped[UUID] = mapped_column(ForeignKey("cameras.id", ondelete="RESTRICT"), index=True)
@@ -95,7 +110,8 @@ class TargetEmbedding(Identity, Base):
 
 class DetectionEvent(Identity, Base):
     __tablename__ = "detection_events"
-    camera_id: Mapped[UUID] = mapped_column(ForeignKey("cameras.id", ondelete="RESTRICT"), index=True)
+    camera_id: Mapped[UUID | None] = mapped_column(ForeignKey("cameras.id", ondelete="RESTRICT"), nullable=True, index=True)
+    video_source_id: Mapped[UUID | None] = mapped_column(ForeignKey("video_sources.id", ondelete="SET NULL"), nullable=True, index=True)
     event_type: Mapped[str] = mapped_column(String(50), index=True)
     frame_id: Mapped[int] = mapped_column(Integer)
     timestamp: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, index=True)
@@ -109,10 +125,13 @@ class DetectionEvent(Identity, Base):
 
 class VehicleEvent(Identity, Base):
     __tablename__ = "vehicle_events"
-    detection_event_id: Mapped[UUID] = mapped_column(ForeignKey("detection_events.id", ondelete="CASCADE"), index=True)
+    detection_event_id: Mapped[UUID | None] = mapped_column(ForeignKey("detection_events.id", ondelete="CASCADE"), nullable=True, index=True)
+    video_source_id: Mapped[UUID | None] = mapped_column(ForeignKey("video_sources.id", ondelete="SET NULL"), nullable=True, index=True)
     vehicle_class: Mapped[str] = mapped_column(String(100))
     track_id: Mapped[int] = mapped_column(Integer, index=True)
-    zone_id: Mapped[str | None] = mapped_column(String(100))
+    zone_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    vehicle_color: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    vehicle_image_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_seen: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
     last_seen: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
 
@@ -130,9 +149,11 @@ class PlateEvent(Identity, Base):
 
 class FaceEvent(Identity, Base):
     __tablename__ = "face_events"
-    detection_event_id: Mapped[UUID] = mapped_column(ForeignKey("detection_events.id", ondelete="CASCADE"), index=True)
+    detection_event_id: Mapped[UUID | None] = mapped_column(ForeignKey("detection_events.id", ondelete="CASCADE"), nullable=True, index=True)
+    video_source_id: Mapped[UUID | None] = mapped_column(ForeignKey("video_sources.id", ondelete="SET NULL"), nullable=True, index=True)
     target_id: Mapped[UUID | None] = mapped_column(ForeignKey("targets.id", ondelete="SET NULL"), index=True)
     track_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    frame_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     similarity: Mapped[float | None] = mapped_column(Float)
     decision: Mapped[str] = mapped_column(String(50))
     face_crop_path: Mapped[str | None] = mapped_column(Text)
@@ -148,6 +169,9 @@ class VehiclePassage(Identity, Base):
     __tablename__ = "vehicle_passages"
 
     camera_id: Mapped[str] = mapped_column(String(255), index=True)
+    video_source_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("video_sources.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     zone_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
 
     track_id: Mapped[int] = mapped_column(Integer, index=True)
@@ -188,6 +212,9 @@ class BusinessEvent(Identity, Base):
 
     passage_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("vehicle_passages.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    video_source_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("video_sources.id", ondelete="SET NULL"), nullable=True, index=True
     )
     camera_id: Mapped[str] = mapped_column(String(255), index=True)
     zone_id: Mapped[str | None] = mapped_column(String(100), nullable=True)

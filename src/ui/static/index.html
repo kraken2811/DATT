@@ -137,59 +137,41 @@
             </div>
 
             <!-- Tab 4: Local Video File -->
-            <!-- Tab 4: Local Video File (Real Browser Upload) -->
+            <!-- Tab 4: Video Library & Local Upload -->
             <div id="tab-local" class="tab-pane">
-                <div class="custom-source-card">
-                    <div class="source-card-header">
-                        <h3>📁 Tải Lên Video Cục Bộ (Local Video Upload)</h3>
-                        <p>Tải tệp video từ máy tính của bạn lên hệ thống để phân tích phát hiện Người & Xe.</p>
-                    </div>
-
-                    <!-- Upload Dropzone -->
-                    <div class="upload-dropzone" id="localUploadDropzone">
-                        <input type="file" id="localVideoFileInput" accept=".mp4,.mov,.mkv,.avi" style="display: none;">
-                        <div class="dropzone-content">
-                            <span class="dropzone-icon">📤</span>
-                            <div class="dropzone-text">
-                                <span class="dropzone-prompt">Kéo và thả tệp video vào đây, hoặc</span>
-                                <button type="button" id="btnBrowseVideo" class="secondary-btn file-browse-btn">
-                                    <span class="btn-icon">📁</span> Chọn video MP4
-                                </button>
-                            </div>
-                            <span class="dropzone-hint">Định dạng hỗ trợ: MP4, MOV, MKV, AVI (Tối đa 500MB)</span>
+                <div class="custom-source-card video-library-card">
+                    <div class="source-card-header library-header-row">
+                        <div>
+                            <h3>🎞️ Thư Viện Video (Video Library)</h3>
+                            <p>Chọn video đã lưu trong cơ sở dữ liệu để chạy AI hoặc tải lên video MP4 mới.</p>
                         </div>
-                    </div>
-
-                    <!-- File Details & Upload Progress (shown after file selection) -->
-                    <div id="localFileInfoCard" class="file-info-card" style="display: none;">
-                        <div class="file-info-header">
-                            <span class="file-icon">🎬</span>
-                            <div class="file-meta">
-                                <strong id="localFileNameText" class="file-name-text">video.mp4</strong>
-                                <span id="localFileSizeText" class="file-size-text">0 MB</span>
-                            </div>
-                            <span id="localFileStatusBadge" class="file-status-badge">Sẵn sàng upload</span>
-                        </div>
-                        <div id="uploadProgressBarContainer" class="upload-progress-container" style="display: none;">
-                            <div class="upload-progress-track">
-                                <div id="uploadProgressBarFill" class="upload-progress-fill" style="width: 0%;"></div>
-                            </div>
-                            <span id="uploadProgressText" class="upload-progress-text">0%</span>
-                        </div>
-                    </div>
-
-                    <div class="form-group checkbox-row" style="margin-top: 1rem;">
-                        <label class="checkbox-label">
-                            <input type="checkbox" id="localVideoLoop" checked>
-                            <span>Lặp lại video khi kết thúc (Loop on EOF)</span>
-                        </label>
-                    </div>
-
-                    <div class="form-actions">
-                        <button type="button" id="btnUploadAndConnect" class="primary-btn highlight-btn" disabled>
-                            <span class="btn-icon">🚀</span> Upload & Sử dụng video
+                        <button type="button" id="btnOpenUploadModal" class="primary-btn highlight-btn">
+                            <span class="btn-icon">➕</span> Upload Video
                         </button>
                     </div>
+
+                    <!-- Video Library List -->
+                    <div class="video-library-container">
+                        <div class="library-toolbar">
+                            <span id="videoLibraryCountBadge" class="badge">0 videos</span>
+                            <div style="display:flex; gap: 8px; align-items: center;">
+                                <label class="checkbox-label" style="font-size: 0.8rem; margin: 0;">
+                                    <input type="checkbox" id="localVideoLoop" checked>
+                                    <span>Lặp lại (Loop)</span>
+                                </label>
+                                <button type="button" id="btnRefreshVideoLibrary" class="secondary-btn icon-only-btn" title="Làm mới danh sách">
+                                    🔄
+                                </button>
+                            </div>
+                        </div>
+                        <div id="videoLibraryList" class="video-library-grid">
+                            <div class="video-library-empty">
+                                <span class="empty-icon">📂</span>
+                                <p>Đang tải thư viện video...</p>
+                            </div>
+                        </div>
+                    </div>
+
                     <div id="localFeedback" class="feedback-msg"></div>
                 </div>
             </div>
@@ -297,39 +279,27 @@
 
                 <div class="sidebar-divider"></div>
 
-                <!-- Target Registration & Management -->
+                <!-- Target Person Management -->
                 <div class="sidebar-section">
-                    <label class="input-label">🎯 Target Registration</label>
-                    <input type="text" id="targetNameInput" class="text-input" placeholder="Target Name (e.g. Alice)" required>
-                    <select id="targetColorSelect" class="select-input">
-                        <option value="">Clothing Color: Any</option>
-                        <option value="red">Red</option>
-                        <option value="blue">Blue</option>
-                        <option value="green">Green</option>
-                        <option value="yellow">Yellow</option>
-                        <option value="black">Black</option>
-                        <option value="white">White</option>
-                    </select>
-                    <div class="file-upload-wrapper">
-                        <label for="targetFaceInput" class="file-upload-label">
-                            <span class="file-upload-icon">📷</span>
-                            <span id="targetFaceFilename">Face Image (Optional)</span>
-                        </label>
-                        <input type="file" id="targetFaceInput" accept="image/*" class="file-input-hidden">
+                    <div class="section-header-row">
+                        <label class="input-label" style="margin-bottom: 0;">🎯 Target Person</label>
+                        <button type="button" id="btnOpenAddPersonModal" class="secondary-btn btn-sm">
+                            <span class="btn-icon">➕</span> Add Person
+                        </button>
                     </div>
-                    <button type="button" id="registerTargetBtn" class="primary-btn highlight-btn">
-                        <span class="btn-icon">➕</span>
-                        <span class="btn-text">Register Target</span>
-                    </button>
-                    <div id="targetFeedback" class="feedback-msg"></div>
+                    <span class="input-help">Đăng ký & chọn đối tượng cần tìm kiếm trong video.</span>
 
-                    <!-- Active Targets List -->
+                    <!-- Registered Targets List -->
                     <div class="targets-container">
-                        <div class="targets-header">Registered Targets (<span id="targetCount">0</span>)</div>
+                        <div class="targets-header">
+                            <span>Danh sách Target (<span id="targetCount">0</span>)</span>
+                            <span class="target-hint-badge">Click để chọn tìm</span>
+                        </div>
                         <div id="targetsList" class="targets-list">
-                            <div class="target-item-empty">No active targets registered.</div>
+                            <div class="target-item-empty">Chưa có người nào được đăng ký.</div>
                         </div>
                     </div>
+                    <div id="targetFeedback" class="feedback-msg"></div>
                 </div>
 
                 <div class="sidebar-divider"></div>
@@ -411,7 +381,7 @@
                         </div>
 
                         <div class="video-wrapper">
-                            <img id="videoFeed" class="video-stream-img" src="/video_feed" alt="Realtime AI Video Feed">
+                            <canvas id="videoFeed" class="video-stream-img" width="1280" height="720" aria-label="Realtime AI Video Feed"></canvas>
                             <div id="videoErrorOverlay" class="video-overlay" style="display: none;">
                                 <div class="overlay-spinner"></div>
                                 <div class="overlay-title">Video Stream Disconnected</div>
@@ -455,7 +425,7 @@
                         <!-- Secondary Metrics Grid -->
                         <div class="metrics-grid">
                             <div class="metric-card">
-                                <div class="metric-label">Detections</div>
+                                <div class="metric-label" title="Objects detected on this frame; ? means YOLO did not run on this frame">Detections</div>
                                 <div class="metric-value" id="metricDetections">0</div>
                             </div>
                             <div class="metric-card">
@@ -592,6 +562,116 @@
                         <span class="btn-icon">✔️</span> Sử dụng camera
                     </button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- 6. MODALS                                                             -->
+    <!-- ===================================================================== -->
+
+    <!-- Upload Video Modal Popup -->
+    <div id="uploadVideoModal" class="modal-backdrop" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3><span>📤</span> Tải Lên Video MP4 Mới</h3>
+                <button type="button" class="modal-close-btn" id="btnCloseUploadModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="upload-dropzone" id="localUploadDropzone">
+                    <input type="file" id="localVideoFileInput" accept=".mp4,.mov,.mkv,.avi" style="display: none;">
+                    <div class="dropzone-content">
+                        <span class="dropzone-icon">📤</span>
+                        <div class="dropzone-text">
+                            <span class="dropzone-prompt">Kéo và thả tệp video vào đây, hoặc</span>
+                            <button type="button" id="btnBrowseVideo" class="secondary-btn file-browse-btn">
+                                <span class="btn-icon">📁</span> Chọn video MP4
+                            </button>
+                        </div>
+                        <span class="dropzone-hint">Định dạng hỗ trợ: MP4, MOV, MKV, AVI (Tối đa 500MB)</span>
+                    </div>
+                </div>
+
+                <div id="localFileInfoCard" class="file-info-card" style="display: none;">
+                    <div class="file-info-header">
+                        <span class="file-icon">🎬</span>
+                        <div class="file-meta">
+                            <strong id="localFileNameText" class="file-name-text">video.mp4</strong>
+                            <span id="localFileSizeText" class="file-size-text">0 MB</span>
+                        </div>
+                        <span id="localFileStatusBadge" class="file-status-badge">Sẵn sàng upload</span>
+                    </div>
+                    <div id="uploadProgressBarContainer" class="upload-progress-container" style="display: none;">
+                        <div class="upload-progress-track">
+                            <div id="uploadProgressBarFill" class="upload-progress-fill" style="width: 0%;"></div>
+                        </div>
+                        <span id="uploadProgressText" class="upload-progress-text">0%</span>
+                    </div>
+                </div>
+
+                <div id="modalUploadFeedback" class="feedback-msg"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="btnCancelUploadModal" class="secondary-btn">Hủy</button>
+                <button type="button" id="btnUploadAndConnect" class="primary-btn highlight-btn" disabled>
+                    <span class="btn-icon">🚀</span> Tải lên & Lưu vào Thư viện
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Person Modal Popup -->
+    <div id="addPersonModal" class="modal-backdrop" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3><span>👤</span> Đăng Ký Người Cần Tìm (Add Person)</h3>
+                <button type="button" class="modal-close-btn" id="btnCloseAddPersonModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="targetNameInput" class="input-label">Họ và tên / Mã nhận dạng (*)</label>
+                    <input type="text" id="targetNameInput" class="text-input" placeholder="Ví dụ: Nguyen Van A" required>
+                </div>
+
+                <div class="form-group">
+                    <label class="input-label">Ảnh chân dung khuôn mặt (*)</label>
+                    <div class="file-upload-wrapper">
+                        <label for="targetFaceInput" class="file-upload-label" id="targetFaceDropzone">
+                            <span class="file-upload-icon">📷</span>
+                            <span id="targetFaceFilename">Chọn hoặc kéo thả ảnh chân dung (JPG, PNG)</span>
+                        </label>
+                        <input type="file" id="targetFaceInput" accept="image/*" class="file-input-hidden">
+                    </div>
+                    <div id="targetFacePreviewContainer" style="display: none; margin-top: 0.5rem; text-align: center;">
+                        <img id="targetFacePreview" src="" alt="Face preview" style="max-height: 120px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2);">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="targetColorSelect" class="input-label">Màu áo quần (Tùy chọn)</label>
+                    <select id="targetColorSelect" class="select-input">
+                        <option value="">Bất kỳ (Không lọc theo màu áo)</option>
+                        <option value="red">Đỏ (Red)</option>
+                        <option value="blue">Xanh dương (Blue)</option>
+                        <option value="green">Xanh lá (Green)</option>
+                        <option value="yellow">Vàng (Yellow)</option>
+                        <option value="black">Đen (Black)</option>
+                        <option value="white">Trắng (White)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="targetThresholdInput" class="input-label">Ngưỡng nhận diện (Threshold, mặc định: 0.45)</label>
+                    <input type="number" id="targetThresholdInput" class="text-input" value="0.45" min="0.1" max="0.95" step="0.05">
+                </div>
+
+                <div id="addPersonFeedback" class="feedback-msg"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="btnCancelAddPersonModal" class="secondary-btn">Hủy</button>
+                <button type="button" id="registerTargetBtn" class="primary-btn highlight-btn">
+                    <span class="btn-icon">➕</span> Đăng ký & Trích xuất ArcFace (512D)
+                </button>
             </div>
         </div>
     </div>

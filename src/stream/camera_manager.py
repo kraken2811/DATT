@@ -319,6 +319,7 @@ class CameraManager:
         loop: bool = True,
         name: str | None = None,
         headers: dict[str, str] | None = None,
+        video_source_id: str | None = None,
     ) -> CameraInfo:
         """Switch active stream dynamically to a Local MP4, Direct HLS, or YouTube source.
 
@@ -328,6 +329,7 @@ class CameraManager:
             loop: Whether to loop local video upon EOF
             name: Optional display name for source
             headers: Optional generic HTTP headers for HLS ingestion
+            video_source_id: Optional ID linking to video_sources table
 
         Returns:
             CameraInfo: Metadata representing the active source
@@ -374,12 +376,40 @@ class CameraManager:
                         width=1280,
                         height=720,
                         description="Direct HLS (.m3u8) video stream",
+                        video_source_id=video_source_id,
                     )
 
                 elif stype in ("local", "file", "mp4"):
                     file_path = Path(src_str)
                     if not file_path.is_file():
-                        raise FileNotFoundError(f"Local video file not found: {file_path}")
+                        alt_path = Path(__file__).resolve().parent.parent.parent / src_str
+                        if alt_path.is_file():
+                            file_path = alt_path
+                        else:
+                            raise FileNotFoundError(f"Local video file not found: {file_path}")
+
+                    # Attempt DB lookup if video_source_id is not explicitly provided
+                    v_src_id_str = str(video_source_id) if video_source_id else None
+                    if not v_src_id_str:
+                        try:
+                            from src.db.database import Database
+                            from src.db.repositories import VideoSourceRepository
+                            db = Database()
+                            rel_query = f"data/uploads/videos/{file_path.name}"
+                            with db.transaction() as session:
+                                repo = VideoSourceRepository(session)
+                                vs_rec = repo.get_by_storage_path(rel_query)
+                                if not vs_rec:
+                                    proj_root = Path(__file__).resolve().parent.parent.parent
+                                    try:
+                                        rel = str(file_path.resolve().relative_to(proj_root.resolve())).replace("\\", "/")
+                                        vs_rec = repo.get_by_storage_path(rel)
+                                    except Exception:
+                                        pass
+                                if vs_rec:
+                                    v_src_id_str = str(vs_rec.id)
+                        except Exception as exc:
+                            logger.debug("CameraManager: Could not lookup video_source_id: %s", exc)
 
                     reader = LocalVideoReader(file_path=file_path, loop=loop)
                     reader.start()
@@ -393,6 +423,7 @@ class CameraManager:
                         width=reader.width or 1280,
                         height=reader.height or 720,
                         description=f"Local MP4 file (loop={loop})",
+                        video_source_id=v_src_id_str,
                     )
 
                 elif stype in ("youtube_vod", "vod"):
@@ -412,7 +443,11 @@ class CameraManager:
 
                 elif stype in ("youtube", "live"):
                     # Distinguish YouTube Live vs VOD before creating reader
-                    is_live = stream_resolver.is_live_stream(src_str)
+                    try:
+                        is_live = stream_resolver.is_live_stream(src_str)
+                    except Exception as probe_err:
+                        logger.warning("CameraManager: Could not probe YouTube stream (%s), defaulting to live: %s", src_str, probe_err)
+                        is_live = True
                     if is_live:
                         reader = CameraReader(url=src_str, is_vod=False)
                         reader.start()

@@ -26,7 +26,7 @@ class TelemetrySnapshot:
     error_message: str = ""
     people_count: int = 0
     car_count: int = 0
-    detection_count: int = 0
+    detection_count: int | None = 0
     track_count: int = 0
     is_fallback: bool = False
     stream_fps: float = 0.0
@@ -96,7 +96,7 @@ class Observation:
     raw_frame: np.ndarray | None = None
     people_count: int = 0
     car_count: int = 0
-    detection_count: int = 0
+    detection_count: int | None = 0
     track_count: int = 0
     is_fallback: bool = False
     source_generation: int = 1
@@ -106,6 +106,7 @@ class Observation:
     vehicles_in_view: int = 0
     vehicles_in_zone: int = 0
     jpeg_bytes: bytes | None = None
+    telemetry: dict[str, Any] | None = None
 
 
 
@@ -117,7 +118,7 @@ class SharedRuntimeState:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         # Frames & Source Generation
         self._source_generation: int = 1
@@ -175,7 +176,7 @@ class SharedRuntimeState:
         # Telemetry
         self._people_count: int = 0
         self._car_count: int = 0
-        self._detection_count: int = 0
+        self._detection_count: int | None = 0
         self._track_count: int = 0
         self._stream_fps: float = 0.0
         self._processing_fps: float = 0.0
@@ -279,7 +280,7 @@ class SharedRuntimeState:
         annotated_frame: np.ndarray | None = None,
         people_count: int = 0,
         car_count: int = 0,
-        detection_count: int = 0,
+        detection_count: int | None = 0,
         track_count: int = 0,
         stream_fps: float = 0.0,
         processing_fps: float = 0.0,
@@ -428,6 +429,7 @@ class SharedRuntimeState:
 
             self._status = "RUNNING"
             self._error_message = ""
+            obs.telemetry = self.get_telemetry().to_dict()
 
     def set_camera(self, camera_id: str, camera_name: str) -> None:
         """Update the active camera identifiers."""
@@ -550,6 +552,14 @@ class SharedRuntimeState:
         with self._lock:
             return self._frame_id, self._latest_frame
 
+    def get_frame_packet(self) -> tuple[bytes, dict[str, Any]] | None:
+        """Read the JPEG and its publication-time metrics as one atomic packet."""
+        with self._lock:
+            obs, _ = self._stream_observation_locked()
+            if obs is None or not obs.jpeg_bytes or obs.telemetry is None:
+                return None
+            return obs.jpeg_bytes, dict(obs.telemetry)
+
     def get_observation(self) -> Observation | None:
         """Fetch current synchronized observation snapshot."""
         with self._lock:
@@ -639,8 +649,8 @@ class SharedRuntimeState:
                 dropped_frames=self._dropped_frames,
                 buffer_age_ms=self._buffer_age_ms,
                 zone_enabled=obs.zone_enabled if obs else self._zone_enabled,
-                zone_mode="selected_zone" if self._zone_enabled else "full_view",
-                car_count_label="VEHICLES IN ZONE" if self._zone_enabled else "VEHICLES IN VIEW",
+                zone_mode=obs.zone_mode if obs else ("selected_zone" if self._zone_enabled else "full_view"),
+                car_count_label=obs.car_count_label if obs else ("VEHICLES IN ZONE" if self._zone_enabled else "VEHICLES IN VIEW"),
                 vehicles_in_view=obs.vehicles_in_view if obs else self._vehicles_in_view,
                 vehicles_in_zone=obs.vehicles_in_zone if obs else self._vehicles_in_zone,
                 source_generation=self._source_generation,

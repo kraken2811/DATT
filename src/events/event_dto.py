@@ -19,6 +19,7 @@ class VehiclePassageDTO:
     track_id: int
     first_seen_at: datetime
     last_seen_at: datetime
+    video_source_id: UUID | None = None
     vehicle_type: str = "vehicle"
     vehicle_color: str | None = None
     vehicle_type_confidence: float | None = None
@@ -46,6 +47,7 @@ class BusinessEventDTO:
     event_type: str
     event_time: datetime
     idempotency_key: str
+    video_source_id: UUID | None = None
     zone_id: str | None = None
     track_id: int | None = None
     vehicle_type: str | None = None
@@ -53,3 +55,21 @@ class BusinessEventDTO:
     direction: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.utcnow)
+
+
+@dataclass(frozen=True)
+class FaceEventDTO:
+    """Immutable snapshot of a face recognition event for database persistence."""
+    id: UUID
+    track_id: int
+    camera_id: str
+    target_id: UUID | None = None
+    target_name: str | None = None
+    similarity: float | None = None
+    decision: str = "FACE_MATCH"
+    video_source_id: UUID | None = None
+    frame_id: int | None = None
+    face_crop_path: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=datetime.utcnow)
+
