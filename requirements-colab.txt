@@ -7,7 +7,14 @@ torch>=2.0.0
 torchvision>=0.15.0
 opencv-python-headless>=4.8.0
 supervision>=0.22.0
-numpy<2.0.0
+
+# NumPy compatibility:
+# - Python <=3.12: preserve the legacy NumPy 1.x environment used by DATT.
+# - Python >=3.13: NumPy 1.26.x has no compatible wheel, so pip attempts a slow
+#   source build. Keep the Colab-provided NumPy 2.x-compatible range instead.
+numpy<2.0.0; python_version < "3.13"
+numpy>=2.0.0,<3.0.0; python_version >= "3.13"
+
 yt-dlp
 imageio-ffmpeg
 psutil
