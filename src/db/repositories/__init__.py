@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from dataclasses import dataclass, asdict
 import math
 from typing import Any, Sequence
@@ -12,6 +12,7 @@ from .base import Repository
 from ..models import (
     Camera, Zone, Target, TargetEmbedding,
     DetectionEvent, VehicleEvent, PlateEvent, FaceEvent,
+    VehiclePassage, BusinessEvent,
 )
 
 
@@ -71,6 +72,152 @@ class PlateEventRepository(Repository[PlateEvent]):
 
 class FaceEventRepository(Repository[FaceEvent]):
     model = FaceEvent
+
+
+class VehiclePassageRepository(Repository[VehiclePassage]):
+    model = VehiclePassage
+
+    def create(self, **values) -> VehiclePassage:
+        explicit_id = values.pop("id", None)
+        self._validate_fields(values)
+        if explicit_id is not None:
+            item = self.model(id=explicit_id, **values)
+        else:
+            item = self.model(**values)
+        self.session.add(item)
+        self.session.flush()
+        return item
+
+    def get_by_session_key(self, session_key: str) -> VehiclePassage | None:
+        statement = select(self.model).where(self.model.session_key == session_key)
+        return self.session.scalars(statement).first()
+
+    def upsert_passage(self, session_key: str, **values) -> tuple[VehiclePassage, bool]:
+        """Insert or update a passage by session_key.
+
+        Returns (passage, created): created is True if inserted, False if updated.
+        """
+        existing = self.get_by_session_key(session_key)
+        if existing is not None:
+            # Update fields
+            for key, val in values.items():
+                if key in {"id", "created_at", "session_key"}:
+                    continue
+                if hasattr(existing, key) and val is not None:
+                    setattr(existing, key, val)
+            self.session.flush()
+            return existing, False
+        else:
+            values["session_key"] = session_key
+            item = self.create(**values)
+            return item, True
+
+    def query_passages(
+        self,
+        *,
+        plate_text: str | None = None,
+        camera_id: str | None = None,
+        zone_id: str | None = None,
+        vehicle_type: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[VehiclePassage]:
+        statement = select(self.model)
+        if plate_text is not None:
+            statement = statement.where(self.model.plate_text == plate_text)
+        if camera_id is not None:
+            statement = statement.where(self.model.camera_id == camera_id)
+        if zone_id is not None:
+            statement = statement.where(self.model.zone_id == zone_id)
+        if vehicle_type is not None:
+            statement = statement.where(self.model.vehicle_type == vehicle_type)
+        if since is not None:
+            statement = statement.where(self.model.first_seen_at >= since)
+        if until is not None:
+            statement = statement.where(self.model.first_seen_at < until)
+        return self._page(statement.order_by(self.model.first_seen_at.desc(), self.model.id), limit, offset)
+
+    def count_vehicle_types(
+        self,
+        *,
+        camera_id: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> dict[str, int]:
+        statement = select(self.model.vehicle_type, func.count(self.model.id))
+        if camera_id is not None:
+            statement = statement.where(self.model.camera_id == camera_id)
+        if since is not None:
+            statement = statement.where(self.model.first_seen_at >= since)
+        if until is not None:
+            statement = statement.where(self.model.first_seen_at < until)
+        statement = statement.group_by(self.model.vehicle_type)
+        rows = self.session.execute(statement).all()
+        return {r[0]: int(r[1]) for r in rows}
+
+
+class BusinessEventRepository(Repository[BusinessEvent]):
+    model = BusinessEvent
+
+    def create(self, **values) -> BusinessEvent:
+        if "metadata" in values and "event_metadata" not in values:
+            values["event_metadata"] = values.pop("metadata")
+        explicit_id = values.pop("id", None)
+        self._validate_fields(values)
+        if explicit_id is not None:
+            item = self.model(id=explicit_id, **values)
+        else:
+            item = self.model(**values)
+        self.session.add(item)
+        self.session.flush()
+        return item
+
+    def get_by_idempotency_key(self, idempotency_key: str) -> BusinessEvent | None:
+        statement = select(self.model).where(self.model.idempotency_key == idempotency_key)
+        return self.session.scalars(statement).first()
+
+    def insert_idempotent(self, **values) -> tuple[BusinessEvent, bool]:
+        """Insert business event idempotently.
+
+        Returns (event, created): created is True if inserted, False if already existed.
+        """
+        idempotency_key = values.get("idempotency_key")
+        if idempotency_key:
+            existing = self.get_by_idempotency_key(idempotency_key)
+            if existing is not None:
+                return existing, False
+        event = self.create(**values)
+        return event, True
+
+    def query_events(
+        self,
+        *,
+        camera_id: str | None = None,
+        event_type: str | None = None,
+        passage_id: UUID | None = None,
+        plate_text: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[BusinessEvent]:
+        statement = select(self.model)
+        if camera_id is not None:
+            statement = statement.where(self.model.camera_id == camera_id)
+        if event_type is not None:
+            statement = statement.where(self.model.event_type == event_type)
+        if passage_id is not None:
+            statement = statement.where(self.model.passage_id == passage_id)
+        if plate_text is not None:
+            statement = statement.where(self.model.plate_text == plate_text)
+        if since is not None:
+            statement = statement.where(self.model.event_time >= since)
+        if until is not None:
+            statement = statement.where(self.model.event_time < until)
+        return self._page(statement.order_by(self.model.event_time.desc(), self.model.id), limit, offset)
+
 
 
 class TargetEmbeddingRepository(Repository[TargetEmbedding]):
@@ -141,3 +288,19 @@ class TargetEmbeddingRepository(Repository[TargetEmbedding]):
                 )
             )
         return results
+
+
+__all__ = [
+    "VectorSearchResult",
+    "CameraRepository",
+    "ZoneRepository",
+    "TargetRepository",
+    "DetectionEventRepository",
+    "VehicleEventRepository",
+    "PlateEventRepository",
+    "FaceEventRepository",
+    "VehiclePassageRepository",
+    "BusinessEventRepository",
+    "TargetEmbeddingRepository",
+]
+

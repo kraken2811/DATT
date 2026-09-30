@@ -96,7 +96,7 @@ def test_postgres_migration_insert_query(pg):
     with database.engine.connect() as connection:
         assert connection.scalar(text("SELECT 1")) == 1
         assert connection.scalar(text("SELECT version()" )).startswith("PostgreSQL")
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0003"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0004"
         assert connection.scalar(text("SELECT data_type FROM information_schema.columns "
             "WHERE table_schema=current_schema() AND table_name='zones' AND column_name='polygon'")) == "jsonb"
         assert connection.scalar(text("SELECT extname FROM pg_extension WHERE extname = 'vector'")) == "vector"

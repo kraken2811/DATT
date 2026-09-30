@@ -5,7 +5,7 @@ Persists occupancy events and camera changes to data/events.db and stores
 annotated JPEG snapshots in data/events/.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 import threading
@@ -151,6 +151,29 @@ class EventStorage:
         camera_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch the most recent events ordered by timestamp descending."""
+        try:
+            from src.db.database import Database
+            from src.db.repositories import BusinessEventRepository
+            db = Database()
+            if db.engine.url.get_backend_name() == "postgresql":
+                with db.transaction() as session:
+                    repo = BusinessEventRepository(session)
+                    events = repo.query_events(camera_id=camera_id, limit=limit)
+                    return [
+                        {
+                            "id": str(e.id),
+                            "timestamp": e.event_time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "camera_id": e.camera_id,
+                            "event_type": e.event_type,
+                            "old_value": e.track_id or 0,
+                            "new_value": 1,
+                            "snapshot_path": e.event_metadata.get("snapshot_path", "") if isinstance(e.event_metadata, dict) else "",
+                        }
+                        for e in events
+                    ]
+        except Exception as exc:
+            logger.debug("EventStorage: PostgreSQL query fell back to SQLite: %s", exc)
+
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
@@ -183,6 +206,20 @@ class EventStorage:
 
     def get_event_count_today(self) -> int:
         """Count total events logged today (local date)."""
+        try:
+            from src.db.database import Database
+            from src.db.models import BusinessEvent
+            from sqlalchemy import select, func
+            db = Database()
+            if db.engine.url.get_backend_name() == "postgresql":
+                today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                with db.transaction() as session:
+                    stmt = select(func.count(BusinessEvent.id)).where(BusinessEvent.event_time >= today_start)
+                    cnt = session.scalar(stmt)
+                    return int(cnt or 0)
+        except Exception as exc:
+            logger.debug("EventStorage: PostgreSQL count fell back to SQLite: %s", exc)
+
         today_prefix = datetime.now().strftime("%Y-%m-%d") + "%"
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
@@ -193,6 +230,7 @@ class EventStorage:
                 )
                 res = cursor.fetchone()
                 return res[0] if res else 0
+
 
     def save_passage(self, passage: Any) -> int:
         """Save a finalized VehiclePassage record and best images to SQLite."""

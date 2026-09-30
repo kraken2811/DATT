@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, MetaData, String, Text, Uuid
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, MetaData, String, Text, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
@@ -40,6 +40,7 @@ class Base(DeclarativeBase):
         "ix": "ix_%(table_name)s_%(column_0_name)s",
         "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
         "pk": "pk_%(table_name)s",
+        "uq": "uq_%(table_name)s_%(column_0_name)s",
     })
 
 
@@ -136,3 +137,74 @@ class FaceEvent(Identity, Base):
     decision: Mapped[str] = mapped_column(String(50))
     face_crop_path: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+class VehiclePassage(Identity, Base):
+    """One continuous vehicle appearance in one camera.
+
+    vehicle_color is nullable and currently unavailable in the detector runtime;
+    not fabricated.
+    """
+    __tablename__ = "vehicle_passages"
+
+    camera_id: Mapped[str] = mapped_column(String(255), index=True)
+    zone_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+
+    track_id: Mapped[int] = mapped_column(Integer, index=True)
+    session_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+
+    vehicle_type: Mapped[str] = mapped_column(String(100), default="vehicle")
+    vehicle_color: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    vehicle_type_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    vehicle_color_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    plate_text: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    plate_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    plate_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    direction: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    duration_ms: Mapped[float] = mapped_column(Float, default=0.0)
+
+    best_vehicle_image_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    best_plate_image_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+    finalized_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+    __table_args__ = (
+        Index("ix_vehicle_passages_cam_first_seen", "camera_id", "first_seen_at"),
+        Index("ix_vehicle_passages_zone_first_seen", "zone_id", "first_seen_at"),
+        Index("ix_vehicle_passages_type_first_seen", "vehicle_type", "first_seen_at"),
+    )
+
+
+class BusinessEvent(Identity, Base):
+    """Meaningful business domain event linked to a vehicle passage or system domain."""
+    __tablename__ = "business_events"
+
+    passage_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("vehicle_passages.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    camera_id: Mapped[str] = mapped_column(String(255), index=True)
+    zone_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    track_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+    event_type: Mapped[str] = mapped_column(String(50), index=True)
+    event_time: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, index=True)
+
+    vehicle_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    plate_text: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    direction: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    event_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON_DATA, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+    __table_args__ = (
+        Index("ix_business_events_cam_time", "camera_id", "event_time"),
+    )
+
