@@ -19,7 +19,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.runtime.runtime_manager import RuntimeManager
 
 
 def parse_args() -> argparse.Namespace:
@@ -88,6 +87,20 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """Unified application entry point."""
     args = parse_args()
+    import os
+    if os.environ.get("DATT_REQUIRE_PERSISTENCE") == "1":
+        from src.persistence import audit, print_audit
+        result, errors = audit(require_external=True)
+        print_audit(result, errors)
+        if errors:
+            raise SystemExit("Persistence preflight failed; backend not started")
+    else:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Local development mode: set DATT_REQUIRE_PERSISTENCE=1 to require external PostgreSQL and media storage. "
+            "Local files and legacy occupancy history do not survive runtime deletion."
+        )
+    from src.runtime.runtime_manager import RuntimeManager
     manager = RuntimeManager(
         camera_id=args.camera,
         web_host=args.host,

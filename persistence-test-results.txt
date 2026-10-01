@@ -1,0 +1,9 @@
+Initial system-Python run: 6 collection errors (missing dependencies).
+Initial venv combined run interrupted after prolonged wait; no completed totals.
+Final focused persistence run: 20 passed, 0 failed, 0 skipped.
+Existing 48-test suite rerun with the same .env PostgreSQL URL and connect_timeout=2; no SQLite substitution.
+Completed existing suite: 36 passed, 5 failed, 7 skipped in 47.77 seconds.
+Combined distinct totals: 56 passed, 5 failed, 7 skipped.
+Failures: three TestMediaPersistence methods; TestTargetAPI.test_register_target_multipart_form; TestWebServer.test_static_assets_load.
+Previously failing YouTube source-switch test passed.
+See docs/persistence-verification.md for classifications and external validation blockers.

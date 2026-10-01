@@ -14,6 +14,7 @@ old frames are automatically dropped without unbounded queue buffering.
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import os
 import threading
 import time
 from typing import Any
@@ -553,11 +554,12 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             unique_name = f"{uuid.uuid4().hex[:8]}_backend_target.jpg"
             target_disk_path = upload_dir / unique_name
             try:
-                with open(target_disk_path, "wb") as f_out:
-                    f_out.write(img_bytes)
                 source_image_path = f"data/uploads/targets/{unique_name}"
+                from src.storage import get_storage
+                get_storage().save_bytes(source_image_path, img_bytes)
             except Exception as e:
-                logger.debug("Failed writing target image bytes on backend: %s", e)
+                self._send_json_response({"status": "error", "message": "Target storage unavailable"}, code=503)
+                return
 
         try:
             target = target_manager.register_target(
@@ -569,7 +571,7 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                 source_image_path=source_image_path,
             )
 
-            if target.face_embedding is not None:
+            if target.face_embedding is not None or os.environ.get("DATT_REQUIRE_PERSISTENCE") == "1":
                 try:
                     from src.db.database import Database
                     from src.db.repositories import TargetRepository, TargetEmbeddingRepository
@@ -594,16 +596,19 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                                 },
                                 active=True,
                             )
-                        te_repo = TargetEmbeddingRepository(session)
-                        te_repo.create(
-                            target_id=db_t.id,
-                            embedding=target.face_embedding,
-                            model_name="arcface",
-                            model_version="1.0",
-                            source_image_path=source_image_path,
-                        )
+                        if target.face_embedding is not None:
+                            te_repo = TargetEmbeddingRepository(session)
+                            te_repo.create(
+                                target_id=db_t.id,
+                                embedding=target.face_embedding,
+                                model_name="arcface",
+                                model_version="1.0",
+                                source_image_path=source_image_path,
+                            )
                 except Exception as db_exc:
-                    logger.debug("[BACKEND_TARGET_DB] Note persisting target to DB: %s", db_exc)
+                    target_manager.remove_target(target.id)
+                    self._send_json_response({"status": "error", "message": "Target metadata could not be persisted"}, code=503)
+                    return
 
             self._send_json_response({
                 "status": "ok",
@@ -611,8 +616,9 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                 "message": f"Target '{target.name}' registered successfully",
             })
         except TargetRegistrationError as exc:
-            if target_disk_path and target_disk_path.is_file():
-                target_disk_path.unlink(missing_ok=True)
+            if target_disk_path and source_image_path:
+                from src.storage import get_storage
+                get_storage().delete(source_image_path)
             self._send_json_response({
                 "status": "error",
                 "code": exc.code,
@@ -863,12 +869,12 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        project_root = Path(__file__).resolve().parent.parent.parent
-        target_file = (project_root / rel_path).resolve()
-        snapshot_dir = (project_root / "data" / "events").resolve()
-
-        # Prevent directory traversal attacks
-        if not str(target_file).startswith(str(snapshot_dir)) or not target_file.is_file():
+        from src.storage import get_storage, validate_key
+        try:
+            if not validate_key(rel_path).startswith("data/events/"):
+                raise ValueError("Not an event image")
+            target_file = get_storage().materialize(rel_path)
+        except (ValueError, FileNotFoundError):
             self.send_response(404)
             self.end_headers()
             return

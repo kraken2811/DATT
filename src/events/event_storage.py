@@ -12,6 +12,7 @@ import threading
 from typing import Any
 
 import cv2
+from src.storage import save_image
 import numpy as np
 
 from src.utils.logger import logger
@@ -124,7 +125,7 @@ class EventStorage:
             filename = f"{ts_compact}_{camera_id}.jpg"
             dest_path = self.snapshot_dir / filename
             try:
-                cv2.imwrite(str(dest_path), annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                save_image(str(dest_path), annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 # Store relative path for portability across machines/Colab
                 snapshot_rel_path = f"data/events/{filename}"
             except Exception as exc:
@@ -242,7 +243,7 @@ class EventStorage:
             fn = f"veh_{ts_compact}_{passage.camera_id}_t{passage.track_id}.jpg"
             dest = self.snapshot_dir / fn
             try:
-                cv2.imwrite(str(dest), passage.best_vehicle_image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                save_image(str(dest), passage.best_vehicle_image, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 best_veh_path = f"data/events/{fn}"
             except Exception as e:
                 logger.warning("EventStorage: Failed to save best vehicle image: %s", e)
@@ -251,7 +252,7 @@ class EventStorage:
             fn = f"plate_{ts_compact}_{passage.camera_id}_t{passage.track_id}.jpg"
             dest = self.snapshot_dir / fn
             try:
-                cv2.imwrite(str(dest), passage.best_plate_image, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                save_image(str(dest), passage.best_plate_image, [cv2.IMWRITE_JPEG_QUALITY, 90])
                 best_plt_path = f"data/events/{fn}"
             except Exception as e:
                 logger.warning("EventStorage: Failed to save best plate image: %s", e)

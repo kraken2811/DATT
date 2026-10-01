@@ -38,6 +38,7 @@ import cv2
 import httpx
 import numpy as np
 import uvicorn
+from src.storage import get_storage, validate_key
 
 from src.face.face_embedder import decode_face_image_bytes
 from src.recognition.target_matcher import TargetRegistrationError, target_manager
@@ -453,9 +454,8 @@ async def delete_video_source(source_id: str) -> JSONResponse:
         # Unlink file if inside UPLOAD_VIDEO_DIR
         if storage_path:
             try:
-                p = (PROJECT_ROOT / storage_path).resolve()
-                if str(p).startswith(str(UPLOAD_VIDEO_DIR.resolve())) and p.is_file():
-                    p.unlink(missing_ok=True)
+                if validate_key(storage_path).startswith("data/uploads/videos/"):
+                    get_storage().delete(storage_path)
             except Exception as e:
                 logger.warning("[VIDEO_DELETE] Could not unlink file %s: %s", storage_path, e)
 
@@ -740,6 +740,14 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
     except Exception as e:
         logger.debug("Failed extracting video metadata: %s", e)
 
+    # Persist the object before committing its metadata; local file is staging only.
+    try:
+        with target_path.open("rb") as source:
+            get_storage().save(rel_storage_path, source)
+    except Exception:
+        logger.error("[VIDEO_STORAGE_ERROR] Persistent storage write failed")
+        return JSONResponse(content={"status": "error", "message": "Video storage unavailable"}, status_code=503)
+
     video_source_id = None
     try:
         from src.db.database import Database
@@ -764,7 +772,8 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
                 video_source_id, original_filename, rel_storage_path,
             )
     except Exception as db_exc:
-        logger.warning("[VIDEO_UPLOAD_DB_ERROR] Could not persist video source to DB: %s", db_exc)
+        logger.warning("[VIDEO_UPLOAD_DB_ERROR] Could not persist video metadata (%s)", type(db_exc).__name__)
+        return JSONResponse(content={"status": "error", "message": "Video metadata could not be persisted"}, status_code=503)
 
     return JSONResponse(
         content={
@@ -1007,11 +1016,11 @@ async def register_target(request: Request) -> JSONResponse:
         unique_target_filename = f"{uuid.uuid4().hex[:8]}_{sanitized_img_name}"
         target_disk_path = UPLOAD_TARGET_DIR / unique_target_filename
         try:
-            with open(target_disk_path, "wb") as f_out:
-                f_out.write(raw_img_bytes)
             rel_target_image_path = f"data/uploads/targets/{unique_target_filename}"
+            get_storage().save_bytes(rel_target_image_path, raw_img_bytes)
         except Exception as io_err:
-            logger.warning("[TARGET_STORAGE] Failed saving original target image: %s", io_err)
+            logger.warning("[TARGET_STORAGE] Failed saving original target image (%s)", type(io_err).__name__)
+            return JSONResponse(content={"status": "error", "message": "Target storage unavailable"}, status_code=503)
 
     try:
         target = target_manager.register_target(
@@ -1022,7 +1031,7 @@ async def register_target(request: Request) -> JSONResponse:
             source_image_path=rel_target_image_path,
         )
 
-        if target.face_embedding is not None:
+        if target.face_embedding is not None or os.environ.get("DATT_REQUIRE_PERSISTENCE") == "1":
             try:
                 from src.db.database import Database
                 from src.db.repositories import TargetRepository, TargetEmbeddingRepository
@@ -1047,21 +1056,24 @@ async def register_target(request: Request) -> JSONResponse:
                             },
                             active=True,
                         )
-                    te_repo = TargetEmbeddingRepository(session)
-                    te_repo.create(
-                        target_id=db_t.id,
-                        embedding=target.face_embedding,
-                        model_name="arcface",
-                        model_version="1.0",
-                        source_image_path=rel_target_image_path,
-                    )
+                    if target.face_embedding is not None:
+                        te_repo = TargetEmbeddingRepository(session)
+                        te_repo.create(
+                            target_id=db_t.id,
+                            embedding=target.face_embedding,
+                            model_name="arcface",
+                            model_version="1.0",
+                            source_image_path=rel_target_image_path,
+                        )
                     target.db_id = str(db_t.id)
                     logger.info(
                         "[TARGET_PERSISTED_DB] target_id=%s db_id=%s source_image_path='%s'",
                         target.id, db_t.id, rel_target_image_path,
                     )
             except Exception as db_exc:
-                logger.warning("[TARGET_DB_PERSIST_ERROR] Could not persist target to DB: %s", db_exc)
+                logger.warning("[TARGET_DB_PERSIST_ERROR] Could not persist target (%s)", type(db_exc).__name__)
+                target_manager.remove_target(target.id)
+                return JSONResponse(content={"status": "error", "message": "Target metadata could not be persisted"}, status_code=503)
 
         # Notify backend AI server (:8000) if active so live AI pipeline has the target
         b_url = get_backend_url(request).rstrip("/")
@@ -1092,8 +1104,8 @@ async def register_target(request: Request) -> JSONResponse:
             status_code=200,
         )
     except TargetRegistrationError as exc:
-        if target_disk_path and target_disk_path.is_file():
-            target_disk_path.unlink(missing_ok=True)
+        if rel_target_image_path:
+            get_storage().delete(rel_target_image_path)
         return JSONResponse(
             content={
                 "status": "error",
@@ -1140,9 +1152,8 @@ async def delete_target(target_id: str, request: Request) -> JSONResponse:
                     removed = True
                     if img_path:
                         try:
-                            p = (PROJECT_ROOT / img_path).resolve()
-                            if str(p).startswith(str(UPLOAD_TARGET_DIR.resolve())) and p.is_file():
-                                p.unlink(missing_ok=True)
+                            if validate_key(img_path).startswith("data/uploads/targets/"):
+                                get_storage().delete(img_path)
                         except Exception:
                             pass
             except ValueError:
@@ -1187,9 +1198,13 @@ async def get_target_image(target_id: str) -> Response:
         except Exception:
             pass
     if img_path_str:
-        img_path = (PROJECT_ROOT / img_path_str).resolve()
-        if img_path.is_file():
-            return FileResponse(str(img_path))
+        try:
+            if validate_key(img_path_str).startswith("data/uploads/targets/"):
+                return FileResponse(str(get_storage().materialize(img_path_str)))
+        except (FileNotFoundError, ValueError):
+            pass
+        except Exception:
+            return Response(status_code=503)
     return Response(status_code=404)
 
 
@@ -1516,10 +1531,20 @@ async def get_event_snapshot(request: Request) -> Response:
         raise HTTPException(status_code=400, detail="Missing snapshot path or id")
 
     # Security check: resolve strictly within data/events/
-    target_file = (PROJECT_ROOT / rel_path).resolve()
-    snapshot_dir = (PROJECT_ROOT / "data" / "events").resolve()
+    target_file = None
+    try:
+        valid_event_key = rel_path and validate_key(rel_path).startswith("data/events/")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid event image key") from None
+    if valid_event_key:
+        try:
+            target_file = get_storage().materialize(rel_path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            raise HTTPException(status_code=503, detail="Event image storage unavailable") from None
 
-    if str(target_file).startswith(str(snapshot_dir)) and target_file.is_file():
+    if target_file is not None:
         return FileResponse(
             path=str(target_file),
             media_type="image/jpeg",

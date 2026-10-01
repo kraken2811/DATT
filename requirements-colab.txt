@@ -3,6 +3,11 @@
 # Phase 3: YOLO11s PyTorch CUDA Runtime
 # ==============================================================================
 ultralytics>=8.2.0
+-r requirements-persistence.txt
+fastapi
+uvicorn[standard]
+python-multipart
+httpx
 torch>=2.0.0
 torchvision>=0.15.0
 opencv-python-headless>=4.8.0

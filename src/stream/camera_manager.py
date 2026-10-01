@@ -6,6 +6,7 @@ switching between YouTube live streams and RTSP/file streams at runtime.
 """
 
 from pathlib import Path
+import os
 import threading
 import time
 from typing import Any
@@ -394,8 +395,11 @@ class CameraManager:
                             with db.transaction() as session:
                                 repo = VideoSourceRepository(session)
                                 vs_rec = repo.get(UUID(v_src_id_str))
+                                if vs_rec is None:
+                                    raise FileNotFoundError("VideoSource record not found")
                                 if vs_rec and vs_rec.storage_path:
-                                    candidate = (proj_root / vs_rec.storage_path).resolve()
+                                    from src.storage import get_storage
+                                    candidate = get_storage().materialize(vs_rec.storage_path)
                                     if candidate.is_file():
                                         file_path = candidate
                                         logger.info(
@@ -403,9 +407,15 @@ class CameraManager:
                                             v_src_id_str, vs_rec.storage_path, file_path,
                                         )
                         except Exception as exc:
+                            if os.environ.get('DATT_STORAGE_BACKEND') == 'external':
+                                raise RuntimeError("Persisted video could not be retrieved; refusing local path fallback") from exc
                             logger.debug("CameraManager: Could not resolve video_source_id from DB: %s", exc)
 
                     # 2. Fall back to resolving from src_str if not already resolved from DB
+                    if file_path is None:
+                        from src.storage import get_storage
+                        if src_str.startswith("data/uploads/videos/"):
+                            file_path = get_storage().materialize(src_str)
                     if file_path is None:
                         file_path = Path(src_str)
                         if not file_path.is_file():

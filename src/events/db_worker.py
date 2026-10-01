@@ -14,6 +14,7 @@ from typing import Any
 from uuid import UUID
 
 import cv2
+from src.storage import save_image
 import numpy as np
 
 from src.db.database import Database
@@ -222,25 +223,27 @@ class DatabaseWorker:
                         fn = f"veh_{ts_compact}_{dto.camera_id}_t{dto.track_id}.jpg"
                         dest = self.snapshot_dir / fn
                         try:
-                            cv2.imwrite(str(dest), veh_crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                            save_image(str(dest), veh_crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
                             try:
                                 best_veh_path = str(dest.relative_to(PROJECT_ROOT)).replace("\\", "/")
                             except Exception:
                                 best_veh_path = f"data/events/{fn}"
                         except Exception as e:
                             logger.warning("[DBWorker] Failed to save vehicle crop: %s", e)
+                            raise
 
                     if plt_crop is not None and getattr(plt_crop, "size", 0) > 0 and not best_plt_path:
                         fn = f"plate_{ts_compact}_{dto.camera_id}_t{dto.track_id}.jpg"
                         dest = self.snapshot_dir / fn
                         try:
-                            cv2.imwrite(str(dest), plt_crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                            save_image(str(dest), plt_crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
                             try:
                                 best_plt_path = str(dest.relative_to(PROJECT_ROOT)).replace("\\", "/")
                             except Exception:
                                 best_plt_path = f"data/events/{fn}"
                         except Exception as e:
                             logger.warning("[DBWorker] Failed to save plate crop: %s", e)
+                            raise
 
                     # Determine vehicle color
                     v_color = dto.vehicle_color
@@ -364,13 +367,14 @@ class DatabaseWorker:
                             fn = f"face_{ts_compact}_{f_dto.camera_id}_t{f_dto.track_id}.jpg"
                             dest = self.snapshot_dir / fn
                             try:
-                                cv2.imwrite(str(dest), f_crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                                save_image(str(dest), f_crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
                                 try:
                                     f_path = str(dest.relative_to(PROJECT_ROOT)).replace("\\", "/")
                                 except Exception:
                                     f_path = f"data/events/{fn}"
                             except Exception as e:
                                 logger.warning("[DBWorker] Failed to save face crop: %s", e)
+                                raise
 
                         face_repo.create(
                             id=f_dto.id,

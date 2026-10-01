@@ -1,4 +1,5 @@
 import os
+import logging
 from pathlib import Path
 from contextlib import contextmanager
 from collections.abc import Iterator
@@ -22,8 +23,17 @@ class Database:
                         if val:
                             url = val
                             break
+        if not url:
+            if os.environ.get("DATT_REQUIRE_PERSISTENCE") == "1":
+                raise RuntimeError("DATT_DATABASE_URL is required; persistent targets, embeddings, video library and events are unavailable")
+            logging.getLogger(__name__).warning(
+                "DATT_DATABASE_URL missing: using local SQLite for development. "
+                "Targets, embeddings, video library and event metadata will not survive runtime deletion. Run migrations explicitly."
+            )
         url = url or "sqlite:///datt.db"
         parsed = make_url(url)
+        if os.environ.get("DATT_REQUIRE_PERSISTENCE") == "1" and parsed.get_backend_name() not in ("postgres", "postgresql"):
+            raise RuntimeError("Persistent deployment requires PostgreSQL; SQLite is only for local/test use")
         if parsed.drivername in ("postgres", "postgresql"):
             parsed = parsed.set(drivername="postgresql+psycopg")
         self.engine = create_engine(parsed, echo=echo, pool_pre_ping=True)
