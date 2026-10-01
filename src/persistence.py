@@ -10,7 +10,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from src.db.database import Database
-from src.storage import get_storage, ExternalStorageBackend
+from src.storage import get_storage, ExternalStorageBackend, SupabaseStorageBackend
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_TABLES = {"video_sources", "targets", "target_embeddings", "detection_events",
@@ -58,7 +58,7 @@ def audit(*, require_external=False):
             db.dispose()
     try:
         storage = get_storage()
-        if require_external and not isinstance(storage, ExternalStorageBackend):
+        if require_external and not isinstance(storage, (ExternalStorageBackend, SupabaseStorageBackend)):
             raise RuntimeError("External storage required")
         key = "data/events/persistence_probe_" + uuid4().hex + ".bin"
         payload = os.urandom(32)

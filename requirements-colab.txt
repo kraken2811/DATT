@@ -22,6 +22,7 @@ numpy>=2.0.0,<3.0.0; python_version >= "3.13"
 
 yt-dlp
 imageio-ffmpeg
+huggingface_hub
 psutil
 streamlit>=1.40.0
 

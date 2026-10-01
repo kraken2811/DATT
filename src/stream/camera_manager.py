@@ -407,7 +407,7 @@ class CameraManager:
                                             v_src_id_str, vs_rec.storage_path, file_path,
                                         )
                         except Exception as exc:
-                            if os.environ.get('DATT_STORAGE_BACKEND') == 'external':
+                            if os.environ.get('DATT_STORAGE_BACKEND') in ('external', 'supabase'):
                                 raise RuntimeError("Persisted video could not be retrieved; refusing local path fallback") from exc
                             logger.debug("CameraManager: Could not resolve video_source_id from DB: %s", exc)
 

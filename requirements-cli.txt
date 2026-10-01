@@ -1,0 +1,14 @@
+-r requirements-persistence.txt
+psutil>=5.9,<8
+python-dotenv>=1,<2
+fastapi
+uvicorn
+python-multipart
+httpx
+numpy
+opencv-python-headless>=4.8.0
+imageio-ffmpeg
+yt-dlp
+Pillow
+PyYAML
+pytest

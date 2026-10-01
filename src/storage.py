@@ -13,6 +13,8 @@ import os
 from pathlib import Path, PurePosixPath
 import shutil
 import tempfile
+import mimetypes
+from urllib.parse import quote, urlsplit
 from typing import BinaryIO
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -140,14 +142,121 @@ class ExternalStorageBackend(StorageBackend):
         return self.cache.materialize(key)
 
 
+class SupabaseStorageBackend(StorageBackend):
+    """Private bucket REST adapter; credentials stay server-side, DB keeps keys.
+
+    Local files are disposable read caches. HTTP failures never expose response
+    bodies, request headers or credential-bearing exception messages.
+    """
+
+    def __init__(self, url: str, token: str, bucket: str, cache_dir: Path):
+        parsed = urlsplit(url)
+        if (parsed.scheme != "https" or not parsed.netloc or parsed.username
+                or parsed.password or parsed.query or parsed.fragment
+                or parsed.path not in ("", "/")):
+            raise ValueError("SUPABASE_URL must be an HTTPS project origin")
+        if not token or not bucket or any(c in bucket for c in "/\\"):
+            raise ValueError("Supabase Storage credentials and bucket are required")
+        self.base = url.rstrip("/") + "/storage/v1/object/" + quote(bucket, safe="")
+        self.headers = {"apikey": token}
+        if not token.startswith("sb_secret_"):
+            self.headers["Authorization"] = "Bearer " + token
+        namespace = hashlib.sha256(self.base.encode()).hexdigest()[:20]
+        self.cache = LocalStorageBackend(Path(cache_dir) / namespace)
+
+    def _request(self, method, key, **kwargs):
+        import requests
+        url = self.base + "/" + quote(validate_key(key), safe="/")
+        headers = dict(self.headers)
+        headers.update(kwargs.pop("headers", {}))
+        try:
+            response = requests.request(method, url, headers=headers,
+                                        timeout=(15, 300), allow_redirects=False, **kwargs)
+        except requests.RequestException:
+            raise OSError("Supabase Storage request failed") from None
+        missing = response.status_code == 404
+        if response.status_code == 400:
+            try:
+                body = response.json()
+                missing = body.get("code") == "NoSuchKey" or str(body.get("statusCode")) == "404"
+            except (ValueError, AttributeError):
+                pass
+        if missing:
+            response.close()
+            raise FileNotFoundError(key)
+        if not 200 <= response.status_code < 300:
+            status = response.status_code
+            response.close()
+            raise OSError(f"Supabase Storage HTTP {status}")
+        return response
+
+    def save(self, key: str, source: BinaryIO) -> str:
+        # Upsert permits existing worker retries, preserving the original key.
+        with self._request("POST", key, data=source, headers={
+            "Content-Type": mimetypes.guess_type(key)[0] or "application/octet-stream",
+            "x-upsert": "true",
+        }):
+            pass
+        self.cache.delete(key)
+        return key
+
+    def open(self, key: str) -> BinaryIO:
+        # Spool to disk above 8 MiB rather than loading a full MP4 into RAM.
+        result = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
+        try:
+            with self._request("GET", key, stream=True) as response:
+                for chunk in response.iter_content(1024 * 1024):
+                    result.write(chunk)
+            result.seek(0)
+            return result
+        except FileNotFoundError:
+            result.close()
+            raise
+        except Exception:
+            result.close()
+            raise OSError("Supabase Storage download failed") from None
+
+    def exists(self, key: str) -> bool:
+        try:
+            # Supabase can return HEAD 400 without its JSON NoSuchKey body.
+            # A streamed range GET retains that error detail without reading MP4s.
+            with self._request("GET", key, stream=True, headers={"Range": "bytes=0-0"}):
+                return True
+        except FileNotFoundError:
+            return False
+
+    def delete(self, key: str) -> None:
+        try:
+            with self._request("DELETE", key):
+                pass
+        except FileNotFoundError:
+            pass
+        self.cache.delete(key)
+
+    def materialize(self, key: str) -> Path:
+        if not self.exists(key):
+            raise FileNotFoundError(key)
+        if not self.cache.exists(key):
+            with self.open(key) as source:
+                self.cache.save(key, source)
+        return self.cache.materialize(key)
+
+
 def get_storage() -> StorageBackend:
     backend = os.environ.get("DATT_STORAGE_BACKEND", "local")
     if backend == "local":
         if os.environ.get("DATT_REQUIRE_PERSISTENCE") == "1":
             raise ValueError("Persistent deployment requires external media storage")
         return LocalStorageBackend(Path(os.environ.get("DATT_STORAGE_ROOT", PROJECT_ROOT)))
+    if backend == "supabase":
+        return SupabaseStorageBackend(
+            os.environ.get("SUPABASE_URL", ""),
+            os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
+            os.environ.get("DATT_STORAGE_BUCKET") or os.environ.get("SUPABASE_STORAGE_BUCKET", ""),
+            Path(os.environ.get("DATT_STORAGE_CACHE", str(PROJECT_ROOT / "data" / "media-cache"))),
+        )
     if backend != "external":
-        raise ValueError("DATT_STORAGE_BACKEND must be local or external")
+        raise ValueError("DATT_STORAGE_BACKEND must be local, external or supabase")
     url = os.environ.get("DATT_STORAGE_URL")
     if not url:
         raise ValueError("DATT_STORAGE_URL is required for external storage")

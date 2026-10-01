@@ -1,3 +1,4 @@
 -r src/db/requirements.txt
 fsspec>=2024.6.0
+requests>=2.31,<3
 # Install the fsspec filesystem driver for your selected provider separately.

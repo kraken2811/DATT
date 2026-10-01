@@ -61,3 +61,4 @@ scratch/
 backups/
 data/media-cache/
 .colab-persistence-constraints.txt
+.datt-runtime/

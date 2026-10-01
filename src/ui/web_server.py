@@ -1507,7 +1507,35 @@ async def get_event_snapshot(request: Request) -> Response:
     rel_path = request.query_params.get("path", "")
     event_id = request.query_params.get("id", "")
 
-    # Resolve path from memory cache or SQLite if id provided
+    # Resolve durable UUIDs from PostgreSQL after a process/cache restart.
+    if not rel_path and event_id:
+        try:
+            from uuid import UUID
+            from src.db.database import Database
+            from src.db.models import BusinessEvent, DetectionEvent, VehicleEvent, PlateEvent, FaceEvent
+            event_uuid = UUID(event_id)
+            db = Database()
+            try:
+                with db.transaction() as session:
+                    for model, field in ((DetectionEvent, 'snapshot_path'),
+                                         (VehicleEvent, 'vehicle_image_path'),
+                                         (PlateEvent, 'plate_crop_path'), (FaceEvent, 'face_crop_path')):
+                        record = session.get(model, event_uuid)
+                        if record and getattr(record, field, None):
+                            rel_path = getattr(record, field)
+                            break
+                    if not rel_path:
+                        record = session.get(BusinessEvent, event_uuid)
+                        if record and isinstance(record.event_metadata, dict):
+                            rel_path = record.event_metadata.get('snapshot_path', '')
+            finally:
+                db.dispose()
+        except ValueError:
+            pass  # Numeric legacy IDs retain the existing SQLite lookup.
+        except Exception:
+            raise HTTPException(status_code=503, detail='Event metadata unavailable') from None
+
+    # Resolve legacy IDs from memory cache or SQLite.
     if not rel_path and event_id:
         cached_path = event_snapshot_cache.get(str(event_id))
         if cached_path:

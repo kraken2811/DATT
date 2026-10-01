@@ -15,7 +15,8 @@ def run(args):
 
 def load_secrets():
     names = ("DATT_DATABASE_URL", "DATT_STORAGE_BACKEND", "DATT_STORAGE_URL",
-             "DATT_STORAGE_OPTIONS", "DATT_STORAGE_CACHE")
+             "DATT_STORAGE_OPTIONS", "DATT_STORAGE_CACHE", "SUPABASE_URL",
+             "SUPABASE_SERVICE_ROLE_KEY", "DATT_STORAGE_BUCKET", "SUPABASE_STORAGE_BUCKET")
     try:
         from google.colab import userdata
     except ImportError:
@@ -50,9 +51,10 @@ def main():
             if sock.connect_ex(("127.0.0.1", port)) == 0:
                 raise RuntimeError("DATT port occupied; stop the existing backend first")
     load_secrets()
-    if not os.getenv("DATT_DATABASE_URL") or os.getenv("DATT_STORAGE_BACKEND") != "external" or not os.getenv("DATT_STORAGE_URL"):
-        print("Required configuration: DATT_DATABASE_URL, DATT_STORAGE_BACKEND=external, DATT_STORAGE_URL. Set environment variables or Colab Secrets.", file=sys.stderr)
-        raise RuntimeError("Set DATT_DATABASE_URL, DATT_STORAGE_BACKEND=external and DATT_STORAGE_URL in environment/Colab Secrets")
+    if not os.getenv("DATT_DATABASE_URL") or os.getenv("DATT_STORAGE_BACKEND") not in ("external", "supabase"):
+        raise RuntimeError("Set DATT_DATABASE_URL and a remote DATT_STORAGE_BACKEND in environment/Colab Secrets")
+    from src.storage import get_storage
+    get_storage()  # Validate provider configuration without logging credentials.
     os.environ["DATT_REQUIRE_PERSISTENCE"] = "1"
     if not args.skip_install:
         import importlib.metadata as metadata
