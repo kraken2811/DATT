@@ -182,6 +182,10 @@ class CameraManager:
             RuntimeError: If stream initialization fails.
         """
         with self._lock:
+            from src.cameras.service import registered_id, activate
+            if camera_id is not None:
+                registered=registered_id(ident=camera_id)
+                if registered: return activate(self,registered)
             # Apply startup stagger delay if another camera started recently
             stagger = getattr(config, "CAMERA_STARTUP_STAGGER", 2.0)
             elapsed = time.time() - self._last_camera_started_at
@@ -301,6 +305,9 @@ class CameraManager:
         """
         with self._lock:
             current_id = self._active_camera.id if self._active_camera else None
+            from src.cameras.service import registered_id
+            registered=registered_id(ident=camera_id)
+            if registered: return self.start_camera(registered)
             if current_id == camera_id and self._status == "RUNNING":
                 logger.info("CameraManager: Camera '%s' already active, skipping switch.", camera_id)
                 assert self._active_camera is not None
@@ -321,6 +328,7 @@ class CameraManager:
         name: str | None = None,
         headers: dict[str, str] | None = None,
         video_source_id: str | None = None,
+        _registry_checked: bool = False,
     ) -> CameraInfo:
         """Switch active stream dynamically to a Local MP4, Direct HLS, or YouTube source.
 
@@ -336,6 +344,10 @@ class CameraManager:
             CameraInfo: Metadata representing the active source
         """
         with self._lock:
+            if not _registry_checked:
+                from src.cameras.service import registered_id, activate
+                registered=registered_id(source=str(source).strip())
+                if registered: return activate(self,registered)
             stype = str(source_type).lower().strip()
             src_str = str(source).strip()
 
@@ -511,6 +523,10 @@ class CameraManager:
                             height=reader.height or 720,
                             description=f"YouTube VOD stream (loop={loop})",
                         )
+                elif stype in ('rtsp','http','https','cctv'):
+                    reader=CameraReader(url=src_str,width=1280,height=720)
+                    reader.start()
+                    cam_info=CameraInfo(id=f"stream_{time.time()}",name=name or 'Camera',type=stype,url=src_str)
                 else:
                     raise ValueError(
                         f"Unsupported source type: '{source_type}'. "
@@ -635,6 +651,8 @@ class CameraManager:
 
     def _stop_reader_internal(self) -> None:
         """Internal helper to stop reader without mutating external status."""
+        from src.cameras.service import release
+        release(self)
         if self._reader is not None:
             try:
                 self._reader.stop()

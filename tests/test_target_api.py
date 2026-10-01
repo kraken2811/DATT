@@ -12,6 +12,10 @@ import io
 from pathlib import Path
 import sys
 import unittest
+import os
+import tempfile
+from alembic import command
+from alembic.config import Config
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -30,11 +34,32 @@ class TestTargetAPI(unittest.TestCase):
     """Test suite for Target & Video Source FastAPI endpoints."""
 
     def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.env = patch.dict(os.environ, {
+            'DATT_DATABASE_URL': 'sqlite:///' + (Path(self.temp.name)/'targets.db').as_posix(),
+            'DATT_REQUIRE_PERSISTENCE': '0', 'DATT_STORAGE_BACKEND': 'local',
+            'DATT_STORAGE_ROOT': self.temp.name,
+        })
+        self.env.start()
+        command.upgrade(Config(str(PROJECT_ROOT/'src/db/alembic.ini')), 'head')
+        from src.db.database import Database
+        self.databases = []
+        def isolated_database(*args, **kwargs):
+            db = Database(*args, **kwargs)
+            self.databases.append(db)
+            return db
+        self.db_patch = patch('src.db.database.Database', side_effect=isolated_database)
+        self.db_patch.start()
         self.client = TestClient(app)
         target_manager.clear()
 
     def tearDown(self) -> None:
         target_manager.clear()
+        self.client.close()
+        self.db_patch.stop()
+        for db in self.databases: db.dispose()
+        self.env.stop()
+        self.temp.cleanup()
 
     def test_get_targets_empty(self) -> None:
         """GET /api/targets returns empty list initially."""

@@ -14,6 +14,24 @@
     <!-- ===================================================================== -->
     <div id="selectionScreen" class="view-screen selection-screen">
         <div class="selection-container">
+            <!-- Global Top Navigation Bar -->
+            <nav class="selection-top-nav">
+                <div class="top-nav-brand-group">
+                    <span class="top-nav-badge">AI VISION</span>
+                    <span class="top-nav-brand">DATT</span>
+                </div>
+                <div class="top-nav-menu">
+                    <button type="button" class="top-nav-item active" data-nav="camera">📹 Camera</button>
+                    <button type="button" class="top-nav-item" data-nav="dashboard">📊 Dashboard</button>
+                    <button type="button" class="top-nav-item" data-nav="live">🔴 Live View</button>
+                    <button type="button" class="top-nav-item" data-nav="events" id="topNavEventsBtn">📋 Event Center</button>
+                    <button type="button" class="top-nav-item highlight-nav-item" data-nav="watchlist" id="topNavWatchlistBtn">🎯 Watchlist <span class="nav-count-pill" id="selectionWatchlistBadge">0</span></button>
+                    <button type="button" class="top-nav-item" data-nav="alerts">🔔 Alerts</button>
+                    <button type="button" class="top-nav-item" data-nav="analytics">📈 Analytics</button>
+                    <button type="button" class="top-nav-item" data-nav="settings">⚙️ Settings</button>
+                </div>
+            </nav>
+
             <!-- Brand Header -->
             <header class="selection-header">
                 <div class="selection-badge">AI VISION MONITOR</div>
@@ -233,8 +251,53 @@
         <div class="app-layout">
             <!-- Sidebar: Controls & Registration -->
             <aside class="sidebar" id="sidebar">
+                <div class="sidebar-brand-box">
+                    <div class="selection-badge">AI VISION MONITOR</div>
+                    <h2 class="brand-title">DATT</h2>
+                    <p class="brand-subtitle">HỆ THỐNG GIÁM SÁT THÔNG MINH</p>
+                </div>
+
+                <!-- Primary Platform Navigation -->
+                <nav class="primary-nav-menu">
+                    <button type="button" class="nav-item-btn active" data-nav="dashboard" id="dashNavDashboard">
+                        <span class="nav-icon">📊</span>
+                        <span class="nav-label">Dashboard</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="camera" id="dashNavCamera">
+                        <span class="nav-icon">📹</span>
+                        <span class="nav-label">Camera</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="live" id="dashNavLive">
+                        <span class="nav-icon">🔴</span>
+                        <span class="nav-label">Live View</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="events" id="dashNavEvents">
+                        <span class="nav-icon">📋</span>
+                        <span class="nav-label">Event Center</span>
+                    </button>
+                    <button type="button" class="nav-item-btn highlight-nav-btn" data-nav="watchlist" id="dashNavWatchlist">
+                        <span class="nav-icon">🎯</span>
+                        <span class="nav-label">Watchlist</span>
+                        <span class="nav-count-badge" id="navWatchlistBadgeDash">0</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="alerts" id="dashNavAlerts">
+                        <span class="nav-icon">🔔</span>
+                        <span class="nav-label">Alerts</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="analytics" id="dashNavAnalytics">
+                        <span class="nav-icon">📈</span>
+                        <span class="nav-label">Analytics</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="settings" id="dashNavSettings">
+                        <span class="nav-icon">⚙️</span>
+                        <span class="nav-label">Settings</span>
+                    </button>
+                </nav>
+
+                <div class="sidebar-divider"></div>
+
                 <div class="sidebar-header">
-                    <h2>🎥 Camera Management</h2>
+                    <h2>🎥 Camera Controls</h2>
                 </div>
 
                 <div class="sidebar-section">
@@ -520,6 +583,888 @@
     </div>
 
     <!-- ===================================================================== -->
+    <!-- 4.5 UNIFIED WATCHLIST CENTER                                          -->
+    <!-- ===================================================================== -->
+    <div id="watchlistScreen" class="view-screen watchlist-screen" style="display: none;">
+        <div class="app-layout">
+            <!-- Sidebar: Unified Platform Navigation -->
+            <aside class="sidebar" id="watchlistSidebar">
+                <div class="sidebar-brand-box">
+                    <div class="selection-badge">AI VISION MONITOR</div>
+                    <h2 class="brand-title">DATT</h2>
+                    <p class="brand-subtitle">HỆ THỐNG GIÁM SÁT THÔNG MINH</p>
+                </div>
+
+                <!-- Primary Platform Navigation -->
+                <nav class="primary-nav-menu">
+                    <button type="button" class="nav-item-btn" data-nav="dashboard" id="wlNavDashboard">
+                        <span class="nav-icon">📊</span>
+                        <span class="nav-label">Dashboard</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="camera" id="wlNavCamera">
+                        <span class="nav-icon">📹</span>
+                        <span class="nav-label">Camera</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="live" id="wlNavLive">
+                        <span class="nav-icon">🔴</span>
+                        <span class="nav-label">Live View</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="events" id="wlNavEvents">
+                        <span class="nav-icon">📋</span>
+                        <span class="nav-label">Event Center</span>
+                    </button>
+                    <button type="button" class="nav-item-btn highlight-nav-btn active" data-nav="watchlist" id="wlNavWatchlist">
+                        <span class="nav-icon">🎯</span>
+                        <span class="nav-label">Watchlist</span>
+                        <span class="nav-count-badge" id="navWatchlistBadgeWl">0</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="alerts" id="wlNavAlerts">
+                        <span class="nav-icon">🔔</span>
+                        <span class="nav-label">Alerts</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="analytics" id="wlNavAnalytics">
+                        <span class="nav-icon">📈</span>
+                        <span class="nav-label">Analytics</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="settings" id="wlNavSettings">
+                        <span class="nav-icon">⚙️</span>
+                        <span class="nav-label">Settings</span>
+                    </button>
+                </nav>
+
+                <div class="sidebar-divider"></div>
+
+                <div class="sidebar-section">
+                    <div class="sidebar-meta-card">
+                        <div class="meta-card-title">HỆ THỐNG WATCHLIST</div>
+                        <div class="meta-card-row">
+                            <span class="meta-label">Nhận diện mặt:</span>
+                            <span class="meta-val-badge badge-active">SCRFD + ArcFace</span>
+                        </div>
+                        <div class="meta-card-row">
+                            <span class="meta-label">Biển số xe:</span>
+                            <span class="meta-val-badge badge-active">YOLO + PaddleOCR</span>
+                        </div>
+                        <div class="meta-card-row">
+                            <span class="meta-label">Cơ sở dữ liệu:</span>
+                            <span class="meta-val-badge badge-neutral">pgvector / JSON</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="sidebar-footer">
+                    <div class="footer-title">DATT — Vision Security</div>
+                    <div class="footer-sub">Unified Watchlist Center</div>
+                    <div class="footer-desc">Realtime Target & Plate Recognition</div>
+                </div>
+            </aside>
+
+            <!-- Main Watchlist Center -->
+            <main class="main-content watchlist-main-content">
+                <!-- Page Header -->
+                <header class="watchlist-header-bar">
+                    <div class="watchlist-header-left">
+                        <div class="watchlist-title-badge">SECURITY MONITORING MODULE</div>
+                        <h1 class="watchlist-main-title">WATCHLIST</h1>
+                        <p class="watchlist-main-lead">Quản lý các đối tượng cần theo dõi và lịch sử phát hiện</p>
+                    </div>
+                    <div class="watchlist-header-right">
+                        <button type="button" id="btnRefreshWatchlist" class="secondary-btn icon-btn" title="Làm mới dữ liệu">
+                            <span class="btn-icon">🔄</span>
+                            <span class="btn-text">Làm mới</span>
+                        </button>
+                    </div>
+                </header>
+
+                <!-- Dual Hero Tabs -->
+                <div class="watchlist-hero-tabs">
+                    <button type="button" class="watchlist-hero-tab-card active" id="tabBtnWatchlistFace" data-tab="face">
+                        <div class="hero-tab-icon-box">👤</div>
+                        <div class="hero-tab-content">
+                            <div class="hero-tab-headline">
+                                <span class="hero-tab-name">KHUÔN MẶT</span>
+                                <span class="hero-tab-sub">Face Watchlist</span>
+                            </div>
+                            <div class="hero-tab-stat-row">
+                                <span class="hero-tab-count-num" id="faceHeroTotalCount">--</span>
+                                <span class="hero-tab-count-unit">đối tượng</span>
+                            </div>
+                        </div>
+                    </button>
+
+                    <button type="button" class="watchlist-hero-tab-card" id="tabBtnWatchlistVehicle" data-tab="vehicle">
+                        <div class="hero-tab-icon-box">🚗</div>
+                        <div class="hero-tab-content">
+                            <div class="hero-tab-headline">
+                                <span class="hero-tab-name">PHƯƠNG TIỆN</span>
+                                <span class="hero-tab-sub">Vehicle Watchlist</span>
+                            </div>
+                            <div class="hero-tab-stat-row">
+                                <span class="hero-tab-count-num" id="vehicleHeroTotalCount">--</span>
+                                <span class="hero-tab-count-unit">phương tiện</span>
+                            </div>
+                        </div>
+                    </button>
+                </div>
+
+                <!-- Notification / Status Banner -->
+                <div id="watchlistBanner" class="alert-banner" style="display: none;"></div>
+
+                <!-- ============================================== -->
+                <!-- PANE 1: FACE WATCHLIST                        -->
+                <!-- ============================================== -->
+                <div id="paneFaceWatchlist" class="watchlist-pane active">
+                    <!-- Summary Stats Bar -->
+                    <div class="watchlist-summary-grid">
+                        <div class="summary-metric-card">
+                            <div class="metric-icon-wrap">👥</div>
+                            <div class="metric-info">
+                                <span class="metric-title">Tổng đối tượng</span>
+                                <span class="metric-number" id="faceStatTotal">--</span>
+                            </div>
+                        </div>
+                        <div class="summary-metric-card">
+                            <div class="metric-icon-wrap active-wrap">🎯</div>
+                            <div class="metric-info">
+                                <span class="metric-title">Đang theo dõi</span>
+                                <span class="metric-number" id="faceStatActive">--</span>
+                            </div>
+                        </div>
+                        <div class="summary-metric-card">
+                            <div class="metric-icon-wrap alert-wrap">🔔</div>
+                            <div class="metric-info">
+                                <span class="metric-title">Phát hiện hôm nay</span>
+                                <span class="metric-number" id="faceStatDetectedToday">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Toolbar -->
+                    <div class="watchlist-toolbar">
+                        <div class="toolbar-search-box">
+                            <span class="search-input-icon">🔍</span>
+                            <input type="text" id="faceSearchInput" class="toolbar-input" placeholder="Search tên/ID...">
+                        </div>
+                        <div class="toolbar-filters">
+                            <select id="faceStatusFilter" class="toolbar-select">
+                                <option value="all">Tất cả trạng thái</option>
+                                <option value="active">Active (Đang theo dõi)</option>
+                                <option value="inactive">Disabled (Tạm ngưng)</option>
+                            </select>
+                            <select id="faceSortFilter" class="toolbar-select">
+                                <option value="newest">Sắp xếp: Mới nhất</option>
+                                <option value="oldest">Sắp xếp: Cũ nhất</option>
+                                <option value="name_asc">Tên (A → Z)</option>
+                                <option value="name_desc">Tên (Z → A)</option>
+                                <option value="detected">Số lần phát hiện</option>
+                            </select>
+                        </div>
+                        <div class="toolbar-actions">
+                            <button type="button" id="btnOpenAddFaceModal" class="primary-btn highlight-btn">
+                                <span class="btn-icon">➕</span>
+                                <span class="btn-text">Thêm khuôn mặt</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Table Container -->
+                    <div class="watchlist-table-card">
+                        <!-- Skeleton Loader -->
+                        <div id="faceTableSkeleton" class="table-skeleton" style="display: none;">
+                            <div class="skeleton-row"></div>
+                            <div class="skeleton-row"></div>
+                            <div class="skeleton-row"></div>
+                            <div class="skeleton-row"></div>
+                        </div>
+
+                        <!-- Error State -->
+                        <div id="faceTableError" class="state-placeholder error-placeholder" style="display: none;">
+                            <span class="state-icon">⚠️</span>
+                            <h3 class="state-title">Không thể tải danh sách khuôn mặt</h3>
+                            <p class="state-desc" id="faceTableErrorMsg">Lỗi kết nối tới máy chủ API.</p>
+                            <button type="button" id="btnRetryLoadFaces" class="secondary-btn btn-sm">Thử lại</button>
+                        </div>
+
+                        <!-- Empty State -->
+                        <div id="faceTableEmpty" class="state-placeholder empty-placeholder" style="display: none;">
+                            <span class="state-icon">👤</span>
+                            <h3 class="state-title">Chưa có khuôn mặt trong Watchlist</h3>
+                            <p class="state-desc">Đăng ký khuôn mặt mục tiêu để tự động nhận diện và ghi nhận lịch sử.</p>
+                            <button type="button" id="btnEmptyAddFace" class="primary-btn highlight-btn btn-sm">
+                                <span class="btn-icon">➕</span> Thêm khuôn mặt
+                            </button>
+                        </div>
+
+                        <!-- Table Element -->
+                        <div class="table-responsive-wrapper" id="faceTableWrapper">
+                            <table class="watchlist-data-table" id="faceDataTable">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 72px;">Ảnh</th>
+                                        <th>Họ tên</th>
+                                        <th>Target ID</th>
+                                        <th style="width: 110px;">Trạng thái</th>
+                                        <th style="width: 100px;">Số lần phát hiện</th>
+                                        <th style="width: 140px;">Lần phát hiện cuối</th>
+                                        <th style="width: 150px;">Ngày đăng ký</th>
+                                        <th style="width: 80px; text-align: center;">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="faceTableBody">
+                                    <!-- Rendered dynamically via JavaScript -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ============================================== -->
+                <!-- PANE 2: VEHICLE WATCHLIST                     -->
+                <!-- ============================================== -->
+                <div id="paneVehicleWatchlist" class="watchlist-pane" style="display: none;">
+                    <!-- Summary Stats Bar -->
+                    <div class="watchlist-summary-grid">
+                        <div class="summary-metric-card">
+                            <div class="metric-icon-wrap">🚗</div>
+                            <div class="metric-info">
+                                <span class="metric-title">Tổng phương tiện</span>
+                                <span class="metric-number" id="vehicleStatTotal">--</span>
+                            </div>
+                        </div>
+                        <div class="summary-metric-card">
+                            <div class="metric-icon-wrap active-wrap">🎯</div>
+                            <div class="metric-info">
+                                <span class="metric-title">Đang theo dõi</span>
+                                <span class="metric-number" id="vehicleStatActive">--</span>
+                            </div>
+                        </div>
+                        <div class="summary-metric-card">
+                            <div class="metric-icon-wrap alert-wrap">🔔</div>
+                            <div class="metric-info">
+                                <span class="metric-title">Phát hiện hôm nay</span>
+                                <span class="metric-number" id="vehicleStatDetectedToday">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Toolbar -->
+                    <div class="watchlist-toolbar">
+                        <div class="toolbar-search-box">
+                            <span class="search-input-icon">🔍</span>
+                            <input type="text" id="vehicleSearchInput" class="toolbar-input" placeholder="Tìm biển số, tên, chủ xe...">
+                        </div>
+                        <div class="toolbar-filters">
+                            <select id="vehicleTypeFilter" class="toolbar-select">
+                                <option value="all">Tất cả loại xe</option>
+                                <option value="car">Ô tô</option>
+                                <option value="motorbike">Xe máy</option>
+                                <option value="truck">Xe tải</option>
+                                <option value="bus">Xe buýt / Xe khách</option>
+                                <option value="container">Container</option>
+                                <option value="other">Khác</option>
+                            </select>
+                            <select id="vehicleStatusFilter" class="toolbar-select">
+                                <option value="all">Tất cả trạng thái</option>
+                                <option value="active">Active (Đang theo dõi)</option>
+                                <option value="disabled">Disabled (Tạm ngưng)</option>
+                            </select>
+                        </div>
+                        <div class="toolbar-actions">
+                            <button type="button" id="btnOpenAddVehicleModal" class="primary-btn highlight-btn">
+                                <span class="btn-icon">➕</span>
+                                <span class="btn-text">Thêm phương tiện</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Table Container -->
+                    <div class="watchlist-table-card">
+                        <!-- Skeleton Loader -->
+                        <div id="vehicleTableSkeleton" class="table-skeleton" style="display: none;">
+                            <div class="skeleton-row"></div>
+                            <div class="skeleton-row"></div>
+                            <div class="skeleton-row"></div>
+                            <div class="skeleton-row"></div>
+                        </div>
+
+                        <!-- Error State -->
+                        <div id="vehicleTableError" class="state-placeholder error-placeholder" style="display: none;">
+                            <span class="state-icon">⚠️</span>
+                            <h3 class="state-title">Không thể tải danh sách phương tiện</h3>
+                            <p class="state-desc" id="vehicleTableErrorMsg">Lỗi kết nối tới máy chủ API.</p>
+                            <button type="button" id="btnRetryLoadVehicles" class="secondary-btn btn-sm">Thử lại</button>
+                        </div>
+
+                        <!-- Empty State -->
+                        <div id="vehicleTableEmpty" class="state-placeholder empty-placeholder" style="display: none;">
+                            <span class="state-icon">🚗</span>
+                            <h3 class="state-title">Chưa có phương tiện trong Watchlist</h3>
+                            <p class="state-desc">Thêm biển số xe vào danh sách theo dõi để đối soát tự động khi phát hiện.</p>
+                            <button type="button" id="btnEmptyAddVehicle" class="primary-btn highlight-btn btn-sm">
+                                <span class="btn-icon">➕</span> Thêm phương tiện
+                            </button>
+                        </div>
+
+                        <!-- Table Element -->
+                        <div class="table-responsive-wrapper" id="vehicleTableWrapper">
+                            <table class="watchlist-data-table" id="vehicleDataTable">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 150px;">Biển số</th>
+                                        <th style="width: 120px;">Loại phương tiện</th>
+                                        <th>Tên / Gợi nhớ</th>
+                                        <th>Chủ phương tiện</th>
+                                        <th style="width: 110px;">Trạng thái</th>
+                                        <th style="width: 100px;">Số lần phát hiện</th>
+                                        <th style="width: 140px;">Lần cuối</th>
+                                        <th style="width: 150px;">Ngày thêm</th>
+                                        <th style="width: 80px; text-align: center;">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="vehicleTableBody">
+                                    <!-- Rendered dynamically via JavaScript -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- 4.6 CAMERA MANAGEMENT CENTER                                         -->
+    <!-- ===================================================================== -->
+    <div id="cameraManagementScreen" class="view-screen camera-management-screen" style="display: none;">
+        <div class="app-layout">
+            <!-- Sidebar: Unified Platform Navigation -->
+            <aside class="sidebar" id="cameraSidebar">
+                <div class="sidebar-brand-box">
+                    <div class="selection-badge">AI VISION MONITOR</div>
+                    <h2 class="brand-title">DATT</h2>
+                    <p class="brand-subtitle">HỆ THỐNG GIÁM SÁT THÔNG MINH</p>
+                </div>
+
+                <!-- Primary Platform Navigation -->
+                <nav class="primary-nav-menu">
+                    <button type="button" class="nav-item-btn" data-nav="dashboard" id="camNavDashboard">
+                        <span class="nav-icon">📊</span>
+                        <span class="nav-label">Dashboard</span>
+                    </button>
+                    <button type="button" class="nav-item-btn highlight-nav-btn active" data-nav="camera" id="camNavCamera">
+                        <span class="nav-icon">📹</span>
+                        <span class="nav-label">Camera</span>
+                        <span class="nav-count-badge" id="navCameraCountBadge">--</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="live" id="camNavLive">
+                        <span class="nav-icon">🔴</span>
+                        <span class="nav-label">Live View</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="events" id="camNavEvents">
+                        <span class="nav-icon">📋</span>
+                        <span class="nav-label">Event Center</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="watchlist" id="camNavWatchlist">
+                        <span class="nav-icon">🎯</span>
+                        <span class="nav-label">Watchlist</span>
+                        <span class="nav-count-badge" id="navWatchlistBadgeCam">0</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="alerts" id="camNavAlerts">
+                        <span class="nav-icon">🔔</span>
+                        <span class="nav-label">Alerts</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="analytics" id="camNavAnalytics">
+                        <span class="nav-icon">📈</span>
+                        <span class="nav-label">Analytics</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="settings" id="camNavSettings">
+                        <span class="nav-icon">⚙️</span>
+                        <span class="nav-label">Settings</span>
+                    </button>
+                </nav>
+
+                <div class="sidebar-divider"></div>
+
+                <div class="sidebar-section">
+                    <div class="sidebar-meta-card">
+                        <div class="meta-card-title">HẠ TẦNG CAMERA</div>
+                        <div class="meta-card-row">
+                            <span class="meta-card-label">Giao thức:</span>
+                            <span class="meta-card-value font-mono">RTSP / HLS / HTTP</span>
+                        </div>
+                        <div class="meta-card-row">
+                            <span class="meta-card-label">Giải mã:</span>
+                            <span class="meta-card-value font-mono">FFmpeg / OpenCV</span>
+                        </div>
+                        <div class="meta-card-row">
+                            <span class="meta-card-label">Trạng thái:</span>
+                            <span class="status-pill status-active font-mono">Tự động ping</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="sidebar-footer">
+                    <span class="footer-app-name">DATT — Vision Security</span>
+                    <span class="footer-build-tag">Camera Management Center</span>
+                    <span class="footer-copy">Realtime Stream Orchestration</span>
+                </div>
+            </aside>
+
+            <!-- Main Content: Camera Management Center -->
+            <main class="watchlist-main-content camera-main-content">
+                <!-- Page Header -->
+                <header class="watchlist-header-bar">
+                    <div class="watchlist-header-left">
+                        <div class="watchlist-title-badge">CAMERA INFRASTRUCTURE &amp; MONITORING</div>
+                        <h1 class="watchlist-main-title">QUẢN LÝ CAMERA</h1>
+                        <p class="watchlist-main-lead">Cấu hình nguồn phát, trạng thái kết nối và quản lý danh sách camera hệ thống</p>
+                    </div>
+                    <div class="watchlist-header-right">
+                        <button type="button" id="btnOpenAddCameraModal" class="primary-btn highlight-btn">
+                            <span class="btn-icon">➕</span> Thêm Camera
+                        </button>
+                        <button type="button" id="btnSwitchToSelection" class="secondary-btn" title="Chọn nguồn phát trực tiếp">
+                            <span class="btn-icon">📺</span> Chọn nguồn giám sát
+                        </button>
+                        <button type="button" id="btnRefreshCameras" class="secondary-btn icon-btn" title="Làm mới danh sách">
+                            <span class="btn-icon">🔄</span> Làm mới
+                        </button>
+                    </div>
+                </header>
+
+                <!-- Feedback Banner -->
+                <div id="cameraFeedbackBanner" class="watchlist-toast" style="display: none;"></div>
+
+                <!-- 1. Summary Cards (4 Cards) -->
+                <div class="camera-summary-grid">
+                    <div class="summary-metric-card" id="camCardTotal">
+                        <div class="metric-icon-wrap">📹</div>
+                        <div class="metric-info">
+                            <span class="metric-title">Tổng camera</span>
+                            <span class="metric-number" id="camTotalVal">--</span>
+                        </div>
+                    </div>
+                    <div class="summary-metric-card" id="camCardOnline">
+                        <div class="metric-icon-wrap active-wrap">🟢</div>
+                        <div class="metric-info">
+                            <span class="metric-title">Đang hoạt động</span>
+                            <span class="metric-number color-online" id="camOnlineVal">--</span>
+                        </div>
+                    </div>
+                    <div class="summary-metric-card" id="camCardOffline">
+                        <div class="metric-icon-wrap alert-wrap">🔴</div>
+                        <div class="metric-info">
+                            <span class="metric-title">Mất kết nối</span>
+                            <span class="metric-number color-offline" id="camOfflineVal">--</span>
+                        </div>
+                    </div>
+                    <div class="summary-metric-card" id="camCardDisabled">
+                        <div class="metric-icon-wrap">⏸️</div>
+                        <div class="metric-info">
+                            <span class="metric-title">Đã tắt</span>
+                            <span class="metric-number color-disabled" id="camDisabledVal">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 2. Search & Filter Toolbar -->
+                <div class="watchlist-toolbar">
+                    <div class="toolbar-search-box">
+                        <span class="search-input-icon">🔍</span>
+                        <input type="text" id="cameraSearchInput" class="toolbar-input" placeholder="Tìm camera theo tên, ID, khu vực, URL...">
+                    </div>
+                    <div class="toolbar-filters">
+                        <select id="cameraStatusFilter" class="toolbar-select" aria-label="Lọc trạng thái">
+                            <option value="all">Tất cả trạng thái</option>
+                            <option value="online">🟢 Đang hoạt động (Online)</option>
+                            <option value="offline">🔴 Mất kết nối (Offline)</option>
+                            <option value="disabled">⏸️ Đã tắt (Disabled)</option>
+                        </select>
+                        <select id="cameraTypeFilter" class="toolbar-select" aria-label="Lọc loại nguồn">
+                            <option value="all">Tất cả loại nguồn</option>
+                            <option value="rtsp">RTSP Stream</option>
+                            <option value="hls">HLS Stream</option>
+                            <option value="http">HTTP / MJPEG</option>
+                            <option value="youtube">YouTube Live</option>
+                            <option value="file">Tệp Video</option>
+                            <option value="cctv">Public CCTV</option>
+                        </select>
+                        <select id="cameraZoneFilter" class="toolbar-select" aria-label="Lọc khu vực">
+                            <option value="all">Tất cả khu vực</option>
+                        </select>
+                        <button type="button" id="btnToolbarAddCamera" class="primary-btn highlight-btn">
+                            <span class="btn-icon">➕</span> Thêm Camera
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Table Container -->
+                <div class="watchlist-table-card">
+                    <!-- Skeleton Loader -->
+                    <div id="cameraTableSkeleton" class="table-skeleton" style="display: none;">
+                        <div class="skeleton-row"></div>
+                        <div class="skeleton-row"></div>
+                        <div class="skeleton-row"></div>
+                        <div class="skeleton-row"></div>
+                    </div>
+
+                    <!-- Empty State -->
+                    <div id="cameraTableEmpty" class="state-placeholder empty-placeholder" style="display: none;">
+                        <span class="state-icon">📹</span>
+                        <h3 class="state-title" id="cameraEmptyTitle">Chưa có camera nào trong hệ thống</h3>
+                        <p class="state-desc" id="cameraEmptyDesc">Thêm camera mới để cấu hình nguồn phát và kích hoạt tính năng giám sát thông minh.</p>
+                        <button type="button" id="btnEmptyAddCamera" class="primary-btn highlight-btn btn-sm">
+                            <span class="btn-icon">➕</span> Thêm Camera mới
+                        </button>
+                    </div>
+
+                    <!-- Filter Empty State -->
+                    <div id="cameraFilterEmpty" class="state-placeholder empty-placeholder" style="display: none;">
+                        <span class="state-icon">🔍</span>
+                        <h3 class="state-title">Không tìm thấy camera phù hợp</h3>
+                        <p class="state-desc">Không có camera nào khớp với tiêu chí tìm kiếm hoặc bộ lọc hiện tại.</p>
+                        <button type="button" id="btnResetCameraFilters" class="secondary-btn btn-sm">
+                            <span class="btn-icon">🔄</span> Đặt lại bộ lọc
+                        </button>
+                    </div>
+
+                    <!-- Error State -->
+                    <div id="cameraTableError" class="state-placeholder error-placeholder" style="display: none;">
+                        <span class="state-icon">⚠️</span>
+                        <h3 class="state-title">Không thể tải danh sách Camera</h3>
+                        <p class="state-desc" id="cameraErrorMsg">Vui lòng kiểm tra kết nối mạng hoặc máy chủ.</p>
+                        <button type="button" id="btnRetryLoadCameras" class="secondary-btn btn-sm">Thử lại</button>
+                    </div>
+
+                    <!-- Table Element -->
+                    <div class="table-responsive-wrapper" id="cameraTableWrapper">
+                        <table class="watchlist-data-table" id="cameraDataTable">
+                            <thead>
+                                <tr>
+                                    <th style="width: 76px;">PREVIEW</th>
+                                    <th>TÊN CAMERA</th>
+                                    <th style="width: 110px;">CAMERA ID</th>
+                                    <th style="width: 150px;">KHU VỰC</th>
+                                    <th style="width: 120px;">LOẠI NGUỒN</th>
+                                    <th style="width: 140px;">TRẠNG THÁI</th>
+                                    <th style="width: 160px;">HOẠT ĐỘNG CUỐI</th>
+                                    <th style="width: 120px; text-align: center;">ACTIONS</th>
+                                </tr>
+                            </thead>
+                            <tbody id="cameraTableBody">
+                                <!-- Dynamic camera rows -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- 4.7 EVENT CENTER SCREEN                                               -->
+    <!-- ===================================================================== -->
+    <div id="eventCenterScreen" class="view-screen event-center-screen" style="display: none;">
+        <div class="app-layout">
+            <!-- Sidebar: Unified Platform Navigation -->
+            <aside class="sidebar" id="eventSidebar">
+                <div class="sidebar-brand-box">
+                    <div class="selection-badge">AI VISION MONITOR</div>
+                    <h2 class="brand-title">DATT</h2>
+                    <p class="brand-subtitle">HỆ THỐNG GIÁM SÁT THÔNG MINH</p>
+                </div>
+
+                <!-- Primary Platform Navigation -->
+                <nav class="primary-nav-menu">
+                    <button type="button" class="nav-item-btn" data-nav="dashboard" id="evNavDashboard">
+                        <span class="nav-icon">📊</span>
+                        <span class="nav-label">Dashboard</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="camera" id="evNavCamera">
+                        <span class="nav-icon">📹</span>
+                        <span class="nav-label">Camera</span>
+                        <span class="nav-count-badge" id="navCameraCountBadgeEv">--</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="live" id="evNavLive">
+                        <span class="nav-icon">🔴</span>
+                        <span class="nav-label">Live View</span>
+                    </button>
+                    <button type="button" class="nav-item-btn highlight-nav-btn active" data-nav="events" id="evNavEvents">
+                        <span class="nav-icon">📋</span>
+                        <span class="nav-label">Event Center</span>
+                        <span class="nav-count-badge" id="navEventCountBadge">--</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="watchlist" id="evNavWatchlist">
+                        <span class="nav-icon">🎯</span>
+                        <span class="nav-label">Watchlist</span>
+                        <span class="nav-count-badge" id="navWatchlistBadgeEv">0</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="alerts" id="evNavAlerts">
+                        <span class="nav-icon">🔔</span>
+                        <span class="nav-label">Alerts</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="analytics" id="evNavAnalytics">
+                        <span class="nav-icon">📈</span>
+                        <span class="nav-label">Analytics</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="settings" id="evNavSettings">
+                        <span class="nav-icon">⚙️</span>
+                        <span class="nav-label">Settings</span>
+                    </button>
+                </nav>
+
+                <div class="sidebar-divider"></div>
+
+                <div class="sidebar-section">
+                    <div class="sidebar-meta-card">
+                        <div class="meta-card-title">EVENT ENGINE</div>
+                        <div class="meta-card-row">
+                            <span class="meta-label">Event Center:</span>
+                            <span class="meta-val-badge badge-active">Unified Projection</span>
+                        </div>
+                        <div class="meta-card-row">
+                            <span class="meta-label">Lưu trữ bằng chứng:</span>
+                            <span class="meta-val-badge badge-active">Supabase Storage</span>
+                        </div>
+                        <div class="meta-card-row">
+                            <span class="meta-label">Thông báo vi phạm:</span>
+                            <span class="meta-val-badge badge-neutral">SMTP Worker</span>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Main Content: Event Center -->
+            <main class="main-content" id="eventMainContent">
+                <!-- Header -->
+                <header class="content-header-row">
+                    <div class="header-title-group">
+                        <div class="page-title-badge">SECURITY & AUDIT LOGS</div>
+                        <h1 class="page-title">TRUNG TÂM SỰ KIỆN — EVENT CENTER</h1>
+                        <p class="page-subtitle">Quản lý, tra cứu và kiểm tra bằng chứng nhật ký nhận diện từ camera</p>
+                    </div>
+                    <div class="header-actions">
+                        <button type="button" id="btnRefreshEvents" class="secondary-btn" title="Làm mới dữ liệu">
+                            <span class="btn-icon">🔄</span> Làm mới
+                        </button>
+                    </div>
+                </header>
+
+                <!-- Summary Cards Row (Real Data) -->
+                <div class="event-summary-grid">
+                    <div class="event-summary-card">
+                        <div class="summary-card-icon total">📋</div>
+                        <div class="summary-card-info">
+                            <span class="summary-card-label">Tổng số sự kiện</span>
+                            <div class="summary-card-value font-mono" id="evTotalCount">--</div>
+                        </div>
+                    </div>
+                    <div class="event-summary-card">
+                        <div class="summary-card-icon face">👤</div>
+                        <div class="summary-card-info">
+                            <span class="summary-card-label">Sự kiện khuôn mặt</span>
+                            <div class="summary-card-value font-mono" id="evFaceCount">--</div>
+                        </div>
+                    </div>
+                    <div class="event-summary-card">
+                        <div class="summary-card-icon vehicle">🚗</div>
+                        <div class="summary-card-info">
+                            <span class="summary-card-label">Sự kiện biển số / Xe</span>
+                            <div class="summary-card-value font-mono" id="evPlateVehicleCount">--</div>
+                        </div>
+                    </div>
+                    <div class="event-summary-card">
+                        <div class="summary-card-icon match">🎯</div>
+                        <div class="summary-card-info">
+                            <span class="summary-card-label">Khớp Watchlist</span>
+                            <div class="summary-card-value font-mono text-danger" id="evMatchCount">--</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Controls & Filters Card -->
+                <div class="event-controls-card">
+                    <!-- Tabs -->
+                    <div class="event-tabs-bar" id="eventTabsBar">
+                        <button type="button" class="event-tab-btn active" data-tab="all" id="evTabAll">
+                            <span>📋 Tất cả</span>
+                        </button>
+                        <button type="button" class="event-tab-btn" data-tab="face" id="evTabFace">
+                            <span>👤 Face</span>
+                        </button>
+                        <button type="button" class="event-tab-btn" data-tab="plate" id="evTabPlate">
+                            <span>🔍 Plate</span>
+                        </button>
+                        <button type="button" class="event-tab-btn" data-tab="vehicle" id="evTabVehicle">
+                            <span>🚗 Vehicle</span>
+                        </button>
+                        <button type="button" class="event-tab-btn" data-tab="passage" id="evTabPassage">
+                            <span>🛣️ Passage</span>
+                        </button>
+                        <button type="button" class="event-tab-btn" data-tab="business" id="evTabBusiness">
+                            <span>💼 Business</span>
+                        </button>
+                    </div>
+
+                    <!-- Filter Form -->
+                    <div class="event-filters-grid">
+                        <div class="filter-group">
+                            <label for="eventFilterCamera" class="filter-label">Camera</label>
+                            <select id="eventFilterCamera" class="select-input">
+                                <option value="">Tất cả Camera</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label for="eventFilterType" class="filter-label">Loại sự kiện</label>
+                            <select id="eventFilterType" class="select-input">
+                                <option value="">Tất cả loại sự kiện</option>
+                                <option value="face">Face (Khuôn mặt)</option>
+                                <option value="plate">Plate (Biển số)</option>
+                                <option value="vehicle">Vehicle (Phương tiện)</option>
+                                <option value="passage">Passage (Lượt xe qua)</option>
+                                <option value="business">Business (Nghiệp vụ)</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label for="eventFilterTarget" class="filter-label">Target ID (Khuôn mặt)</label>
+                            <input type="text" id="eventFilterTarget" class="text-input" placeholder="UUID đối tượng...">
+                        </div>
+                        <div class="filter-group">
+                            <label for="eventFilterPlate" class="filter-label">Biển số xe</label>
+                            <input type="text" id="eventFilterPlate" class="text-input font-mono" placeholder="29A12345...">
+                        </div>
+                        <div class="filter-group">
+                            <label for="eventFilterMatch" class="filter-label">Khớp Watchlist</label>
+                            <select id="eventFilterMatch" class="select-input">
+                                <option value="">Tất cả</option>
+                                <option value="true">Chỉ khớp (Match)</option>
+                                <option value="false">Không khớp</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label for="eventFilterNotification" class="filter-label">Trạng thái thông báo</label>
+                            <select id="eventFilterNotification" class="select-input">
+                                <option value="">Tất cả</option>
+                                <option value="sent">Đã gửi (Sent)</option>
+                                <option value="pending">Đang chờ (Pending)</option>
+                                <option value="failed">Thất bại (Failed)</option>
+                                <option value="suppressed">Bị chặn (Suppressed)</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label for="eventFilterFromTime" class="filter-label">Từ thời gian</label>
+                            <input type="datetime-local" id="eventFilterFromTime" class="text-input">
+                        </div>
+                        <div class="filter-group">
+                            <label for="eventFilterToTime" class="filter-label">Đến thời gian</label>
+                            <input type="datetime-local" id="eventFilterToTime" class="text-input">
+                        </div>
+                    </div>
+
+                    <!-- Filter Actions Row -->
+                    <div class="event-filter-actions-row">
+                        <div class="filter-actions-left">
+                            <button type="button" id="btnApplyEventFilters" class="primary-btn highlight-btn">
+                                <span class="btn-icon">🔍</span> Áp dụng bộ lọc
+                            </button>
+                            <button type="button" id="btnClearEventFilters" class="secondary-btn">
+                                <span class="btn-icon">✕</span> Xóa bộ lọc
+                            </button>
+                        </div>
+                        <div class="filter-actions-right">
+                            <div class="sort-selector-group">
+                                <label for="eventSortSelect" class="filter-label-inline">Sắp xếp:</label>
+                                <select id="eventSortSelect" class="select-input select-sm">
+                                    <option value="desc">Mới nhất trước (Newest First)</option>
+                                    <option value="asc">Cũ nhất trước (Oldest First)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Table Card Container -->
+                <div class="event-table-container">
+                    <!-- Skeleton Loader -->
+                    <div id="eventTableSkeleton" class="table-skeleton" style="display: none;">
+                        <div class="skeleton-row"></div>
+                        <div class="skeleton-row"></div>
+                        <div class="skeleton-row"></div>
+                        <div class="skeleton-row"></div>
+                        <div class="skeleton-row"></div>
+                    </div>
+
+                    <!-- Error State -->
+                    <div id="eventTableError" class="state-placeholder error-placeholder" style="display: none;">
+                        <div class="state-icon">⚠️</div>
+                        <h4 class="state-title">Không thể tải danh sách sự kiện</h4>
+                        <p class="state-desc" id="eventErrorMsg">Đã xảy ra lỗi khi kết nối tới máy chủ Event Center.</p>
+                        <button type="button" id="btnRetryLoadEvents" class="secondary-btn btn-sm">
+                            <span class="btn-icon">🔄</span> Thử lại
+                        </button>
+                    </div>
+
+                    <!-- Empty State (No events at all) -->
+                    <div id="eventTableEmpty" class="state-placeholder" style="display: none;">
+                        <div class="state-icon">📋</div>
+                        <h4 class="state-title">Chưa có sự kiện nào</h4>
+                        <p class="state-desc">Hệ thống chưa ghi nhận sự kiện nhận diện nào. Các sự kiện từ camera sẽ hiển thị tại đây.</p>
+                    </div>
+
+                    <!-- Filtered Empty State -->
+                    <div id="eventFilterEmpty" class="state-placeholder" style="display: none;">
+                        <div class="state-icon">🔍</div>
+                        <h4 class="state-title">Không tìm thấy sự kiện phù hợp</h4>
+                        <p class="state-desc">Không có bản ghi sự kiện nào trùng khớp với bộ lọc đã chọn.</p>
+                        <button type="button" id="btnResetEventFilterEmpty" class="secondary-btn btn-sm">
+                            <span class="btn-icon">✕</span> Đặt lại bộ lọc
+                        </button>
+                    </div>
+
+                    <!-- Real Data Table -->
+                    <div id="eventTableWrapper" class="data-table-wrapper">
+                        <table class="data-table" id="eventTable">
+                            <thead>
+                                <tr>
+                                    <th style="width: 150px;">THỜI GIAN</th>
+                                    <th style="width: 120px;">CAMERA</th>
+                                    <th style="width: 100px;">LOẠI SỰ KIỆN</th>
+                                    <th style="width: 100px;">ĐỐI TƯỢNG</th>
+                                    <th style="width: 160px;">TARGET / BIỂN SỐ</th>
+                                    <th style="width: 140px;">TƯƠNG ĐỒNG / TIN CẬY</th>
+                                    <th style="width: 130px;">WATCHLIST MATCH</th>
+                                    <th style="width: 120px;">THÔNG BÁO</th>
+                                    <th style="width: 80px; text-align: center;">BẰNG CHỨNG</th>
+                                    <th style="width: 80px; text-align: center;">CHI TIẾT</th>
+                                </tr>
+                            </thead>
+                            <tbody id="eventTableBody">
+                                <!-- Dynamic rows -->
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Pagination Footer -->
+                    <div class="pagination-footer" id="eventPaginationFooter">
+                        <div class="pagination-info" id="eventPaginationInfo">
+                            Hiển thị 0 - 0 trong tổng số 0 sự kiện
+                        </div>
+                        <div class="pagination-controls">
+                            <button type="button" id="btnEventPrevPage" class="pagination-btn" disabled>
+                                ‹ Trước
+                            </button>
+                            <span id="eventCurrentPageBadge" class="pagination-page-badge font-mono">Trang 1 / 1</span>
+                            <button type="button" id="btnEventNextPage" class="pagination-btn" disabled>
+                                Sau ›
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- ===================================================================== -->
     <!-- 5. PREVIEW MODAL (Snapshot first, optional Live Preview)              -->
     <!-- ===================================================================== -->
     <div id="previewModal" class="modal-backdrop" style="display: none;">
@@ -674,6 +1619,800 @@
                 <button type="button" id="btnCancelAddPersonModal" class="secondary-btn">Hủy</button>
                 <button type="button" id="registerTargetBtn" class="primary-btn highlight-btn">
                     <span class="btn-icon">➕</span> Đăng ký & Trích xuất ArcFace (512D)
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- 7. WATCHLIST DRAWERS & MODALS                                         -->
+    <!-- ===================================================================== -->
+
+    <!-- Global Slide-Over Drawer Backdrop -->
+    <div id="drawerBackdrop" class="drawer-backdrop" style="display: none;"></div>
+
+    <!-- FACE DETAIL DRAWER -->
+    <aside id="drawerFaceDetail" class="slide-drawer" aria-label="Chi tiết đối tượng khuôn mặt">
+        <div class="drawer-header">
+            <div class="drawer-title-box">
+                <span class="drawer-badge">FACE TARGET PROFILE</span>
+                <h2 id="faceDrawerName" class="drawer-heading">Nguyễn Văn A</h2>
+                <div class="drawer-sub-meta">
+                    <span class="meta-label">ID:</span>
+                    <span id="faceDrawerId" class="meta-code">--</span>
+                    <span id="faceDrawerStatus" class="status-pill status-active">Active</span>
+                </div>
+            </div>
+            <button type="button" id="btnCloseFaceDrawer" class="drawer-close-btn" title="Đóng">&times;</button>
+        </div>
+
+        <div class="drawer-body">
+            <!-- Target Portrait Display -->
+            <div class="drawer-section drawer-avatar-section">
+                <div class="drawer-avatar-wrap">
+                    <img id="faceDrawerAvatar" src="" alt="Target Avatar" class="drawer-large-avatar" onerror="this.outerHTML='<div class=\'drawer-avatar-fallback\'>👤</div>';">
+                </div>
+                <div class="drawer-meta-list">
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Ngày đăng ký:</span>
+                        <span id="faceDrawerCreatedAt" class="meta-row-val">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Ngưỡng nhận diện:</span>
+                        <span id="faceDrawerThreshold" class="meta-row-val">0.45</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Màu áo nhận dạng:</span>
+                        <span id="faceDrawerColor" class="meta-row-val">Bất kỳ</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="drawer-divider"></div>
+
+            <!-- Stats Section -->
+            <div class="drawer-section">
+                <h3 class="drawer-section-title">📊 THỐNG KÊ PHÁT HIỆN</h3>
+                <div class="drawer-stats-grid">
+                    <div class="drawer-stat-card">
+                        <span class="drawer-stat-num" id="faceDrawerDetectionCount">0</span>
+                        <span class="drawer-stat-label">Số lần phát hiện</span>
+                    </div>
+                    <div class="drawer-stat-card">
+                        <span class="drawer-stat-val font-mono" id="faceDrawerLastSeen">--</span>
+                        <span class="drawer-stat-label">Lần phát hiện cuối</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="drawer-divider"></div>
+
+            <!-- Detection History Timeline -->
+            <div class="drawer-section">
+                <div class="drawer-section-header-row">
+                    <h3 class="drawer-section-title">🕒 LỊCH SỬ PHÁT HIỆN</h3>
+                    <span id="faceDrawerHistoryBadge" class="count-pill">0 sự kiện</span>
+                </div>
+                <div id="faceDrawerHistoryLoading" class="cards-loading-state" style="display: none;">
+                    <div class="ui-spinner"></div>
+                    <p>Đang tải lịch sử phát hiện...</p>
+                </div>
+                <div id="faceDrawerHistoryEmpty" class="drawer-history-empty" style="display: none;">
+                    <span>🔍</span> Chưa có lượt phát hiện nào được ghi nhận cho đối tượng này.
+                </div>
+                <div id="faceDrawerHistoryList" class="drawer-history-list">
+                    <!-- Dynamic Detection Cards -->
+                </div>
+            </div>
+        </div>
+
+        <div class="drawer-footer">
+            <button type="button" id="btnToggleFaceStatus" class="secondary-btn">
+                <span class="btn-icon">⚡</span> <span id="faceToggleBtnText">Tạm ngưng</span>
+            </button>
+            <button type="button" id="btnDeleteFaceTarget" class="danger-btn">
+                <span class="btn-icon">🗑️</span> Xóa đối tượng
+            </button>
+        </div>
+    </aside>
+
+    <!-- VEHICLE DETAIL DRAWER -->
+    <aside id="drawerVehicleDetail" class="slide-drawer" aria-label="Chi tiết phương tiện">
+        <div class="drawer-header">
+            <div class="drawer-title-box">
+                <span class="drawer-badge">VEHICLE PROFILE</span>
+                <div class="drawer-plate-header-row">
+                    <span id="vehicleDrawerPlateBadge" class="license-plate-badge-hero">29A-123.45</span>
+                    <span id="vehicleDrawerStatus" class="status-pill status-active">Active</span>
+                </div>
+                <div class="drawer-sub-meta">
+                    <span id="vehicleDrawerType" class="vehicle-type-tag">🚗 Ô tô</span>
+                    <span id="vehicleDrawerName" class="meta-name-tag">Xe đối tượng</span>
+                </div>
+            </div>
+            <button type="button" id="btnCloseVehicleDrawer" class="drawer-close-btn" title="Đóng">&times;</button>
+        </div>
+
+        <div class="drawer-body">
+            <!-- Vehicle Info Card -->
+            <div class="drawer-section">
+                <div class="drawer-meta-list">
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Chủ phương tiện:</span>
+                        <span id="vehicleDrawerOwner" class="meta-row-val font-semibold">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Ghi chú theo dõi:</span>
+                        <span id="vehicleDrawerNotes" class="meta-row-val">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Ngày thêm vào Watchlist:</span>
+                        <span id="vehicleDrawerCreatedAt" class="meta-row-val">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="drawer-divider"></div>
+
+            <!-- Stats Section -->
+            <div class="drawer-section">
+                <h3 class="drawer-section-title">📊 THỐNG KÊ PHÁT HIỆN</h3>
+                <div class="drawer-stats-grid">
+                    <div class="drawer-stat-card">
+                        <span class="drawer-stat-num" id="vehicleDrawerDetectionCount">0</span>
+                        <span class="drawer-stat-label">Số lần phát hiện</span>
+                    </div>
+                    <div class="drawer-stat-card">
+                        <span class="drawer-stat-val font-mono" id="vehicleDrawerLastSeen">--</span>
+                        <span class="drawer-stat-label">Lần phát hiện cuối</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="drawer-divider"></div>
+
+            <!-- Detection History Timeline -->
+            <div class="drawer-section">
+                <div class="drawer-section-header-row">
+                    <h3 class="drawer-section-title">🕒 LỊCH SỬ PHÁT HIỆN</h3>
+                    <span id="vehicleDrawerHistoryBadge" class="count-pill">0 sự kiện</span>
+                </div>
+                <div id="vehicleDrawerHistoryLoading" class="cards-loading-state" style="display: none;">
+                    <div class="ui-spinner"></div>
+                    <p>Đang tải lịch sử phát hiện biển số...</p>
+                </div>
+                <div id="vehicleDrawerHistoryEmpty" class="drawer-history-empty" style="display: none;">
+                    <span>🔍</span> Chưa có lượt phát hiện nào được ghi nhận cho biển số này.
+                </div>
+                <div id="vehicleDrawerHistoryList" class="drawer-history-list">
+                    <!-- Dynamic Vehicle Detection Cards -->
+                </div>
+            </div>
+        </div>
+
+        <div class="drawer-footer">
+            <button type="button" id="btnEditVehicleItem" class="secondary-btn">
+                <span class="btn-icon">✏️</span> Sửa
+            </button>
+            <button type="button" id="btnToggleVehicleStatus" class="secondary-btn">
+                <span class="btn-icon">⚡</span> <span id="vehicleToggleBtnText">Tạm ngưng</span>
+            </button>
+            <button type="button" id="btnDeleteVehicleItem" class="danger-btn">
+                <span class="btn-icon">🗑️</span> Xóa phương tiện
+            </button>
+        </div>
+    </aside>
+
+    <!-- CAMERA DETAIL DRAWER -->
+    <aside id="drawerCameraDetail" class="slide-drawer" aria-label="Chi tiết camera">
+        <div class="drawer-header">
+            <div class="drawer-title-box">
+                <span class="drawer-badge">CAMERA PROFILE</span>
+                <h2 id="camDrawerTitle" class="drawer-heading">Camera 01</h2>
+                <div class="drawer-sub-meta">
+                    <span class="meta-label">ID:</span>
+                    <span id="camDrawerId" class="meta-code font-mono">--</span>
+                    <span id="camDrawerStatus" class="status-pill status-active">Online</span>
+                </div>
+            </div>
+            <button type="button" id="btnCloseCameraDrawer" class="drawer-close-btn" title="Đóng">&times;</button>
+        </div>
+
+        <div class="drawer-body">
+            <!-- Camera Preview / Stream Snapshot Frame -->
+            <div class="drawer-section">
+                <div class="drawer-cam-preview-frame" id="camDrawerPreviewBox">
+                    <div class="cam-preview-overlay-header">
+                        <span class="cam-live-indicator">LIVE FEED SIMULATION</span>
+                        <span class="cam-preview-type-tag" id="camDrawerPreviewType">RTSP</span>
+                    </div>
+                    <div class="cam-preview-center-graphic">
+                        <span class="cam-graphic-icon">📹</span>
+                        <span class="cam-graphic-label" id="camDrawerGraphicLabel">Sẵn sàng kết nối stream</span>
+                    </div>
+                    <div class="cam-preview-url-bar" id="camDrawerPreviewUrl">rtsp://...</div>
+                </div>
+            </div>
+
+            <!-- Diagnostics & Connection Health -->
+            <div class="drawer-section">
+                <div class="drawer-section-header-row">
+                    <h3 class="drawer-section-title">⚡ TRẠNG THÁI KẾT NỐI</h3>
+                    <span id="camDrawerPingBadge" class="count-pill">Độ trễ: 42ms</span>
+                </div>
+                <div class="drawer-meta-list">
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Tình trạng luồng:</span>
+                        <span id="camDrawerStreamHealth" class="meta-row-val font-semibold text-highlight">Ổn định (25 FPS)</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Địa chỉ nguồn (URL):</span>
+                        <span id="camDrawerUrl" class="meta-row-val font-mono word-break">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="drawer-divider"></div>
+
+            <!-- Camera Metadata Details -->
+            <div class="drawer-section">
+                <h3 class="drawer-section-title">📋 THÔNG TIN CẤU HÌNH</h3>
+                <div class="drawer-meta-list">
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Khu vực / Vị trí:</span>
+                        <span id="camDrawerZone" class="meta-row-val font-semibold">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Loại nguồn phát:</span>
+                        <span id="camDrawerType" class="meta-row-val">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Ngày khởi tạo:</span>
+                        <span id="camDrawerCreated" class="meta-row-val">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Lần hoạt động cuối:</span>
+                        <span id="camDrawerLastActive" class="meta-row-val font-mono">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Mô tả / Ghi chú:</span>
+                        <span id="camDrawerDesc" class="meta-row-val">--</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="drawer-footer">
+            <button type="button" id="btnLaunchMonitoringFromDrawer" class="primary-btn highlight-btn" style="flex: 1.5;">
+                <span class="btn-icon">▶️</span> Mở giám sát
+            </button>
+            <button type="button" id="btnEditCamFromDrawer" class="secondary-btn">
+                <span class="btn-icon">✏️</span> Sửa
+            </button>
+            <button type="button" id="btnToggleStatusFromDrawer" class="secondary-btn">
+                <span class="btn-icon">⚡</span> <span id="camDrawerToggleText">Tạm ngưng</span>
+            </button>
+            <button type="button" id="btnDeleteCamFromDrawer" class="danger-btn">
+                <span class="btn-icon">🗑️</span> Xóa
+            </button>
+        </div>
+    </aside>
+
+    <!-- EVENT DETAIL DRAWER -->
+    <aside id="drawerEventDetail" class="slide-drawer" aria-label="Chi tiết sự kiện Event Center">
+        <div class="drawer-header">
+            <div class="drawer-title-box">
+                <span class="drawer-badge" id="evDrawerBadgeType">EVENT PROFILE</span>
+                <h2 id="evDrawerTitle" class="drawer-heading font-mono">--</h2>
+                <div class="drawer-sub-meta">
+                    <span class="meta-label">ID:</span>
+                    <span id="evDrawerIdSub" class="meta-code font-mono">--</span>
+                    <span id="evDrawerMatchPill" class="status-pill">--</span>
+                </div>
+            </div>
+            <button type="button" id="btnCloseEventDrawer" class="drawer-close-btn" title="Đóng">&times;</button>
+        </div>
+
+        <div class="drawer-body">
+            <!-- Evidence Section -->
+            <div class="drawer-section">
+                <div class="drawer-section-header-row">
+                    <h3 class="drawer-section-title">🖼️ BẰNG CHỨNG HÌNH ẢNH (EVIDENCE)</h3>
+                    <span id="evDrawerEvidenceStatusBadge" class="count-pill">--</span>
+                </div>
+                <div class="drawer-evidence-frame" id="evDrawerEvidenceBox">
+                    <img id="evDrawerEvidenceImg" src="" alt="Event Evidence" class="drawer-evidence-img" style="display: none;">
+                    <div id="evDrawerEvidenceUnavailable" class="drawer-evidence-unavailable" style="display: none;">
+                        <span class="unavail-icon">📷</span>
+                        <span>Không có ảnh bằng chứng được lưu trữ cho sự kiện này.</span>
+                    </div>
+                    <div id="evDrawerEvidenceLoading" class="cards-loading-state" style="display: none;">
+                        <div class="ui-spinner"></div>
+                        <p>Đang tải hình ảnh bằng chứng...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Event Details -->
+            <div class="drawer-section">
+                <h3 class="drawer-section-title">📋 THÔNG TIN SỰ KIỆN</h3>
+                <div class="drawer-meta-list">
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Event ID:</span>
+                        <span id="evDrawerId" class="meta-row-val font-mono text-highlight">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Loại sự kiện (Event Type):</span>
+                        <span id="evDrawerType" class="meta-row-val">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Thời gian (Timestamp):</span>
+                        <span id="evDrawerTimestamp" class="meta-row-val">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Camera:</span>
+                        <span id="evDrawerCamera" class="meta-row-val font-semibold">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Loại đối tượng (Object Type):</span>
+                        <span id="evDrawerObjectType" class="meta-row-val">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Target ID (Face):</span>
+                        <span id="evDrawerTarget" class="meta-row-val font-mono">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Biển số (Plate):</span>
+                        <span id="evDrawerPlate" class="meta-row-val font-mono font-semibold text-highlight">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Độ tương đồng (Similarity):</span>
+                        <span id="evDrawerSimilarity" class="meta-row-val font-mono">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Độ tin cậy OCR (Confidence):</span>
+                        <span id="evDrawerConfidence" class="meta-row-val font-mono">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Khớp Watchlist:</span>
+                        <span id="evDrawerMatch" class="meta-row-val">--</span>
+                    </div>
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Trạng thái thông báo:</span>
+                        <span id="evDrawerNotification" class="meta-row-val">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Extended Metadata -->
+            <div class="drawer-section" id="evDrawerExtendedSection">
+                <h3 class="drawer-section-title">📊 METADATA MỞ RỘNG</h3>
+                <div class="drawer-meta-list" id="evDrawerExtendedList">
+                    <div class="drawer-meta-row">
+                        <span class="meta-row-label">Dữ liệu chi tiết:</span>
+                        <span id="evDrawerExtendedText" class="meta-row-val text-muted">Không có dữ liệu bổ sung</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="drawer-footer">
+            <button type="button" id="btnCloseEventDrawerFooter" class="secondary-btn" style="flex: 1;">
+                Đóng
+            </button>
+        </div>
+    </aside>
+
+    <!-- ADD FACE MODAL (NEW UNIFIED WATCHLIST MODAL) -->
+    <div id="modalAddFaceWatchlist" class="modal-backdrop" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3><span>👤</span> THÊM VÀO FACE WATCHLIST</h3>
+                <button type="button" class="modal-close-btn" id="btnCloseAddFaceWatchlist">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- Image Upload & Preview -->
+                <div class="form-group">
+                    <label class="input-label">Ảnh đại diện chân dung (*)</label>
+                    <div class="upload-dropzone" id="faceDropzoneNew">
+                        <input type="file" id="faceFileInputNew" accept="image/jpeg,image/png,image/webp" style="display: none;">
+                        <div class="dropzone-content">
+                            <span class="dropzone-icon">📸</span>
+                            <div class="dropzone-text">
+                                <span class="dropzone-prompt">Kéo và thả ảnh chân dung vào đây, hoặc</span>
+                                <button type="button" id="btnBrowseFaceNew" class="secondary-btn file-browse-btn">
+                                    <span class="btn-icon">📁</span> Chọn ảnh
+                                </button>
+                            </div>
+                            <span class="dropzone-hint">Định dạng hỗ trợ: JPG, PNG, WEBP (Khuyến nghị rõ nét, chính diện)</span>
+                        </div>
+                    </div>
+
+                    <!-- Image Preview Box -->
+                    <div id="facePreviewCardNew" class="image-preview-card" style="display: none;">
+                        <img id="facePreviewImgNew" src="" alt="Face Preview" class="preview-thumb">
+                        <div class="preview-meta">
+                            <span id="facePreviewNameNew" class="preview-filename font-mono">avatar.jpg</span>
+                            <span id="facePreviewSizeNew" class="preview-filesize">0 KB</span>
+                        </div>
+                        <button type="button" id="btnRemoveFacePreviewNew" class="icon-action-btn" title="Hủy chọn ảnh">&times;</button>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="inputNewFaceName" class="input-label">Họ tên đối tượng (*)</label>
+                    <input type="text" id="inputNewFaceName" class="text-input" placeholder="Ví dụ: Nguyễn Văn A" required>
+                </div>
+
+                <div class="form-row-2">
+                    <div class="form-group">
+                        <label for="selectNewFaceColor" class="input-label">Màu áo quần (Tùy chọn)</label>
+                        <select id="selectNewFaceColor" class="select-input">
+                            <option value="">Bất kỳ (Không lọc màu)</option>
+                            <option value="red">Đỏ (Red)</option>
+                            <option value="blue">Xanh dương (Blue)</option>
+                            <option value="green">Xanh lá (Green)</option>
+                            <option value="yellow">Vàng (Yellow)</option>
+                            <option value="black">Đen (Black)</option>
+                            <option value="white">Trắng (White)</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="inputNewFaceThreshold" class="input-label">Ngưỡng nhận diện (Threshold)</label>
+                        <input type="number" id="inputNewFaceThreshold" class="text-input" value="0.45" min="0.1" max="0.95" step="0.05">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="inputNewFaceNotes" class="input-label">Ghi chú theo dõi</label>
+                    <input type="text" id="inputNewFaceNotes" class="text-input" placeholder="Mục tiêu cần giám sát khu vực cổng...">
+                </div>
+
+                <div id="addFaceFeedbackNew" class="feedback-msg"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="btnCancelAddFaceWatchlist" class="secondary-btn">Hủy</button>
+                <button type="button" id="btnSubmitAddFaceWatchlist" class="primary-btn highlight-btn">
+                    <span class="btn-icon">➕</span> Thêm vào Watchlist
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ADD VEHICLE MODAL -->
+    <div id="modalAddVehicleWatchlist" class="modal-backdrop" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3><span>🚗</span> THÊM PHƯƠNG TIỆN VÀO WATCHLIST</h3>
+                <button type="button" class="modal-close-btn" id="btnCloseAddVehicleWatchlist">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="inputNewVehiclePlate" class="input-label">Biển số phương tiện (*)</label>
+                    <input type="text" id="inputNewVehiclePlate" class="text-input font-mono plate-input-styled" placeholder="Ví dụ: 29A-123.45 hoặc 51F-999.99" required autocomplete="off">
+                    <div class="plate-preview-inline" id="plateNormalizedPreview">
+                        <span class="plate-inline-label">Chuẩn hóa:</span>
+                        <span class="license-plate-badge-sm" id="plateNormalizedBadge">--</span>
+                    </div>
+                </div>
+
+                <div class="form-row-2">
+                    <div class="form-group">
+                        <label for="selectNewVehicleType" class="input-label">Loại phương tiện</label>
+                        <select id="selectNewVehicleType" class="select-input">
+                            <option value="car">🚗 Ô tô</option>
+                            <option value="motorbike">🏍️ Xe máy</option>
+                            <option value="truck">🚚 Xe tải</option>
+                            <option value="bus">🚌 Xe buýt / Xe khách</option>
+                            <option value="container">📦 Container</option>
+                            <option value="other">Khác</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="selectNewVehicleStatus" class="input-label">Trạng thái giám sát</label>
+                        <select id="selectNewVehicleStatus" class="select-input">
+                            <option value="active">Active (Đang theo dõi)</option>
+                            <option value="disabled">Disabled (Tạm ngưng)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="inputNewVehicleName" class="input-label">Tên / Tên gợi nhớ</label>
+                    <input type="text" id="inputNewVehicleName" class="text-input" placeholder="Ví dụ: Xe cần theo dõi đặc biệt">
+                </div>
+
+                <div class="form-group">
+                    <label for="inputNewVehicleOwner" class="input-label">Thông tin chủ phương tiện</label>
+                    <input type="text" id="inputNewVehicleOwner" class="text-input" placeholder="Họ tên, đơn vị quản lý, SĐT...">
+                </div>
+
+                <div class="form-group">
+                    <label for="inputNewVehicleNotes" class="input-label">Ghi chú</label>
+                    <textarea id="inputNewVehicleNotes" class="textarea-input" rows="2" placeholder="Ghi chú chi tiết về phương tiện..."></textarea>
+                </div>
+
+                <div id="addVehicleFeedback" class="feedback-msg"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="btnCancelAddVehicleWatchlist" class="secondary-btn">Hủy</button>
+                <button type="button" id="btnSubmitAddVehicleWatchlist" class="primary-btn highlight-btn">
+                    <span class="btn-icon">➕</span> Thêm vào Watchlist
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- EDIT VEHICLE MODAL -->
+    <div id="modalEditVehicleWatchlist" class="modal-backdrop" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3><span>✏️</span> CHỈNH SỬA PHƯƠNG TIỆN WATCHLIST</h3>
+                <button type="button" class="modal-close-btn" id="btnCloseEditVehicleWatchlist">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="inputEditVehicleId">
+                <div class="form-group">
+                    <label class="input-label">Biển số phương tiện</label>
+                    <div class="plate-preview-inline">
+                        <span class="license-plate-badge-sm font-mono" id="badgeEditVehiclePlate">--</span>
+                        <span class="text-muted" style="font-size: 0.8rem;">(Biển số đã đăng ký không thể thay đổi)</span>
+                    </div>
+                </div>
+
+                <div class="form-row-2">
+                    <div class="form-group">
+                        <label for="selectEditVehicleType" class="input-label">Loại phương tiện</label>
+                        <select id="selectEditVehicleType" class="select-input">
+                            <option value="car">🚗 Ô tô</option>
+                            <option value="motorbike">🏍️ Xe máy</option>
+                            <option value="truck">🚚 Xe tải</option>
+                            <option value="bus">🚌 Xe buýt / Xe khách</option>
+                            <option value="container">📦 Container</option>
+                            <option value="other">Khác</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="selectEditVehicleStatus" class="input-label">Trạng thái giám sát</label>
+                        <select id="selectEditVehicleStatus" class="select-input">
+                            <option value="active">Active (Đang theo dõi)</option>
+                            <option value="disabled">Disabled (Tạm ngưng)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="inputEditVehicleName" class="input-label">Tên / Tên gợi nhớ</label>
+                    <input type="text" id="inputEditVehicleName" class="text-input" placeholder="Ví dụ: Xe cần theo dõi đặc biệt">
+                </div>
+
+                <div class="form-group">
+                    <label for="inputEditVehicleOwner" class="input-label">Thông tin chủ phương tiện</label>
+                    <input type="text" id="inputEditVehicleOwner" class="text-input" placeholder="Họ tên, đơn vị quản lý, SĐT...">
+                </div>
+
+                <div class="form-group">
+                    <label for="inputEditVehicleNotes" class="input-label">Ghi chú</label>
+                    <textarea id="inputEditVehicleNotes" class="textarea-input" rows="2" placeholder="Ghi chú chi tiết về phương tiện..."></textarea>
+                </div>
+
+                <div id="editVehicleFeedback" class="feedback-msg"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="btnCancelEditVehicleWatchlist" class="secondary-btn">Hủy</button>
+                <button type="button" id="btnSubmitEditVehicleWatchlist" class="primary-btn highlight-btn">
+                    <span class="btn-icon">💾</span> Lưu thay đổi
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- CONFIRM DELETE MODAL -->
+    <div id="modalConfirmDelete" class="modal-backdrop" style="display: none;">
+        <div class="modal-dialog modal-dialog-sm">
+            <div class="modal-header">
+                <h3><span>⚠️</span> XÁC NHẬN XÓA</h3>
+                <button type="button" class="modal-close-btn" id="btnCloseConfirmDelete">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="confirm-delete-msg">Bạn có chắc chắn muốn xóa đối tượng này khỏi Watchlist không?</p>
+                <div class="confirm-delete-target-box">
+                    <strong id="confirmDeleteTargetName" class="font-mono text-highlight">--</strong>
+                </div>
+                <p class="confirm-delete-warning">Hành động này sẽ xóa dữ liệu theo dõi khỏi hệ thống và không thể hoàn tác.</p>
+                <div id="confirmDeleteFeedback" class="feedback-msg"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="btnCancelConfirmDelete" class="secondary-btn">Hủy</button>
+                <button type="button" id="btnExecuteConfirmDelete" class="danger-btn">
+                    <span class="btn-icon">🗑️</span> Xóa vĩnh viễn
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- 8. CAMERA MANAGEMENT MODALS                                           -->
+    <!-- ===================================================================== -->
+
+    <!-- ADD CAMERA MODAL -->
+    <div id="modalAddCamera" class="modal-backdrop" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3><span>📹</span> THÊM CAMERA MỚI</h3>
+                <button type="button" class="modal-close-btn" id="btnCloseAddCameraModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="inputAddCamName" class="input-label">Tên camera (*)</label>
+                    <input type="text" id="inputAddCamName" class="text-input" placeholder="Ví dụ: Camera Cổng Chính 01" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="inputAddCamUrl" class="input-label">Source URL (*)</label>
+                    <input type="text" id="inputAddCamUrl" class="text-input font-mono" placeholder="rtsp://192.168.1.100:554/live hoặc https://..." required>
+                    <span class="input-hint">Hỗ trợ luồng RTSP (rtsp://), HLS (.m3u8), HTTP MJPEG, YouTube Live, hoặc file video</span>
+                </div>
+
+                <div class="form-row-2">
+                    <div class="form-group">
+                        <label for="selectAddCamType" class="input-label">Loại nguồn (Source Type)</label>
+                        <select id="selectAddCamType" class="select-input">
+                            <option value="rtsp">RTSP Stream (rtsp://)</option>
+                            <option value="hls">HLS Stream (.m3u8)</option>
+                            <option value="http">HTTP / MJPEG</option>
+                            <option value="youtube">YouTube Live</option>
+                            <option value="file">Tệp Video cục bộ</option>
+                            <option value="cctv">Public CCTV</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="selectAddCamStatus" class="input-label">Trạng thái ban đầu</label>
+                        <select id="selectAddCamStatus" class="select-input">
+                            <option value="online">🟢 Kích hoạt ngay (Online)</option>
+                            <option value="disabled">⏸️ Tạm ngưng (Disabled)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="inputAddCamZone" class="input-label">Khu vực / Vị trí (Zone)</label>
+                    <input type="text" id="inputAddCamZone" class="text-input" placeholder="Ví dụ: Cổng chính, Bãi đỗ xe B1, Sảnh tòa nhà...">
+                </div>
+
+                <div class="form-group">
+                    <label for="inputAddCamDesc" class="input-label">Mô tả / Ghi chú</label>
+                    <textarea id="inputAddCamDesc" class="textarea-input" rows="2" placeholder="Ghi chú mục đích giám sát, góc nhìn camera..."></textarea>
+                </div>
+
+                <!-- Test Connection Section -->
+                <div class="test-connection-card">
+                    <div class="test-conn-header">
+                        <span class="test-conn-title">🔌 KIỂM TRA KẾT NỐI (TEST CONNECTION)</span>
+                        <button type="button" id="btnTestConnAdd" class="secondary-btn btn-sm">
+                            <span class="btn-icon">⚡</span> Kiểm tra kết nối
+                        </button>
+                    </div>
+                    <div id="testConnResultAdd" class="test-conn-status-box">
+                        <span class="status-hint">Nhập Source URL và bấm "Kiểm tra kết nối" để xác thực luồng stream trước khi lưu.</span>
+                    </div>
+                </div>
+
+                <div id="addCamFormFeedback" class="feedback-msg"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="btnCancelAddCamera" class="secondary-btn">Hủy</button>
+                <button type="button" id="btnSubmitAddCamera" class="primary-btn highlight-btn">
+                    <span class="btn-icon">➕</span> Thêm Camera
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- EDIT CAMERA MODAL -->
+    <div id="modalEditCamera" class="modal-backdrop" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <div class="modal-title-with-badge">
+                    <h3><span>✏️</span> CHỈNH SỬA CAMERA</h3>
+                    <span id="editCamIdBadge" class="meta-code font-mono">--</span>
+                </div>
+                <button type="button" class="modal-close-btn" id="btnCloseEditCameraModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="inputEditCamId">
+
+                <div class="form-group">
+                    <label for="inputEditCamName" class="input-label">Tên camera (*)</label>
+                    <input type="text" id="inputEditCamName" class="text-input" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="inputEditCamUrl" class="input-label">Source URL (*)</label>
+                    <input type="text" id="inputEditCamUrl" class="text-input font-mono" required>
+                </div>
+
+                <div class="form-row-2">
+                    <div class="form-group">
+                        <label for="selectEditCamType" class="input-label">Loại nguồn</label>
+                        <select id="selectEditCamType" class="select-input">
+                            <option value="rtsp">RTSP Stream</option>
+                            <option value="hls">HLS Stream</option>
+                            <option value="http">HTTP / MJPEG</option>
+                            <option value="youtube">YouTube Live</option>
+                            <option value="file">Tệp Video cục bộ</option>
+                            <option value="cctv">Public CCTV</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="selectEditCamStatus" class="input-label">Trạng thái hoạt động</label>
+                        <select id="selectEditCamStatus" class="select-input">
+                            <option value="online">🟢 Đang hoạt động (Online)</option>
+                            <option value="offline">🔴 Mất kết nối (Offline)</option>
+                            <option value="disabled">⏸️ Đã tắt (Disabled)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="inputEditCamZone" class="input-label">Khu vực / Vị trí</label>
+                    <input type="text" id="inputEditCamZone" class="text-input">
+                </div>
+
+                <div class="form-group">
+                    <label for="inputEditCamDesc" class="input-label">Mô tả / Ghi chú</label>
+                    <textarea id="inputEditCamDesc" class="textarea-input" rows="2"></textarea>
+                </div>
+
+                <!-- Test Connection Section -->
+                <div class="test-connection-card">
+                    <div class="test-conn-header">
+                        <span class="test-conn-title">🔌 KIỂM TRA KẾT NỐI (TEST CONNECTION)</span>
+                        <button type="button" id="btnTestConnEdit" class="secondary-btn btn-sm">
+                            <span class="btn-icon">⚡</span> Kiểm tra kết nối
+                        </button>
+                    </div>
+                    <div id="testConnResultEdit" class="test-conn-status-box">
+                        <span class="status-hint">Bấm "Kiểm tra kết nối" để xác thực phản hồi luồng stream.</span>
+                    </div>
+                </div>
+
+                <div id="editCamFormFeedback" class="feedback-msg"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="btnCancelEditCamera" class="secondary-btn">Hủy</button>
+                <button type="button" id="btnSubmitEditCamera" class="primary-btn highlight-btn">
+                    <span class="btn-icon">💾</span> Lưu thay đổi
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- CONFIRM DELETE CAMERA MODAL -->
+    <div id="modalDeleteCamera" class="modal-backdrop" style="display: none;">
+        <div class="modal-dialog modal-dialog-sm">
+            <div class="modal-header">
+                <h3><span>⚠️</span> XÁC NHẬN XÓA CAMERA</h3>
+                <button type="button" class="modal-close-btn" id="btnCloseDeleteCameraModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="confirm-delete-msg">Bạn có chắc chắn muốn xóa camera này khỏi hệ thống không?</p>
+                <div class="confirm-delete-target-box">
+                    <strong id="deleteCamTargetName" class="font-semibold text-highlight">--</strong>
+                    <span id="deleteCamTargetId" class="font-mono text-muted" style="font-size: 0.8rem; display: block; margin-top: 4px;">--</span>
+                </div>
+                <p class="confirm-delete-warning">Hành động này sẽ dừng cấu hình camera khỏi hệ thống và không thể hoàn tác.</p>
+                <div id="deleteCamFeedback" class="feedback-msg"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" id="btnCancelDeleteCamera" class="secondary-btn">Hủy</button>
+                <button type="button" id="btnConfirmDeleteCamera" class="danger-btn">
+                    <span class="btn-icon">🗑️</span> Xóa Camera
                 </button>
             </div>
         </div>

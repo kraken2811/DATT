@@ -28,6 +28,7 @@ import numpy as np
 
 from src.face.face_embedder import cosine_similarity, face_embedder
 from src.face.diagnostic_snapshot import export_if_requested
+from src.face.adaptive_pipeline import AdaptiveFacePipeline, CandidateBuffer, fuse_candidates
 from src.recognition.color_extractor import clothing_color_extractor
 
 logger = logging.getLogger("datt.target_matcher")
@@ -59,6 +60,7 @@ class Target:
     source_image_path: str | None = None
     db_id: str | None = None
     is_selected: bool = True
+    embedding_model: str = 'adaface_ir50_ms1mv2'
     created_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     def to_dict(self) -> dict[str, Any]:
@@ -67,6 +69,7 @@ class Target:
             "db_id": self.db_id or self.id,
             "name": self.name,
             "has_face": self.face_embedding is not None,
+            "embedding_model": self.embedding_model,
             "clothing_color": self.clothing_color,
             "face_threshold": self.face_threshold,
             "source_image_path": self.source_image_path,
@@ -103,6 +106,9 @@ class BestFaceState:
     candidate_quality_score: float = 0.0
     candidates: list[dict] = field(default_factory=list)
     fused_embedding: np.ndarray | None = None
+    camera_id: str = ''
+    candidate_buffer: CandidateBuffer | None = None
+    selected_candidates: list[dict] = field(default_factory=list)
 
 
 def calculate_face_frontality(kps: np.ndarray | None) -> float:
@@ -198,11 +204,12 @@ class TargetManager:
                         message="Could not detect a valid human face in the uploaded image",
                     )
             else:
-                emb, diag = face_embedder.extract_face_embedding_detailed(face_image, is_registration=True)
-                diag_dict = diag.to_dict()
+                enrollment = AdaptiveFacePipeline()
+                emb = enrollment.enroll_original(face_image)
+                diag_dict = {'embedding_norm': float(np.linalg.norm(emb)) if emb is not None else None}
                 if emb is None:
-                    reason = diag.rejection_reason or "NO_FACE_DETECTED"
-                    user_msg = diag.user_message or "Không tìm thấy khuôn mặt người trong ảnh tải lên"
+                    reason = enrollment.last_enrollment_reason or 'EMBEDDING_FAILED'
+                    user_msg = "Không tìm thấy khuôn mặt hợp lệ hoặc mô hình AdaFace chưa sẵn sàng"
                     # Keep 'Could not detect a valid human face' in message for backward compatibility with regression tests
                     err_msg = f"Could not detect a valid human face in the uploaded image ({reason}: {user_msg})"
                     logger.warning(
@@ -278,8 +285,23 @@ class TargetManager:
         face_threshold: float = DEFAULT_FACE_THRESHOLD,
         source_image_path: str | None = None,
         db_id: str | None = None,
+        embedding_model: str = 'adaface_ir50_ms1mv2',
     ) -> Target:
         """Add or restore an existing target loaded from database."""
+        # Old ArcFace vectors cannot be compared to AdaFace. Convert once into the
+        # in-memory target cache from the persisted original, without rewriting DB history.
+        had_face = face_embedding is not None
+        if had_face and embedding_model != 'adaface_ir50_ms1mv2':
+            face_embedding = None
+            if source_image_path:
+                try:
+                    from src.storage import get_storage
+                    with get_storage().open(source_image_path) as source:
+                        image = cv2.imdecode(np.frombuffer(source.read(), dtype=np.uint8), cv2.IMREAD_COLOR)
+                    face_embedding = AdaptiveFacePipeline().enroll_original(image)
+                except Exception:
+                    logger.warning('[FACE_ENROLLMENT] Legacy target requires re-enrollment: %s', target_id)
+            embedding_model = 'adaface_ir50_ms1mv2' if face_embedding is not None else 'unavailable'
         with self._lock:
             target = Target(
                 id=target_id,
@@ -287,7 +309,8 @@ class TargetManager:
                 face_embedding=face_embedding,
                 clothing_color=clothing_color,
                 face_threshold=face_threshold,
-                has_face=face_embedding is not None,
+                has_face=had_face,
+                embedding_model=embedding_model,
                 source_image_path=source_image_path,
                 db_id=db_id or target_id,
             )
@@ -324,6 +347,8 @@ class TargetMatcher:
         self._track_face_cache: dict[int, np.ndarray] = {}
         # track_id -> BestFaceState (Point 6: Best Face per track)
         self._best_faces: dict[int, BestFaceState] = {}
+        self._camera_id = ''
+        self.face_pipeline = AdaptiveFacePipeline()
         # track_id -> (last_logged_frame, decision, similarity, best_replaced)
         self._last_logs: dict[int, tuple[int, str, float, bool]] = {}
 
@@ -440,7 +465,7 @@ class TargetMatcher:
 
         rw, rh = roi_size
         px1, py1, px2, py2 = bbox[:4]
-        logger.info(
+        logger.debug(
             "[FACE_REC] P-%d f=%d res=%dx%d bbox=[%d,%d,%d,%d] roi=%dx%d illum=%s enh=%s face=%dpx conf=%.2f sharp=%.1f best_replaced=%s emb_recomputed=%s sim=%.3f thresh=%.2f dec=%s target='%s'",
             track_id,
             frame_id,
@@ -465,12 +490,19 @@ class TargetMatcher:
             target_name or "None",
         )
 
-    def match_tracks(
+    def match_tracks(self, frame, tracks, frame_id, native_frame=None, camera_id='', timestamp=None):
+        # Serialize camera changes and evaluations, including enrollment snapshots.
+        with self._lock:
+            return self._match_tracks(frame, tracks, frame_id, native_frame, camera_id, timestamp)
+
+    def _match_tracks(
         self,
         frame: np.ndarray,
         tracks: Any,
         frame_id: int,
         native_frame: np.ndarray | None = None,
+        camera_id: str = "",
+        timestamp: float | None = None,
     ) -> dict[int, TargetMatchInfo]:
         """Evaluate and associate tracks with targets.
 
@@ -484,13 +516,26 @@ class TargetMatcher:
             dict[int, TargetMatchInfo]: Map of track_id -> TargetMatchInfo for all matched targets.
         """
         t_mt_0 = time.perf_counter()
+        # A matcher owns one current camera context. Switching resets every face
+        # cache (including identical ByteTrack IDs), under the existing lock.
+        with self._lock:
+            if str(camera_id) != self._camera_id:
+                self.reset_tracks()
+                self._camera_id = str(camera_id)
+            self._timestamp = time.time() if timestamp is None else timestamp
+            expired = [tid for tid, last in self._track_last_seen.items()
+                       if frame_id - last > self.ttl_frames]
+            for tid in expired:
+                for cache in (self._track_last_seen, self._track_last_eval, self._track_face_cache,
+                              self._best_faces, self._last_logs, self._matched_tracks):
+                    cache.pop(tid, None)
         self.last_timings = {"acq_ms": 0.0, "det_ms": 0.0, "emb_ms": 0.0, "match_ms": 0.0, "total_ms": 0.0}
         if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
             return {}
 
         export_if_requested(frame, tracks, frame_id, native_frame, face_embedder)
 
-        targets = [t for t in self.manager.list_targets() if getattr(t, "is_selected", True)]
+        targets = [t for t in self.manager.list_targets() if getattr(t, "is_selected", True) and t.embedding_model != "unavailable"]
         if not targets or tracks is None:
             self.last_timings["total_ms"] = (time.perf_counter() - t_mt_0) * 1000.0
             return {}
@@ -560,7 +605,8 @@ class TargetMatcher:
                 bbox_area = float(pw * ph)
                 state = self._best_faces.get(tid)
                 if state is None:
-                    state = BestFaceState(track_id=tid, last_eval_frame=-999)
+                    state = BestFaceState(track_id=tid, last_eval_frame=-999, camera_id=self._camera_id,
+                                          candidate_buffer=CandidateBuffer(self._camera_id, tid))
                     self._best_faces[tid] = state
 
                 # Cadence & fast retry logic (Point 7)
@@ -583,7 +629,8 @@ class TargetMatcher:
                     active_matches[tid] = self._matched_tracks[tid]
                     continue
 
-                # Run evaluation for this track
+                # Measure the entire face decision, including fusion and comparison.
+                evaluation_start = time.perf_counter()
                 match_info = self._evaluate_single_track_native(
                     source_native=source_native,
                     native_bbox=[px1, py1, px2, py2],
@@ -593,6 +640,11 @@ class TargetMatcher:
                     bbox_area=bbox_area,
                     state=state,
                 )
+                observation = self.face_pipeline.last_observation
+                if (observation.get('camera_id') == self._camera_id
+                        and observation.get('track_id') == tid
+                        and observation.get('frame_id') == frame_id):
+                    observation['timings']['full_face_path'] = (time.perf_counter() - evaluation_start) * 1000.0
 
                 if match_info is not None:
                     self._matched_tracks[tid] = match_info
@@ -620,11 +672,11 @@ class TargetMatcher:
         ph = py2 - py1
 
         # Point 2: Head/Upper-body ROI (50-60% upper half with head/shoulder padding)
-        # ROI A: standard upper 58% ROI
+        # Validated upper 60% ROI with horizontal and top padding.
         t_acq0 = time.perf_counter()
-        head_h_A = int(ph * 0.58)
-        pad_x_A = int(pw * 0.12)
-        pad_top_A = int(ph * 0.08)
+        head_h_A = int(ph * 0.60)
+        pad_x_A = int(pw * 0.15)
+        pad_top_A = int(ph * 0.10)
 
         roi_A_x1 = max(0, px1 - pad_x_A)
         roi_A_y1 = max(0, py1 - pad_top_A)
@@ -651,43 +703,12 @@ class TargetMatcher:
         illumination, enhancement_applied, enhanced_roi = face_embedder.check_illumination(head_roi)
         self.last_timings["acq_ms"] += (time.perf_counter() - t_acq0) * 1000.0
 
-        # Point 4: Face Detection with SCRFD on head ROI (Pass 1 & Pass 2 adaptive upscale)
+        # One SCRFD invocation on the native head ROI.
         t_det0 = time.perf_counter()
         detected_faces, diag = face_embedder.detect_faces_in_roi(
-            head_roi, illumination=illumination, enhanced_roi=enhanced_roi, return_diag=True
+            head_roi, illumination=illumination, return_diag=True, single_pass=True
         )
         chosen_roi_bbox = [roi_A_x1, roi_A_y1, roi_A_x2, roi_A_y2]
-
-        # Point 4 Comparison: If ROI A (58%) found 0 faces, evaluate broader ROI B (upper 70%)
-        if not detected_faces:
-            head_h_B = int(ph * 0.70)
-            pad_x_B = int(pw * 0.15)
-            pad_top_B = int(ph * 0.10)
-            roi_B_x1 = max(0, px1 - pad_x_B)
-            roi_B_y1 = max(0, py1 - pad_top_B)
-            roi_B_x2 = min(nw, px2 + pad_x_B)
-            roi_B_y2 = min(nh, py1 + head_h_B)
-            head_roi_B = source_native[roi_B_y1:roi_B_y2, roi_B_x1:roi_B_x2]
-
-            if head_roi_B.size > 0:
-                illum_B, enh_app_B, enh_roi_B = face_embedder.check_illumination(head_roi_B)
-                faces_B, diag_B = face_embedder.detect_faces_in_roi(
-                    head_roi_B, illumination=illum_B, enhanced_roi=enh_roi_B, return_diag=True
-                )
-                if faces_B:
-                    logger.info(
-                        "[ROI_COMPARE] track=%d f=%d 58%% ROI had 0 faces, broader 70%% ROI found %d face(s)",
-                        track_id, frame_id, len(faces_B)
-                    )
-                    detected_faces = faces_B
-                    diag = diag_B
-                    head_roi = head_roi_B
-                    chosen_roi_bbox = [roi_B_x1, roi_B_y1, roi_B_x2, roi_B_y2]
-                    rw = roi_B_x2 - roi_B_x1
-                    rh = roi_B_y2 - roi_B_y1
-                    illumination = illum_B
-                    enhancement_applied = enh_app_B
-                    enhanced_roi = enh_roi_B
 
         # Point 1: Diagnostics for every meaningful face acquisition
         best_conf = diag.get("best_face_confidence", 0.0)
@@ -702,7 +723,7 @@ class TargetMatcher:
         else:
             best_box_native = None
 
-        logger.info(
+        logger.debug(
             "[FACE_ACQ] track_id=%d frame_id=%d person_bbox_native=[%d,%d,%d,%d] upper_roi_bbox_native=[%d,%d,%d,%d] upper_roi_size=%dx%d upscale_factor=%.1f detector_input_size=%dx%d illumination_state=%s original_face_count=%d enhanced_face_count=%d best_face_confidence=%.3f best_face_bbox=%s",
             track_id,
             frame_id,
@@ -758,7 +779,7 @@ class TargetMatcher:
                 # No face detected in this frame: maintain state or wait for better face
                 if state.embedding is None:
                     state.decision = "WAIT_FOR_BETTER_FACE"
-                    logger.info(
+                    logger.debug(
                         "[FACE_QUALITY_GATE] track_id=%d frame_id=%d face_size=0.0 confidence=0.000 sharpness=0.0 quality=0.0 embedding_valid=NO action=WAIT_FOR_BETTER_FACE reason=NO_FACE_DETECTED",
                         track_id, frame_id
                     )
@@ -766,7 +787,7 @@ class TargetMatcher:
                 state.last_bbox_area = bbox_area
 
                 best_size = state.face_size if state.embedding is not None else 0.0
-                logger.info(
+                logger.debug(
                     "[BEST_FACE] best_face_size=%.1f candidate_size=0.0 quality=0.0 best_replaced=NO replacement_reason=NO_FACE_DETECTED sim=%.3f failed_match_count=%d decision=%s",
                     best_size, state.similarity, state.consecutive_below_thresh, state.decision
                 )
@@ -795,212 +816,60 @@ class TargetMatcher:
         t_emb0 = time.perf_counter()
         if detected_faces:
             best_det = detected_faces[0]
-            det_box = best_det["bbox"]
-            det_score = float(best_det["score"])
-            det_kps = best_det["kps"]
-
-            # Map coordinates to native frame
-            face_bbox_native = [
-                det_box[0] + chosen_roi_bbox[0],
-                det_box[1] + chosen_roi_bbox[1],
-                det_box[2] + chosen_roi_bbox[0],
-                det_box[3] + chosen_roi_bbox[1],
-            ]
-            kps_native = det_kps + np.array([chosen_roi_bbox[0], chosen_roi_bbox[1]]) if det_kps is not None else None
-
-            # Base quality metrics from face_embedder
-            cand_face_size, cand_sharpness, cand_quality, gate_decision = face_embedder.calculate_face_quality(
-                source_native, face_bbox_native, det_score, illumination
-            )
+            det_box, det_score, det_kps = best_det['bbox'], float(best_det['score']), best_det['kps']
+            candidate = self.face_pipeline.process(
+                head_roi, det_box, det_score, det_kps, camera_id=state.camera_id,
+                track_id=track_id, frame_id=frame_id, timestamp=getattr(self, '_timestamp', time.time()))
+            observation = self.face_pipeline.last_observation
+            cand_face_size = float(observation.get('face_width', 0.0))
             cand_conf = det_score
-
-            # Record candidate metrics separately from BestFace
+            cand_sharpness = float(observation.get('sharpness', 0.0))
+            cand_quality = float(observation.get('quality_score', 0.0))
             state.candidate_face_size = cand_face_size
             state.candidate_confidence = cand_conf
             state.candidate_sharpness = cand_sharpness
             state.candidate_quality_score = cand_quality
-
-            cand_frontality = calculate_face_frontality(kps_native)
-            gate_reason = gate_decision
-
-            # Additional adaptive quality gate checks when basic floor passes
-            if gate_decision == "CAN_EMBED":
-                # 1. Complete face bbox check (must not be heavily truncated by native frame boundaries)
-                fb_x1, fb_y1, fb_x2, fb_y2 = face_bbox_native
-                fb_w = fb_x2 - fb_x1
-                fb_h = fb_y2 - fb_y1
-                if fb_w > 0 and fb_h > 0:
-                    vis_x1 = max(0, fb_x1)
-                    vis_y1 = max(0, fb_y1)
-                    vis_x2 = min(nw, fb_x2)
-                    vis_y2 = min(nh, fb_y2)
-                    vis_area = max(0, vis_x2 - vis_x1) * max(0, vis_y2 - vis_y1)
-                    if (vis_area / float(fb_w * fb_h)) < 0.75:
-                        gate_decision = "WAIT_FOR_BETTER_FACE"
-                        gate_reason = "PARTIAL_FACE"
-
-                # 2. 5-point landmarks validation and reasonable geometry
-                if gate_decision == "CAN_EMBED":
-                    lmk_valid, lmk_reason = face_embedder.validate_landmarks(kps_native, face_bbox_native)
-                    if not lmk_valid:
-                        gate_decision = "WAIT_FOR_BETTER_FACE"
-                        gate_reason = lmk_reason
+            observation['timings']['scrfd'] = (t_emb0-t_det0)*1000
+            observation['timings']['through_embedding'] = (time.perf_counter()-t_acq0)*1000
+            if candidate is not None:
+                if state.candidate_buffer is None:
+                    state.candidate_buffer = CandidateBuffer(state.camera_id, track_id)
+                t_fusion = time.perf_counter()
+                added = state.candidate_buffer.add(candidate)
+                state.candidates = state.candidate_buffer.candidates
+                selected = state.candidate_buffer.selected()
+                fused = fuse_candidates(selected)
+                observation['timings']['fusion'] = (time.perf_counter()-t_fusion)*1000
+                if added and fused is not None:
+                    state.selected_candidates = selected
+                    state.fused_embedding = fused
+                    self.face_pipeline.counters['fusion_top'+str(len(selected))] += 1
+                    # BestFace metadata describes the highest quality selected frame.
+                    best = selected[0]
+                    state.embedding = best['embedding']
+                    state.face_size = best['face_width']
+                    state.confidence = best['scrfd_confidence']
+                    state.sharpness = best['sharpness']
+                    state.quality_score = best['quality_score']
+                    state.frontality = best['frontality']
+                    state.frame_id = best['frame_id']
+                    state.attempts_count += 1
+                    self._track_face_cache[track_id] = fused
+                    best_replaced = True
+                    emb_recomputed = True
+                    replacement_reason = 'UNIQUE_FRAME_F2'
+                logger.debug('[FACE] cam=%s track=%s frame=%s rep=%s width=%.2f overhead=%.2f quality=%.2f',
+                             state.camera_id, track_id, frame_id, candidate['representation_type'],
+                             cand_face_size, candidate['overhead_distortion_score'], cand_quality)
             else:
-                if gate_decision == "FACE_TOO_SMALL":
-                    gate_reason = "FACE_TOO_SMALL"
-                elif cand_conf < 0.30:
-                    gate_reason = "LOW_CONFIDENCE"
-                elif cand_sharpness < 12.0:
-                    gate_reason = "BLURRED"
-
-            if gate_decision in ("FACE_TOO_SMALL", "WAIT_FOR_BETTER_FACE"):
-                # Candidate rejected by adaptive quality gate
-                replacement_reason = "QUALITY_GATE_REJECTED"
+                replacement_reason = 'CANDIDATE_GATE_REJECTED'
                 if state.embedding is None:
-                    state.decision = "WAIT_FOR_BETTER_FACE"
-
+                    state.decision = 'WAIT_FOR_BETTER_FACE'
                 state.last_eval_frame = frame_id
                 state.last_bbox_area = bbox_area
-
-                best_size = state.face_size if state.embedding is not None else 0.0
-                embedding_valid_str = "YES" if state.embedding is not None else "NO"
-
-                # Log [FACE_QUALITY_GATE] diagnostic log
-                logger.info(
-                    "[FACE_QUALITY_GATE] track_id=%d frame_id=%d face_size=%.1f confidence=%.3f sharpness=%.1f quality=%.1f embedding_valid=%s action=WAIT_FOR_BETTER_FACE reason=%s",
-                    track_id, frame_id, cand_face_size, cand_conf, cand_sharpness, cand_quality, embedding_valid_str, gate_reason
-                )
-
-                logger.info(
-                    "[BEST_FACE] best_face_size=%.1f candidate_size=%.1f quality=%.1f best_replaced=NO replacement_reason=%s sim=%.3f failed_match_count=%d decision=%s",
-                    best_size, cand_face_size, cand_quality, replacement_reason, state.similarity, state.consecutive_below_thresh, state.decision
-                )
-
                 if not has_color_only_targets:
-                    self._log_face_rec(
-                        track_id=track_id,
-                        frame_id=frame_id,
-                        native_w=nw,
-                        native_h=nh,
-                        bbox=[px1, py1, px2, py2],
-                        roi_size=(rw, rh),
-                        illumination=illumination,
-                        enhancement_applied=enhancement_applied,
-                        face_size=int(best_size),
-                        face_conf=state.confidence if state.embedding is not None else cand_conf,
-                        sharpness=state.sharpness if state.embedding is not None else cand_sharpness,
-                        best_replaced=False,
-                        emb_recomputed=False,
-                        similarity=state.similarity,
-                        threshold=state.threshold,
-                        decision=state.decision,
-                        target_name=state.matched_target_name,
-                    )
-                    self.last_timings["emb_ms"] += (time.perf_counter() - t_emb0) * 1000.0
+                    self.last_timings['emb_ms'] += (time.perf_counter()-t_emb0)*1000
                     return None
-            else:
-                # Meaningful replacement criteria to avoid unnecessary ArcFace recomputations
-                is_better = False
-                if state.embedding is None:
-                    is_better = True
-                    replacement_reason = "FIRST_EMBEDDING"
-                elif cand_quality >= state.quality_score * 1.05 and cand_face_size >= state.face_size * 0.95:
-                    is_better = True
-                    replacement_reason = "BETTER_QUALITY"
-                elif cand_frontality >= getattr(state, "frontality", 0.0) + 0.15 and cand_face_size >= state.face_size * 0.85:
-                    is_better = True
-                    replacement_reason = "MORE_FRONTAL"
-                elif cand_sharpness >= state.sharpness * 1.15 and cand_face_size >= state.face_size * 0.90:
-                    is_better = True
-                    replacement_reason = "HIGHER_SHARPNESS"
-                elif cand_face_size >= state.face_size * 1.15 and cand_sharpness >= state.sharpness * 0.80:
-                    is_better = True
-                    replacement_reason = "LARGER_SIZE"
-                else:
-                    is_better = False
-                    replacement_reason = "REUSE_BEST_FACE"
-
-                if is_better and kps_native is not None:
-                    # Select enhancement variant based ONLY on native image quality
-                    if illumination == "UNDEREXPOSED":
-                        variant = "EXPOSURE_CORRECTED"
-                    elif illumination in ("BACKLIT", "LOW_CONTRAST"):
-                        variant = "LOCAL_CONTRAST"
-                    elif 25.0 <= cand_sharpness <= 180.0:
-                        variant = "MILD_SHARPEN"
-                    else:
-                        variant = "RAW"
-
-                    new_emb = face_embedder.align_and_embed(
-                        source_native, kps_native, illumination=illumination, variant=variant
-                    )
-                    valid_emb = (
-                        new_emb is not None
-                        and len(new_emb) == 512
-                        and np.all(np.isfinite(new_emb))
-                        and abs(float(np.linalg.norm(new_emb)) - 1.0) < 0.05
-                    )
-                    if valid_emb:
-                        state.embedding = new_emb
-                        state.face_size = cand_face_size
-                        state.confidence = cand_conf
-                        state.sharpness = cand_sharpness
-                        state.lighting = illumination
-                        state.quality_score = cand_quality
-                        state.frontality = cand_frontality
-                        state.frame_id = frame_id
-                        state.attempts_count += 1
-                        best_replaced = True
-                        emb_recomputed = True
-                        self._track_face_cache[track_id] = new_emb
-
-                        # Bounded temporal candidate history (recent 10 frames)
-                        cand_entry = {
-                            "embedding": new_emb,
-                            "quality": cand_quality,
-                            "frame_id": frame_id,
-                            "size": cand_face_size,
-                        }
-                        state.candidates.append(cand_entry)
-                        if len(state.candidates) > 10:
-                            state.candidates.pop(0)
-
-                        # Multi-frame embedding fusion when >= 3 quality embeddings exist
-                        if len(state.candidates) >= 3:
-                            top_cands = sorted(state.candidates, key=lambda c: c["quality"], reverse=True)[:5]
-                            fused = np.zeros(512, dtype=np.float32)
-                            w_sum = 0.0
-                            for c in top_cands:
-                                w = max(0.1, float(c["quality"]))
-                                fused += c["embedding"] * w
-                                w_sum += w
-                            fused_norm = float(np.linalg.norm(fused))
-                            if fused_norm > 1e-6:
-                                state.fused_embedding = fused / fused_norm
-                        else:
-                            state.fused_embedding = new_emb
-
-                        logger.info(
-                            "[FACE_QUALITY_GATE] track_id=%d frame_id=%d face_size=%.1f confidence=%.3f sharpness=%.1f quality=%.1f embedding_valid=YES action=ACCEPT_FOR_MATCH reason=%s",
-                            track_id, frame_id, cand_face_size, cand_conf, cand_sharpness, cand_quality, replacement_reason
-                        )
-                    else:
-                        logger.warning(
-                            "[FACE_QUALITY_GATE] track_id=%d frame_id=%d face_size=%.1f confidence=%.3f sharpness=%.1f quality=%.1f embedding_valid=NO action=%s reason=INVALID_EMBEDDING",
-                            track_id, frame_id, cand_face_size, cand_conf, cand_sharpness, cand_quality,
-                            "WAIT_FOR_BETTER_FACE" if state.embedding is None else "ACCEPT_FOR_MATCH"
-                        )
-                        if state.embedding is None:
-                            state.decision = "WAIT_FOR_BETTER_FACE"
-                            self.last_timings["emb_ms"] += (time.perf_counter() - t_emb0) * 1000.0
-                            return None
-                else:
-                    best_replaced = False
-                    emb_recomputed = False
-                    logger.info(
-                        "[FACE_QUALITY_GATE] track_id=%d frame_id=%d face_size=%.1f confidence=%.3f sharpness=%.1f quality=%.1f embedding_valid=YES action=ACCEPT_FOR_MATCH reason=REUSE_BEST_FACE",
-                        track_id, frame_id, cand_face_size, cand_conf, cand_sharpness, cand_quality
-                    )
         elif mock_embedding is not None:
             # Fallback mock branch for unit test suite
             state.embedding = mock_embedding
@@ -1016,7 +885,7 @@ class TargetMatcher:
             cand_quality = 100.0
             replacement_reason = "MOCK_EMBEDDING"
             self._track_face_cache[track_id] = mock_embedding
-            logger.info(
+            logger.debug(
                 "[FACE_QUALITY_GATE] track_id=%d frame_id=%d face_size=%.1f confidence=%.3f sharpness=%.1f quality=%.1f embedding_valid=YES action=ACCEPT_FOR_MATCH reason=MOCK_EMBEDDING",
                 track_id, frame_id, 64.0, 0.90, 100.0, 100.0
             )
@@ -1142,7 +1011,7 @@ class TargetMatcher:
 
         # Short log (Points 1-5 summary)
         best_size = state.face_size if state.embedding is not None else 0.0
-        logger.info(
+        logger.debug(
             "[BEST_FACE] best_face_size=%.1f candidate_size=%.1f quality=%.1f best_replaced=%s replacement_reason=%s sim=%.3f failed_match_count=%d decision=%s",
             best_size,
             cand_face_size,

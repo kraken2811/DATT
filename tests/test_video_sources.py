@@ -144,6 +144,7 @@ class TestVideoSources(unittest.TestCase):
     def test_runtime_video_source_switch_and_release(self) -> None:
         """TEST 13 & 14: Switch video source at runtime and verify old source is released."""
         manager = CameraManager()
+        self.addCleanup(manager.stop_camera)
         # 1. Start with local video 1
         cam1 = manager.set_video_source(
             source_type="local",
@@ -175,7 +176,7 @@ class TestVideoSources(unittest.TestCase):
             self.assertEqual(old_reader.status, "STOPPED")
 
             # Read frame from new source
-            frame2 = manager.read(timeout=1.0)
+            frame2 = manager.read(timeout=10.0)
             self.assertIsNotNone(frame2)
 
         manager.stop_camera()

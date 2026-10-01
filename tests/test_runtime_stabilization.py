@@ -321,7 +321,9 @@ class TestRuntimeStabilization(unittest.TestCase):
             mock_proc = MagicMock()
             mock_proc.returncode = 0
             mock_proc.communicate.return_value = (dummy_jpeg, b"")
-            with patch("subprocess.Popen", return_value=mock_proc):
+            # This test exercises fallback dispatch, not executable discovery.
+            with patch("src.stream.thumbnail_service.shutil.which", return_value="ffmpeg"), \
+                    patch("subprocess.Popen", return_value=mock_proc):
                 result, content_type = svc.get_thumbnail(
                     camera_id="test_cam_hls",
                     provider="Seattle SDOT",

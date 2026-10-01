@@ -65,6 +65,11 @@ class DatabaseWorker:
         self.write_latencies: list[float] = []
         self.enqueue_latencies: list[float] = []
 
+        # Notification transport runs independently of both CV and DB persistence.
+        from src.notifications.service import NotificationService
+        self.notifications = NotificationService(self.db)
+        self.notifications.start()
+
         self._worker_thread = threading.Thread(
             target=self._worker_loop,
             name="DatabasePersistenceWorker",
@@ -330,7 +335,7 @@ class DatabaseWorker:
                             )
 
                             if dto.plate_text or best_plt_path:
-                                plate_event_repo.create(
+                                plate_event = plate_event_repo.create(
                                     vehicle_event_id=ve.id,
                                     plate_text=dto.plate_text or "",
                                     confidence=dto.plate_confidence,
@@ -338,6 +343,14 @@ class DatabaseWorker:
                                     status=dto.plate_status or "confirmed",
                                     created_at=dto.last_seen_at,
                                 )
+
+                                from src.watchlists.vehicles import record_plate_result
+                                match = record_plate_result(session, plate_event, dto.camera_id)
+                                try:
+                                    with session.begin_nested():
+                                        self.notifications.enqueue_vehicle(session, plate_event, match)
+                                except Exception:
+                                    logger.warning('[NOTIFICATIONS] vehicle enqueue failed; check migration/configuration')
 
                 # Persist business events idempotently
                 for ev_dto in events:
@@ -376,8 +389,9 @@ class DatabaseWorker:
                                 logger.warning("[DBWorker] Failed to save face crop: %s", e)
                                 raise
 
-                        face_repo.create(
+                        face_event = face_repo.create(
                             id=f_dto.id,
+                            camera_id=f_dto.camera_id,
                             target_id=f_dto.target_id,
                             video_source_id=f_dto.video_source_id,
                             track_id=f_dto.track_id,
@@ -387,6 +401,14 @@ class DatabaseWorker:
                             face_crop_path=f_path,
                             created_at=f_dto.created_at,
                         )
+                        # Same commit as FaceEvent; delivery cannot observe rolled-back events.
+                        # A notification schema/config problem must not lose the FaceEvent.
+                        try:
+                            with session.begin_nested():
+                                self.notifications.enqueue_face(session, face_event, f_dto)
+                        except Exception:
+                            logger.warning("[NOTIFICATIONS] enqueue failed; check migration/configuration")
+
 
 
             write_ms = (time.perf_counter() - t_w0) * 1000.0
@@ -425,4 +447,5 @@ class DatabaseWorker:
             time.sleep(0.05)
         if self._worker_thread.is_alive():
             self._worker_thread.join(timeout=max(0.5, timeout - (time.time() - t0)))
+        self.notifications.stop()
         self.db.dispose()

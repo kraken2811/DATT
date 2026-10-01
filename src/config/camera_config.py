@@ -26,6 +26,9 @@ class CameraInfo:
     height: int = 720
     description: str = ""
     video_source_id: str | None = None
+    enabled: bool = True
+    status: str = "offline"
+    location: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize camera metadata to dictionary."""
@@ -93,6 +96,18 @@ def load_cameras(config_path: Path | str | None = None) -> dict[str, CameraInfo]
             description=desc,
         )
 
+    if config_path is None:
+        import os
+        if os.getenv('DATT_DATABASE_URL') or os.getenv('DATT_REQUIRE_PERSISTENCE')=='1':
+            from src.cameras.service import database, serialize
+            from src.db.models import Camera
+            from sqlalchemy import select
+            with database() as db,db.transaction() as session:
+                for row in session.scalars(select(Camera)):
+                    if row.registry_key: cameras.pop(row.registry_key,None)
+                    cameras[str(row.id)]=CameraInfo(id=str(row.id),name=row.name,type=row.source_type,
+                        url=row.source,description=row.description or '',video_source_id=str(row.video_source_id) if row.video_source_id else None,
+                        enabled=row.enabled,status=serialize(row)['status'],location=row.location)
     return cameras
 
 

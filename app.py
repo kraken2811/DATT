@@ -290,6 +290,8 @@ def run_pipeline(
                 tracks=tracks,
                 frame_id=curr_frame_id,
                 native_frame=frame,
+                camera_id=active_cam.id if active_cam else '',
+                timestamp=frame_pts,
             )
             track_states = target_matcher.get_all_track_states()
             _t_face_acq_ms = target_matcher.last_timings.get("acq_ms", 0.0)

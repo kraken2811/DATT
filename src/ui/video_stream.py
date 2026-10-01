@@ -435,6 +435,12 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
+            from src.cameras.service import registered_id
+            registered_id(ident=camera_id)
+        except (ValueError, LookupError):
+            self._send_json_response({'status':'error','message':'Camera disabled or unavailable'},code=409)
+            return
+        try:
             self.state.clear_frames(increment_generation=True)
             cam_info = self.camera_manager.switch_camera(camera_id)
             self.state.set_camera(cam_info.id, cam_info.name)
@@ -780,6 +786,9 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             self._send_json_response({"status": "error", "message": "CameraManager not connected"}, code=503)
             return
 
+        if data.get('camera_id'):
+            self._execute_camera_switch(str(data['camera_id']))
+            return
         preview_manager.stop_preview()
 
         stype = str(data.get("source_type") or data.get("type") or "direct_hls").lower().strip()
@@ -794,6 +803,13 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
 
         if not source:
             self._send_json_response({"status": "error", "message": "Source cannot be empty"}, code=400)
+            return
+
+        try:
+            from src.cameras.service import registered_id
+            registered_id(source=source)
+        except (ValueError, LookupError):
+            self._send_json_response({'status':'error','message':'Camera disabled or unavailable'},code=409)
             return
 
         # Enter switching mode: suppress spurious ERROR status from AI pipeline

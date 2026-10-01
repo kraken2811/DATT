@@ -466,6 +466,7 @@ class FaceEmbedder:
         illumination: str = "NORMAL",
         enhanced_roi: np.ndarray | None = None,
         return_diag: bool = False,
+        single_pass: bool = False,
     ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], dict[str, Any]]:
         """Detect faces within upper-body/head ROI using SCRFD.
 
@@ -504,6 +505,21 @@ class FaceEmbedder:
             return ([], empty_diag) if return_diag else []
 
         rh, rw = roi.shape[:2]
+        if single_pass:
+            # Production adaptive path: one SCRFD invocation, existing native threshold.
+            with self._infer_lock:
+                boxes, landmarks = det_model.detect(roi, max_num=0, det_thresh=0.35)
+            results = []
+            for i, box in enumerate(boxes if boxes is not None else []):
+                results.append(dict(bbox=box[:4].copy(), score=float(box[4]),
+                                    kps=landmarks[i].copy() if landmarks is not None else None))
+            results.sort(key=lambda f: (f['bbox'][2]-f['bbox'][0])*(f['bbox'][3]-f['bbox'][1]), reverse=True)
+            diag = {**empty_diag, 'upper_roi_size': (rw, rh), 'detector_input_size': (rw, rh),
+                    'original_face_count': len(results), 'eval_roi': roi,
+                    'best_face_confidence': results[0]['score'] if results else 0.0,
+                    'best_face_bbox': results[0]['bbox'] if results else None}
+            self.last_detection_diag = diag
+            return (results, diag) if return_diag else results
         min_dim = min(rh, rw)
 
         # Adaptive 2x-4x enlargement for small ROIs (Point 3)

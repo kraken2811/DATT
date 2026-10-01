@@ -12,6 +12,7 @@ Verifies:
 from pathlib import Path
 import shutil
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -109,7 +110,7 @@ class TestLiveFaceDetectionFix(unittest.TestCase):
         infer_bbox = np.array([[653 * 0.5, 133 * 0.5, 742 * 0.5, 400 * 0.5]], dtype=np.float32)
         tracks = MockDetections(xyxy=infer_bbox, tracker_id=np.array([1]))
 
-        with self.assertLogs("datt.target_matcher", level="INFO") as log_capture:
+        with self.assertLogs("datt.target_matcher", level="DEBUG") as log_capture:
             self.matcher.match_tracks(
                 frame=infer_frame,
                 tracks=tracks,
@@ -124,8 +125,8 @@ class TestLiveFaceDetectionFix(unittest.TestCase):
         self.assertIn("track_id=1", log_line)
         self.assertIn("frame_id=10", log_line)
         self.assertIn("person_bbox_native=[653,133,742,400]", log_line)
-        self.assertIn("upscale_factor=3.0", log_line)
-        self.assertIn("detector_input_size=327x525", log_line)
+        self.assertIn("upscale_factor=1.0", log_line)
+        self.assertIn("detector_input_size=115x186", log_line)
         self.assertIn("original_face_count=", log_line)
         self.assertIn("enhanced_face_count=", log_line)
         self.assertIn("best_face_confidence=", log_line)
@@ -139,8 +140,8 @@ class TestLiveFaceDetectionFix(unittest.TestCase):
         self.assertIn("f10_t1_roi_before_upscale.jpg", sample_names)
         self.assertIn("f10_t1_roi_after_upscale.jpg", sample_names)
 
-    def test_point_4_roi_comparison_fallback(self) -> None:
-        """Requirement 4: Verify broader 70% ROI fallback when upper 58% has face cut off."""
+    def test_production_does_not_retry_with_a_second_roi(self) -> None:
+        """The adaptive production contract permits exactly one SCRFD pass."""
         native_frame = np.full((720, 1280, 3), 110, dtype=np.uint8)
         head = cv2.resize(self.face_only, (50, 60))
         # Place head at y=290 to 350 so 58% ROI cuts it off but 70% ROI captures it
@@ -150,7 +151,7 @@ class TestLiveFaceDetectionFix(unittest.TestCase):
         infer_bbox = np.array([[200 * 0.5, 100 * 0.5, 350 * 0.5, 450 * 0.5]], dtype=np.float32)
         tracks = MockDetections(xyxy=infer_bbox, tracker_id=np.array([7]))
 
-        with self.assertLogs("datt.target_matcher", level="INFO") as log_capture:
+        with patch.object(face_embedder, "detect_faces_in_roi", return_value=([], {})) as detect:
             self.matcher.match_tracks(
                 frame=infer_frame,
                 tracks=tracks,
@@ -158,16 +159,16 @@ class TestLiveFaceDetectionFix(unittest.TestCase):
                 native_frame=native_frame,
             )
 
-        # Broader 70% ROI fallback should be logged and adopted
-        roi_logs = [line for line in log_capture.output if "[ROI_COMPARE]" in line]
-        self.assertTrue(len(roi_logs) > 0, "Expected [ROI_COMPARE] fallback log")
-        self.assertIn("broader 70% ROI found", roi_logs[0])
+        detect.assert_called_once()
+        self.assertTrue(detect.call_args.kwargs["single_pass"])
+        self.assertEqual(detect.call_args.args[0].shape[:2], (245, 194))
         state = self.matcher.get_track_state(7)
         self.assertIsNotNone(state)
-        self.assertGreater(state.confidence, 0.0)
+        self.assertEqual(state.decision, "WAIT_FOR_BETTER_FACE")
+        self.assertIsNone(state.embedding)
 
-    def test_acceptance_criteria_real_person_acquisition(self) -> None:
-        """Requirement Acceptance: face_count >= 1, face > 0px, conf > 0, emb_recomputed=True, sim > 0."""
+    def test_real_face_outside_candidate_width_is_rejected(self) -> None:
+        """A detected 48px face must not bypass the mandated 32..44px gate."""
         # Frame with person bbox [531, 204, 660, 498] (pw=129, ph=294, roi=159x193)
         native_frame = np.full((720, 1280, 3), 110, dtype=np.uint8)
         native_frame[204+60:498, 531:660] = (80, 80, 80)
@@ -187,12 +188,11 @@ class TestLiveFaceDetectionFix(unittest.TestCase):
 
         state = self.matcher.get_track_state(42)
         self.assertIsNotNone(state)
-        # Acceptance criteria checks:
-        self.assertGreater(state.face_size, 0.0, "face_size must be > 0")
-        self.assertGreater(state.confidence, 0.0, "confidence must be > 0")
-        self.assertIsNotNone(state.embedding, "embedding must be computed")
-        self.assertGreater(state.similarity, 0.0, "similarity must be a real nonzero value")
-        self.assertIn(42, matches, "Target 'long' must match")
+        self.assertGreater(state.candidate_face_size, 44.0)
+        self.assertGreater(state.candidate_confidence, 0.35)
+        self.assertIsNone(state.embedding)
+        self.assertEqual(state.decision, "WAIT_FOR_BETTER_FACE")
+        self.assertNotIn(42, matches)
 
 
 if __name__ == "__main__":

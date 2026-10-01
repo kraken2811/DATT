@@ -39,9 +39,11 @@ class TestFaceRegistrationFix(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(app)
         target_manager.clear()
+        target_matcher.reset_tracks()
 
     def tearDown(self) -> None:
         target_manager.clear()
+        target_matcher.reset_tracks()
 
     def _create_synthetic_face_portrait(self, exif_orientation: int | None = None) -> bytes:
         """Create a JPEG byte payload with a real face crop for testing."""
@@ -131,14 +133,25 @@ class TestFaceRegistrationFix(unittest.TestCase):
         # Build simulated scene
         frame = np.zeros((720, 1280, 3), dtype=np.uint8)
         person_box = np.zeros((300, 120, 3), dtype=np.uint8)
-        resized_face = cv2.resize(img, (80, 80))
-        person_box[10:90, 20:100] = resized_face
+        # Resize the actual detected face, not an entire portrait whose face
+        # occupies an unknown fraction of 80px. Exercise the 32..44px contract.
+        from src.face.face_embedder import face_embedder
+        faces = face_embedder.detect_faces_in_roi(img, single_pass=True)
+        self.assertTrue(faces)
+        x1, y1, x2, y2 = np.rint(faces[0]["bbox"]).astype(int)
+        face_crop = img[max(0, y1):min(img.shape[0], y2), max(0, x1):min(img.shape[1], x2)]
+        resized_face = cv2.resize(face_crop, (40, 50))
+        person_box[10:60, 20:60] = resized_face
         frame[200:500, 300:420] = person_box
 
         TrackBox = namedtuple("TrackBox", ["xyxy", "tracker_id"])
         tracks = TrackBox(xyxy=np.array([[300, 200, 420, 500]]), tracker_id=np.array([77]))
 
         matched = target_matcher.match_tracks(frame, tracks, frame_id=1)
+        state = target_matcher.get_track_state(77)
+        self.assertGreaterEqual(state.face_size, 32.0)
+        self.assertLessEqual(state.face_size, 44.0)
+        self.assertEqual(target.embedding_model, "adaface_ir50_ms1mv2")
         self.assertIn(77, matched)
         match_info = matched[77]
         self.assertEqual(match_info.target_id, target.id)

@@ -20,6 +20,8 @@ Usage:
 
 import argparse
 import asyncio
+from datetime import datetime, timezone
+import json
 import logging
 import os
 from pathlib import Path
@@ -130,6 +132,7 @@ async def favicon() -> Response:
 
 
 @app.get("/", response_class=FileResponse)
+@app.get("/watchlist", response_class=FileResponse)
 async def serve_index() -> Response:
     """Serve the single-page monitoring dashboard."""
     index_file = STATIC_DIR / "index.html"
@@ -213,10 +216,16 @@ async def get_telemetry(request: Request) -> JSONResponse:
 # Camera API
 # -----------------------------------------------------------------------------
 
+@app.get("/camera-management")
+async def get_camera_management_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
+
+
 @app.get("/cameras")
-@app.get("/api/cameras")
-async def get_cameras(request: Request) -> JSONResponse:
+async def get_cameras(request: Request) -> Response:
     """Fetch list of available cameras and active camera."""
+    if "text/html" in request.headers.get("accept", "") and request.url.path == "/cameras":
+        return FileResponse(STATIC_DIR / "index.html")
     b_url = get_backend_url(request).rstrip("/")
     try:
         client = get_backend_http_client()
@@ -273,7 +282,7 @@ async def switch_camera(request: Request) -> JSONResponse:
 
     try:
         encoded_id = urllib.parse.quote(str(cam_id))
-        async with httpx.AsyncClient(timeout=6.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(f"{b_url}/switch_camera?id={encoded_id}")
             return JSONResponse(content=resp.json(), status_code=resp.status_code)
     except Exception as exc:
@@ -433,6 +442,7 @@ async def get_video_sources() -> JSONResponse:
 @app.delete("/api/video_sources/{source_id}")
 async def delete_video_source(source_id: str) -> JSONResponse:
     """Safely delete video source from DB and local storage."""
+    from sqlalchemy.exc import IntegrityError
     try:
         from uuid import UUID
         from src.db.database import Database
@@ -448,6 +458,10 @@ async def delete_video_source(source_id: str) -> JSONResponse:
             rec = repo.get(src_uuid)
             if rec is None:
                 return JSONResponse(content={"status": "error", "message": "Video source not found"}, status_code=404)
+            from src.db.models import Camera
+            from sqlalchemy import select
+            if session.scalar(select(Camera.id).where(Camera.video_source_id==src_uuid).limit(1)):
+                return JSONResponse(content={"status":"error","message":"Video source is referenced by a camera"},status_code=409)
             storage_path = rec.storage_path
             repo.delete(src_uuid)
 
@@ -460,6 +474,8 @@ async def delete_video_source(source_id: str) -> JSONResponse:
                 logger.warning("[VIDEO_DELETE] Could not unlink file %s: %s", storage_path, e)
 
         return JSONResponse(content={"status": "ok", "message": "Video source deleted successfully"}, status_code=200)
+    except IntegrityError:
+        return JSONResponse(content={"status":"error","message":"Video source is referenced by a camera"},status_code=409)
     except Exception as exc:
         return JSONResponse(content={"status": "error", "message": str(exc)}, status_code=500)
 
@@ -877,6 +893,7 @@ async def get_targets() -> JSONResponse:
                         face_threshold=threshold,
                         source_image_path=src_img,
                         db_id=str(db_t.id),
+                        embedding_model=embs[0].model_name if embs else 'adaface_ir50_ms1mv2',
                     )
         except Exception as exc:
             logger.debug("Failed restoring targets from DB: %s", exc)
@@ -1061,8 +1078,8 @@ async def register_target(request: Request) -> JSONResponse:
                         te_repo.create(
                             target_id=db_t.id,
                             embedding=target.face_embedding,
-                            model_name="arcface",
-                            model_version="1.0",
+                            model_name=target.embedding_model,
+                            model_version="cvpr2022_ir50_ms1mv2",
                             source_image_path=rel_target_image_path,
                         )
                     target.db_id = str(db_t.id)
@@ -1248,6 +1265,23 @@ async def bulk_select_targets(request: Request) -> JSONResponse:
     return JSONResponse(content={"status": "ok", "selected_ids": target_ids}, status_code=200)
 
 
+# -----------------------------------------------------------------------------
+# Vehicle Watchlist Management API
+# -----------------------------------------------------------------------------
+
+from src.watchlists.vehicle_api import router as vehicle_watchlist_router
+app.include_router(vehicle_watchlist_router)
+
+
+# -----------------------------------------------------------------------------
+# Camera Management CRUD & Connection Testing API (Phase 1)
+# -----------------------------------------------------------------------------
+
+from src.cameras.api import router as cameras_router
+app.include_router(cameras_router)
+from src.event_center.api import router as event_center_router
+app.include_router(event_center_router)
+
 # Cache mapping event_id -> snapshot_path for fast lookup
 event_snapshot_cache: dict[str, str] = {}
 
@@ -1259,8 +1293,10 @@ event_snapshot_cache: dict[str, str] = {}
 
 @app.get("/events")
 @app.get("/api/events")
-async def get_events(request: Request) -> JSONResponse:
-    """Fetch recent occupancy events (latest 5 only)."""
+async def get_events(request: Request) -> Response:
+    """Fetch recent occupancy events (latest 5 only) or serve SPA page on browser navigation."""
+    if "text/html" in request.headers.get("accept", "") and request.url.path == "/events":
+        return FileResponse(STATIC_DIR / "index.html")
     b_url = get_backend_url(request).rstrip("/")
     try:
         limit = int(request.query_params.get("limit", 5))
@@ -1478,6 +1514,7 @@ async def get_face_events(request: Request) -> JSONResponse:
                             "id": str(e.id),
                             "target_id": str(e.target_id) if e.target_id else None,
                             "video_source_id": str(e.video_source_id) if e.video_source_id else None,
+                            "camera_id": e.camera_id,
                             "track_id": e.track_id,
                             "frame_id": e.frame_id,
                             "similarity": e.similarity,

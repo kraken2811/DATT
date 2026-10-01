@@ -117,7 +117,9 @@ def test_audit_rejects_incomplete_event_schema(tmp_path, monkeypatch, missing_ta
     finally:
         db.dispose()
     result, errors = audit()
-    assert result["alembic_revision"] == "0007"
+    from alembic.script import ScriptDirectory
+    heads = ScriptDirectory.from_config(Config(str(Path(__file__).resolve().parents[1] / "src/db/alembic.ini"))).get_heads()
+    assert result["alembic_revision"] == ",".join(sorted(heads))
     assert "required_tables_missing" in errors
 
 
