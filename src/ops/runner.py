@@ -52,6 +52,15 @@ def main():
         def health():
             return {'status': 'ok', 'mode': args.mode, 'instance': args.token}
 
+        @app.get('/startup-health')
+        def startup_health():
+            # Observation only: do not import/initialize any business singleton.
+            threads = {t.name for t in threading.enumerate() if t.is_alive()}
+            return {
+                'notification_worker': 'RUNNING' if 'NotificationEmailWorker' in threads else 'STOPPED',
+                'persistence_worker': 'RUNNING' if 'DatabasePersistenceWorker' in threads else 'STOPPED',
+            }
+
         marker = runtime_dir() / (args.token + '.stop')
         if args.mode == 'api':
             import uvicorn
