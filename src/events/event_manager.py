@@ -72,6 +72,10 @@ class VehiclePassage:
     entered: bool = False
     in_zone: bool = False
     exited: bool = False
+    best_vehicle_crop_quality: float = -1.0
+    best_vehicle_frame_id: int = -1
+    last_crop_frame_id: int = -999
+    plate_state: Any = None
     best_vehicle_area: float = 0.0
     plate_confirmed_emitted: bool = False
     confirmed_plate: str = ""
@@ -183,7 +187,7 @@ class EventManager:
 
 
     def process_vehicle_frame(self, camera_id, vehicle_tracks, plate_results=None,
-                              in_zone_ids=None, zone_id=None, frame=None, video_source_id=None):
+                              in_zone_ids=None, zone_id=None, frame=None, video_source_id=None, frame_id=0):
         """Keep normal tracks in RAM; finalize through the existing watchlist gate."""
         start = time.perf_counter()
         now = time.time()
@@ -203,6 +207,12 @@ class EventManager:
                     vehicle_count += 1
                 key = (camera_id, tid)
                 passage = self._active_passages.get(key)
+                current_state = (plate_results or {}).get(tid)
+                if (passage is not None and passage.plate_state is not None and current_state is not None
+                        and getattr(passage.plate_state, 'generation', None) != getattr(current_state, 'generation', None)):
+                    self._finalize_vehicle(passage)
+                    del self._active_passages[key]
+                    passage = None
                 if passage is None:
                     passage = VehiclePassage(camera_id=camera_id, track_id=tid,
                         vehicle_type=CLASS_MAP.get(cid, 'vehicle'), first_seen=now, last_seen=now,
@@ -213,21 +223,23 @@ class EventManager:
                 passage.duration = max(0.0, now-passage.first_seen)
                 box = boxes[i]
                 area = float((box[2]-box[0])*(box[3]-box[1]))
-                if frame is not None and area > passage.best_vehicle_area:
+                if frame is not None and (passage.best_vehicle_image is None or frame_id-passage.last_crop_frame_id >= 10):
+                    passage.last_crop_frame_id = frame_id
                     x1,y1,x2,y2 = [max(0,int(v)) for v in box[:4]]
                     h,w = frame.shape[:2]; x2=min(w,x2); y2=min(h,y2)
                     if x2-x1 >= 30 and y2-y1 >= 30:
-                        passage.best_vehicle_area = area
-                        passage.best_vehicle_image = frame[y1:y2,x1:x2].copy()
+                        from src.ocr.plate_tracker import compute_ocr_job_quality
+                        crop = frame[y1:y2,x1:x2]
+                        quality = compute_ocr_job_quality(crop, (x1,y1,x2,y2), (w,h))
+                        if quality > passage.best_vehicle_crop_quality:
+                            passage.best_vehicle_area = area
+                            passage.best_vehicle_crop_quality = quality
+                            passage.best_vehicle_frame_id = frame_id
+                            passage.best_vehicle_image = crop.copy()
                 state = (plate_results or {}).get(tid)
-                # Preserve the existing OCR result selection/first-result contract.
-                if state is not None and state.plate_text and not passage.plate_confirmed_emitted:
-                    passage.plate_text = state.plate_text
-                    passage.plate_status = state.status
-                    passage.plate_confidence = state.confidence
-                    passage.best_plate_image = state.plate_crop
-                    passage.plate_confirmed_emitted = True
-                    passage.confirmed_plate = state.plate_text
+                if state is not None:
+                    passage.plate_state = state  # Collect a late worker result at finalization.
+                self._collect_confirmed_plate(passage)
         threshold = self._episodes.congestion(camera_id, vehicle_count, time.monotonic(), now, zone_id)
         if threshold:
             self._persist_threshold(camera_id, threshold, frame, video_source_id)
@@ -239,15 +251,27 @@ class EventManager:
         self.last_event_build_ms = (time.perf_counter()-start)*1000.0
         return emitted
 
+    @staticmethod
+    def _collect_confirmed_plate(passage):
+        state = passage.plate_state
+        if state is None or getattr(state, 'status', '') != 'CONFIRMED':
+            return
+        plate = getattr(state, 'confirmed_plate', '')
+        if not plate:
+            return
+        passage.plate_text = plate
+        passage.plate_status = 'CONFIRMED'
+        passage.plate_confidence = state.confidence
+        passage.best_plate_image = state.plate_crop
+        passage.confirmed_plate = plate
+        passage.plate_confirmed_emitted = True
+
     def _finalize_vehicle(self, passage):
         passage.exited = True
         passage.duration = max(0.0, passage.last_seen-passage.first_seen)
-        if passage.vehicle_color is None and passage.best_vehicle_image is not None:
-            try:
-                from src.recognition.color_extractor import extract_vehicle_color
-                passage.vehicle_color = extract_vehicle_color(passage.best_vehicle_image)
-            except Exception:
-                passage.vehicle_color = 'other/unknown'
+        self._collect_confirmed_plate(passage)
+        if not passage.confirmed_plate:
+            return
         self.db_worker.enqueue_passage(passage.to_dto(is_final=True),
             vehicle_crop=passage.best_vehicle_image, plate_crop=passage.best_plate_image, is_critical=True)
 

@@ -142,6 +142,7 @@ async def favicon() -> Response:
 
 @app.get("/", response_class=FileResponse)
 @app.get("/watchlist", response_class=FileResponse)
+@app.get("/alerts", response_class=FileResponse)
 async def serve_index() -> Response:
     """Serve the single-page monitoring dashboard."""
     index_file = STATIC_DIR / "index.html"
@@ -1313,6 +1314,8 @@ from src.cameras.api import router as cameras_router
 app.include_router(cameras_router)
 from src.event_center.api import router as event_center_router
 app.include_router(event_center_router)
+from src.notifications.alerts import router as alerts_router
+app.include_router(alerts_router)
 
 # Cache mapping event_id -> snapshot_path for fast lookup
 event_snapshot_cache: dict[str, str] = {}

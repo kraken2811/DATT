@@ -18,7 +18,7 @@ import cv2
 from src.storage import save_image
 import numpy as np
 from sqlalchemy import select
-from src.db.models import Target, VehicleWatchlist, FaceEvent
+from src.db.models import Target, VehicleWatchlist, FaceEvent, VehicleEvent
 from src.watchlists.vehicles import normalize_plate
 
 from src.db.database import Database
@@ -33,7 +33,7 @@ from src.db.repositories import (
 )
 from src.events.event_dto import BusinessEventDTO, FaceEventDTO, VehiclePassageDTO
 from src.events.policy import MEANINGFUL_EVENTS
-from src.recognition.color_extractor import extract_vehicle_color
+from src.recognition.color_extractor import analyze_vehicle_color
 
 logger = logging.getLogger("datt.events.db_worker")
 
@@ -234,6 +234,10 @@ class DatabaseWorker:
 
                 # Persist passages
                 for session_key, (dto, crops) in passages_by_key.items():
+                    if dto.plate_status != "CONFIRMED" or not dto.plate_text:
+                        continue
+                    if session.get(VehicleEvent, dto.id) is not None:
+                        continue  # Retry must not repeat evidence/color/notifications.
                     # Match the existing exact-plate ACTIVE watchlist contract before
                     # any snapshot, passage, detection or event is newly persisted.
                     target = session.scalar(select(VehicleWatchlist).where(
@@ -244,6 +248,15 @@ class DatabaseWorker:
                     veh_crop, plt_crop = crops if crops else (None, None)
                     best_veh_path = dto.best_vehicle_image_path
                     best_plt_path = dto.best_plate_image_path
+
+                    # Enrich only AFTER confirmed plate + ACTIVE exact match.
+                    # Do not trust a declared/watchlist color as an observation.
+                    v_color, color_confidence = 'unknown', 0.0
+                    if veh_crop is not None and getattr(veh_crop, 'size', 0) > 0:
+                        try:
+                            v_color, color_confidence = analyze_vehicle_color(veh_crop)
+                        except Exception:
+                            logger.warning('[DBWorker] Vehicle color unavailable')
 
                     # Asynchronously save evidence images if provided and not yet written
                     ts_compact = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
@@ -273,14 +286,6 @@ class DatabaseWorker:
                             logger.warning("[DBWorker] Failed to save plate crop: %s", e)
                             raise
 
-                    # Determine vehicle color
-                    v_color = dto.vehicle_color
-                    if not v_color and veh_crop is not None and getattr(veh_crop, "size", 0) > 0:
-                        try:
-                            v_color = extract_vehicle_color(veh_crop)
-                        except Exception:
-                            v_color = "other/unknown"
-
                     passage_repo.upsert_passage(
                         session_key=dto.session_key,
                         id=dto.id,
@@ -291,7 +296,7 @@ class DatabaseWorker:
                         vehicle_type=dto.vehicle_type,
                         vehicle_color=v_color,
                         vehicle_type_confidence=dto.vehicle_type_confidence,
-                        vehicle_color_confidence=dto.vehicle_color_confidence,
+                        vehicle_color_confidence=color_confidence,
                         plate_text=dto.plate_text,
                         plate_status=dto.plate_status,
                         plate_confidence=dto.plate_confidence,
@@ -378,7 +383,12 @@ class DatabaseWorker:
                                     idempotency_key=f'{dto.id}:VEHICLE_WATCHLIST_MATCH:{target.id}',
                                     metadata={'match_type':'PLATE','watchlist_target_id':str(target.id),
                                               'snapshot_path':best_plt_path or best_veh_path,
-                                              'vehicle_color':v_color,'location':dto.zone_id})
+                                              'vehicle_color':v_color,'detected_vehicle_color':v_color,
+                                              'detected_vehicle_color_confidence':color_confidence,
+                                              'watchlist_vehicle_color':target.vehicle_color,
+                                              'vehicle_type':dto.vehicle_type,'plate_number':dto.plate_text,
+                                              'plate_confidence':dto.plate_confidence,'track_id':dto.track_id,
+                                              'vehicle_event_id':str(dto.id),'location':dto.zone_id})
                                 try:
                                     with session.begin_nested():
                                         self.notifications.enqueue_vehicle(session, plate_event, match)

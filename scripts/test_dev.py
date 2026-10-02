@@ -7,9 +7,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SUITE = (
     'event_policy', 'camera_capture', 'snapshot_proxy', 'vehicle_watchlists',
-    'notifications', 'colab_install', 'colab_runtime_cell', 'colab_startup',
+    'notifications', 'alerts', 'colab_install', 'colab_runtime_cell', 'colab_startup',
     'database_pool_lifecycle', 'select_source_proxy', 'supabase_storage',
     'cli', 'web_server', 'youtube_vod_workflow',
+    'vehicle_color_flow', 'plate_consensus', 'async_plate_scheduling',
 )
 
 

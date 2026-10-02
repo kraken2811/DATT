@@ -2,6 +2,14 @@
 
 ## Overview
 
+Current extension (schema 0011): the existing CRUD accepts/returns nullable
+`vehicle_color` with values `black|white|gray|silver|red|blue|green|yellow|orange|brown|other`.
+The UI no longer edits `name`/`display_name` or `owner_info`; legacy API fields
+remain available. Matching is confirmed-plate-only, regardless of declared or
+detected color. See [current backend contract](vehicle-watchlist-backend.md)
+for event metadata and rollout requirements; the older examples below retain
+legacy fields for backward compatibility.
+
 This document specifies the unified **Vehicle Watchlist API Contract** for the DATT Intelligent Surveillance Platform. 
 It defines the endpoints, request/response payloads, error handling, and the end-to-end integration lifecycle linking License Plate Detection, OCR, Watchlist Matching, and Historical Detection Tracing.
 

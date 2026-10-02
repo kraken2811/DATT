@@ -2,10 +2,11 @@
 from datetime import timedelta, timezone
 import logging
 import threading
-from sqlalchemy import select
+from sqlalchemy import select, or_, and_
 from src.db.models import Notification, Target, FaceEvent, PlateEvent, VehicleWatchlist, VehicleWatchlistResult, utc_now
 from .config import EmailConfig
 from .email import SMTPEmailAdapter
+from .errors import delivery_error, RETRY_ERRORS
 
 log = logging.getLogger('datt.notifications')
 
@@ -18,6 +19,14 @@ class NotificationService:
         self._stop = threading.Event()
         self._thread = None
         log.info('[NOTIFICATIONS] CONFIGURED=%s', str(self.config.configured).lower())
+
+    def _retryable(self):
+        return and_(Notification.status == 'failed', Notification.error.in_(RETRY_ERRORS),
+                    Notification.retry_count < self.config.max_retries)
+
+    def _reserved(self):
+        # A failed attempt awaiting retry still reserves the original cooldown.
+        return or_(Notification.status.in_(('pending', 'sent')), self._retryable())
 
     def enqueue_face(self, session, event, dto):
         if event.decision != 'FACE_MATCH' or not event.target_id:
@@ -36,7 +45,7 @@ class NotificationService:
                 Notification.target_id == event.target_id,
                 Notification.camera_id == dto.camera_id,
                 Notification.channel == 'email', Notification.recipient == recipient,
-                Notification.status.in_(('pending', 'sent')),
+                self._reserved(),
                 Notification.created_at > now - timedelta(seconds=self.config.cooldown)).limit(1))
             status = 'failed' if not configured else ('suppressed' if recent else 'pending')
             timestamp = event.created_at
@@ -61,7 +70,7 @@ class NotificationService:
                 Notification.channel=='email',Notification.recipient==recipient)): continue
             recent=session.scalar(select(Notification.id).where(Notification.vehicle_watchlist_id==target.id,
                 Notification.camera_id==(match.camera_id or ''),Notification.channel=='email',Notification.recipient==recipient,
-                Notification.status.in_(('pending','sent')),Notification.created_at>now-timedelta(seconds=self.config.cooldown)).limit(1))
+                self._reserved(),Notification.created_at>now-timedelta(seconds=self.config.cooldown)).limit(1))
             status='failed' if not self.config.configured else ('suppressed' if recent else 'pending')
             session.add(Notification(plate_event_id=event.id,vehicle_watchlist_id=target.id,
                 camera_id=match.camera_id or '',channel='email',recipient=recipient,status=status,
@@ -80,7 +89,7 @@ class NotificationService:
         # No CV/persistence session is held here. Crash recovery is at-least-once.
         with self.db.transaction() as session:
             item = session.scalar(select(Notification).where(
-                Notification.status == 'pending', Notification.next_attempt_at <= now
+                or_(Notification.status == 'pending', self._retryable()), Notification.next_attempt_at <= now
             ).order_by(Notification.created_at).with_for_update(skip_locked=True).limit(1))
             if item is None: return False
             if item.plate_event_id:
@@ -93,17 +102,16 @@ class NotificationService:
             if not qualifies:
                 item.status, item.error = 'suppressed', 'event_not_match'
                 return True
+            if item.status == 'failed':
+                item.retry_count += 1
             try:
                 self.adapters[item.channel].send(item)
-            except Exception:
+            except Exception as exc:
                 # Never retain provider exception text (may contain credentials).
-                item.error = 'delivery_failed'
-                if item.retry_count >= self.config.max_retries:
-                    item.status = 'failed'
-                else:
-                    item.retry_count += 1
+                item.status, item.sent_at, item.error = 'failed', None, delivery_error(exc)
+                if item.retry_count < self.config.max_retries:
                     item.next_attempt_at = now + timedelta(seconds=min(
-                        3600, self.config.retry_seconds * 2 ** (item.retry_count - 1)))
+                        3600, self.config.retry_seconds * 2 ** item.retry_count))
             else:
                 item.status, item.sent_at, item.error = 'sent', utc_now(), None
         return True

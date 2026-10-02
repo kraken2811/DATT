@@ -4,6 +4,8 @@ from uuid import UUID
 from sqlalchemy import select, func
 from src.db.models import VehicleWatchlist, VehicleWatchlistResult, PlateEvent, VehicleEvent, DetectionEvent, utc_now
 
+VEHICLE_COLORS = frozenset(('black','white','gray','silver','red','blue','green','yellow','orange','brown','other'))
+
 
 def normalize_plate(value):
     return re.sub(r'[^A-Za-z0-9]', '', value or '').upper()
@@ -13,12 +15,17 @@ def fields(body, partial=False):
     if not isinstance(body, dict):
         raise ValueError('INVALID_INPUT')
     result = {}
-    defaults = dict(plate_number='', vehicle_type='car', display_name='', owner_info='', notes='', status='active')
+    defaults = dict(plate_number='', vehicle_type='car', vehicle_color=None, display_name='', owner_info='', notes='', status='active')
     body = dict(body)
     if 'name' in body: body['display_name'] = body['name']
     for key, default in defaults.items():
         if partial and key not in body: continue
         value = body.get(key, default)
+        if key == 'vehicle_color':
+            if value not in (None, '') and (not isinstance(value, str) or value not in VEHICLE_COLORS):
+                raise ValueError('INVALID_VEHICLE_COLOR')
+            result[key] = value or None
+            continue
         if not isinstance(value, str): raise ValueError('INVALID_INPUT')
         value = value.strip()
         if key == 'plate_number':
@@ -60,7 +67,7 @@ def serialize(session, item):
         PlateEvent.normalized_plate == item.plate_number)).one()
     def stamp(value): return value.strftime('%Y-%m-%d %H:%M:%S') if value else None
     return dict(id=str(item.id), plate_number=item.plate_number, normalized_plate=item.plate_number,
-        vehicle_type=item.vehicle_type, name=item.display_name, display_name=item.display_name,
+        vehicle_type=item.vehicle_type, vehicle_color=item.vehicle_color, name=item.display_name, display_name=item.display_name,
         owner_info=item.owner_info, notes=item.notes, status=item.status, image_path=None,
         created_at=stamp(item.created_at), updated_at=stamp(item.updated_at), detection_count=count, last_seen=stamp(last))
 

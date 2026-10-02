@@ -120,7 +120,7 @@ def test_db_worker_plate_event_integration(env):
     create(env); now=utc_now()
     dto=VehiclePassageDTO(id=uuid4(),session_key='vehicle-test',camera_id='gate-test',track_id=7,
         first_seen_at=now,last_seen_at=now,plate_text='29a-123.45',vehicle_type='car',is_final=True,
-        created_at=now,updated_at=now,finalized_at=now)
+        created_at=now,updated_at=now,finalized_at=now,plate_status='CONFIRMED')
     worker=DatabaseWorker(env[3],snapshot_dir=env[2]/'evidence')
     try:
         assert worker._persist_batch([('PASSAGE',dto,None)])

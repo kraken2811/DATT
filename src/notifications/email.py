@@ -1,5 +1,6 @@
 """Email adapter; other channels can implement the same send contract."""
 from .base import NotificationAdapter
+from .config import valid_address
 from email.message import EmailMessage
 import smtplib
 import ssl
@@ -46,6 +47,8 @@ class SMTPEmailAdapter:
 
     def send(self, item):
         c = self.config
+        if not valid_address(item.recipient):
+            raise smtplib.SMTPRecipientsRefused({})
         message = self.message(item)
         context = ssl.create_default_context()
         factory = smtplib.SMTP_SSL if c.tls == 'ssl' else smtplib.SMTP
@@ -55,4 +58,4 @@ class SMTPEmailAdapter:
             if c.tls == 'starttls': client.starttls(context=context)
             client.login(c.username, c.password)
             refused = client.send_message(message)
-            if refused: raise RuntimeError('recipient_rejected')
+            if refused: raise smtplib.SMTPRecipientsRefused(refused)

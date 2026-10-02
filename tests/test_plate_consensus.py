@@ -156,7 +156,7 @@ def test_3_same_frame_processed_multiple_times_does_not_confirm():
     assert not state.confirmed_plate
     assert [item["frame_id"] for item in state.plate_history] == [100]
     assert state.consensus_count == 1
-    assert state.vote_scores == {"24C14058": 1}
+    assert state.vote_scores == {"24C14058": pytest.approx(.9 * 1.85)}
 
 
 def test_4_multiple_preprocessing_variants_from_one_frame_count_once():
@@ -177,7 +177,7 @@ def test_4_multiple_preprocessing_variants_from_one_frame_count_once():
     assert not state.confirmed_plate
     assert [item["frame_id"] for item in state.plate_history] == [50]
     assert len(state.plate_history) == 1
-    assert state.vote_scores == {"24C14058": 1}
+    assert state.vote_scores == {"24C14058": pytest.approx(.9 * 1.85)}
 
 
 def test_5_second_observation_conflicts_does_not_confirm(caplog):
@@ -199,23 +199,25 @@ def test_5_second_observation_conflicts_does_not_confirm(caplog):
         # Frame 105 -> 24C14058 (Conflict!)
         st2 = manager.process_vehicle_tracks(frame, vehicle_tracks=tracks(track=30), frame_id=105)[30]
         # Neither is confirmed immediately
-        assert st2.status == "PROVISIONAL"
+        assert st2.status == "CHECKING"
         assert not st2.confirmed_plate
 
     assert "[PLATE_CONFLICT]" in caplog.text
 
 
-def test_6_third_observation_resolves_conflict(caplog):
-    """6. Third observation resolves conflict: correct plate becomes CONFIRMED.
+def test_6_conflict_requires_configured_agreement(caplog):
+    """6. Three agreeing observations out of four resolve the conflict.
     frame 100: 24C-140.59
     frame 105: 24C-140.58
     frame 110: 24C-140.58
+    frame 115: 24C-140.58
     -> CONFIRMED 24C14058
     """
     reader = Mock()
     reader.extract_license_plate.side_effect = [
         candidate("24C-140.59", confidence=0.70, quality=65),
         candidate("24C-140.58", confidence=0.85, quality=80),
+        candidate("24C-140.58", confidence=0.90, quality=85),
         candidate("24C-140.58", confidence=0.90, quality=85),
     ]
     manager = VehiclePlateManager(reader, eval_interval=1)
@@ -227,10 +229,13 @@ def test_6_third_observation_resolves_conflict(caplog):
         assert st1.plate_text == "24C14059"
 
         st2 = manager.process_vehicle_tracks(frame, vehicle_tracks=tracks(track=40), frame_id=105)[40]
-        assert st2.status == "PROVISIONAL"
+        assert st2.status == "CHECKING"
         assert not st2.confirmed_plate
 
         st3 = manager.process_vehicle_tracks(frame, vehicle_tracks=tracks(track=40), frame_id=110)[40]
+        assert st3.status == "CHECKING"  # 2/3 is below the existing 0.75 agreement gate.
+        assert not st3.confirmed_plate
+        st3 = manager.process_vehicle_tracks(frame, vehicle_tracks=tracks(track=40), frame_id=115)[40]
         assert st3.status == "CONFIRMED"
         assert st3.confirmed_plate == "24C14058"
         assert st3.plate_text == "24C14058"
@@ -258,7 +263,7 @@ def test_7_better_conflicting_candidate_replaces_provisional(caplog):
         st2 = manager.process_vehicle_tracks(frame, vehicle_tracks=tracks(track=50), frame_id=2)[50]
         assert st2.provisional_plate == "24C14058"
         assert st2.plate_text == "24C14058"
-        assert st2.status == "PROVISIONAL"
+        assert st2.status == "CHECKING"
 
     assert "action=REPLACE_PROVISIONAL" in caplog.text
 
@@ -283,7 +288,7 @@ def test_8_worse_conflicting_candidate_does_not_replace_provisional(caplog):
         # Stronger candidate remains provisional
         assert st2.provisional_plate == "24C14058"
         assert st2.plate_text == "24C14058"
-        assert st2.status == "PROVISIONAL"
+        assert st2.status == "CHECKING"
 
     assert "action=KEEP_CURRENT" in caplog.text
 

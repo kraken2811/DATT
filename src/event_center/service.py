@@ -15,7 +15,7 @@ def projection():
     notification=lambda kind,eid: select(func.max(case((Notification.status=='failed',4),(Notification.status=='pending',3),
         (Notification.status=='sent',2),(Notification.status=='suppressed',1),else_=0))).where(
         (Notification.event_id==eid) if kind=='face' else (Notification.plate_event_id==eid)).correlate_except(Notification).scalar_subquery()
-    def columns(model,kind,ts,camera,obj,target=None,plate=None,confidence=None,matched=None,evidence=None,notice=None,semantic=None,metadata=None):
+    def columns(model,kind,ts,camera,obj,target=None,plate=None,confidence=None,matched=None,evidence=None,notice=None,semantic=None,metadata=None,color=None):
         return [string(model.id).label('id'),literal(kind).label('event_type'),ts.label('timestamp'),string(camera).label('camera_id'),
             literal(obj).label('object_type'),string(target).label('target_id') if target is not None else empty().label('target_id'),
             string(plate).label('plate').label('plate') if plate is not None else empty().label('plate'),
@@ -24,7 +24,8 @@ def projection():
             string(evidence).label('evidence_key') if evidence is not None else empty().label('evidence_key'),
             notice.label('notification_rank') if notice is not None else literal(0).label('notification_rank'),
             (semantic if semantic is not None else literal(kind)).label('semantic_type'),
-            (string(metadata) if metadata is not None else literal('{}')).label('metadata')]
+            (string(metadata) if metadata is not None else literal('{}')).label('metadata'),
+            (string(color) if color is not None else empty()).label('detected_color')]
     def marker(model, field):
         return select(field).where(BusinessEvent.id==model.id).correlate(model).scalar_subquery()
     def grouped(model):
@@ -39,11 +40,11 @@ def projection():
         target=VehicleWatchlistResult.watchlist_id,plate=PlateEvent.plate_text,confidence=PlateEvent.confidence,
         matched=VehicleWatchlistResult.decision=='MATCH',evidence=func.coalesce(PlateEvent.plate_crop_path,VehicleEvent.vehicle_image_path),notice=notification('plate',PlateEvent.id),
         semantic=func.coalesce(marker(PlateEvent,BusinessEvent.event_type),literal('plate')),
-        metadata=marker(PlateEvent,BusinessEvent.event_metadata))).join(
+        metadata=marker(PlateEvent,BusinessEvent.event_metadata),color=VehicleEvent.vehicle_color)).join(
         VehicleEvent,PlateEvent.vehicle_event_id==VehicleEvent.id).outerjoin(DetectionEvent,VehicleEvent.detection_event_id==DetectionEvent.id).outerjoin(VehicleWatchlistResult,VehicleWatchlistResult.plate_event_id==PlateEvent.id)
-    vehicle=select(*columns(VehicleEvent,'vehicle',VehicleEvent.last_seen,DetectionEvent.camera_id,'vehicle',evidence=VehicleEvent.vehicle_image_path)).outerjoin(DetectionEvent,VehicleEvent.detection_event_id==DetectionEvent.id).where(~grouped(VehicleEvent))
+    vehicle=select(*columns(VehicleEvent,'vehicle',VehicleEvent.last_seen,DetectionEvent.camera_id,'vehicle',evidence=VehicleEvent.vehicle_image_path,color=VehicleEvent.vehicle_color)).outerjoin(DetectionEvent,VehicleEvent.detection_event_id==DetectionEvent.id).where(~grouped(VehicleEvent))
     passage=select(*columns(VehiclePassage,'passage',VehiclePassage.last_seen_at,VehiclePassage.camera_id,'vehicle',plate=VehiclePassage.plate_text,
-        confidence=VehiclePassage.plate_confidence,evidence=VehiclePassage.best_vehicle_image_path)).where(~grouped(VehiclePassage))
+        confidence=VehiclePassage.plate_confidence,evidence=VehiclePassage.best_vehicle_image_path,color=VehiclePassage.vehicle_color)).where(~grouped(VehiclePassage))
     business=select(*columns(BusinessEvent,'business',BusinessEvent.event_time,BusinessEvent.camera_id,'business',plate=BusinessEvent.plate_text,
         semantic=BusinessEvent.event_type,metadata=BusinessEvent.event_metadata,
         evidence=BusinessEvent.event_metadata['snapshot_path'].as_string())).where(
@@ -69,6 +70,10 @@ def serialize(row):
     metadata=json.loads(row.metadata) if row.metadata else {}
     if not isinstance(metadata,dict): metadata={}
     return dict(event_id=event_id,source_event_id=ident,event_type=row.event_type,semantic_type=row.semantic_type,metadata=metadata,
+        detected_vehicle_color=metadata.get('detected_vehicle_color', row.detected_color),
+        detected_vehicle_color_confidence=metadata.get('detected_vehicle_color_confidence'),
+        watchlist_vehicle_color=metadata.get('watchlist_vehicle_color'),
+        vehicle_type=metadata.get('vehicle_type'), track_id=metadata.get('track_id'),
         match_type=metadata.get('match_type'),timestamp=row.timestamp.isoformat(),camera_id=row.camera_id,
         object_type=row.object_type,target_id=str(UUID(row.target_id)) if row.target_id else None,plate=row.plate,confidence=row.confidence,
         similarity=row.confidence if row.event_type=='face' else None,watchlist_match=bool(row.watchlist_match),

@@ -173,7 +173,16 @@ VEHICLE_COLOR_NAMES = (
 
 
 def extract_vehicle_color(crop: np.ndarray | None) -> str:
+    """Backward-compatible label API using the unchanged vehicle HSV masks."""
+    label, _ = analyze_vehicle_color(crop)
+    return 'other/unknown' if label == 'unknown' else label
+
+
+def analyze_vehicle_color(crop: np.ndarray | None) -> tuple[str, float]:
     """Classify basic vehicle color from a cropped vehicle image using HSV.
+
+    Returns the label and winning classified-pixel fraction, not a calibrated
+    model probability. The existing masks and gray/silver ambiguity are retained.
 
     Categories:
     - 'white'
@@ -186,11 +195,11 @@ def extract_vehicle_color(crop: np.ndarray | None) -> str:
     - 'other/unknown'
     """
     if crop is None or not isinstance(crop, np.ndarray) or crop.size == 0:
-        return "other/unknown"
+        return "unknown", 0.0
 
     h, w = crop.shape[:2]
     if h < 10 or w < 10:
-        return "other/unknown"
+        return "unknown", 0.0
 
     # Focus on the vehicle body (exclude windshield/sky at top and wheels/asphalt at bottom)
     y1 = int(h * 0.20)
@@ -204,7 +213,7 @@ def extract_vehicle_color(crop: np.ndarray | None) -> str:
         body = crop[y1:y2, x1:x2]
 
     if body.size == 0:
-        return "other/unknown"
+        return "unknown", 0.0
 
     hsv = cv2.cvtColor(body, cv2.COLOR_BGR2HSV)
     H = hsv[:, :, 0]
@@ -237,10 +246,10 @@ def extract_vehicle_color(crop: np.ndarray | None) -> str:
 
     classified_pixels = sum(counts.values())
     if classified_pixels < 25:
-        return "other/unknown"
+        return "unknown", 0.0
 
     dominant_color, dominant_count = max(counts.items(), key=lambda item: item[1])
     if dominant_count / classified_pixels >= 0.18:
-        return dominant_color
+        return dominant_color, float(dominant_count / classified_pixels)
 
-    return "other/unknown"
+    return "unknown", 0.0

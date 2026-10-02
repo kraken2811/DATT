@@ -369,6 +369,7 @@ def run_pipeline(
                 zone_id="zone_1" if is_zone_on else None,
                 frame=frame,
                 video_source_id=getattr(active_cam, "video_source_id", None),
+                frame_id=curr_frame_id,
             )
             _t_event_build_ms = event_manager.last_event_build_ms
             _t_db_work_ms = event_manager.last_db_work_ms

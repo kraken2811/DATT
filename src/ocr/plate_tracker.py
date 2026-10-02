@@ -51,6 +51,8 @@ class PlateTrackState:
     provisional_frame_id: int = -1
     confirmed_plate: str = ""
     confirmed_frame_id: int = -1
+    raw_text: str = ""
+    normalized_text: str = ""
     candidate_text: str = ""
     consensus_count: int = 0
     last_result_frame: int = -1
@@ -81,6 +83,8 @@ class PlateTrackState:
             "provisional_frame_id": self.provisional_frame_id,
             "confirmed_plate": self.confirmed_plate,
             "confirmed_frame_id": self.confirmed_frame_id,
+            "raw_text": self.raw_text,
+            "normalized_text": self.normalized_text,
             "candidate_text": self.candidate_text,
             "consensus_count": self.consensus_count,
             "frame_id": self.frame_id,
@@ -399,116 +403,62 @@ class VehiclePlateManager:
             eligible = (valid and math.isfinite(cand.confidence) and math.isfinite(cand.quality_score)
                         and cand.confidence >= self.min_confidence and cand.quality_score >= self.min_quality)
 
-            if not eligible:
-                return
-
-            cand_score = round(float(cand.confidence * 100.0 + getattr(cand, "quality_score", 0.0)), 2)
-            plate_det_conf = getattr(job, "plate_det_conf", 0.0)
-
-            state.plate_history.append({"frame_id": job.frame_id, "raw_text": raw,
-                "normalized_text": normalized, "confidence": cand.confidence,
-                "quality": cand.quality_score, "score": cand_score, "eligible": True})
+            state.raw_text = raw
+            state.normalized_text = normalized
+            weight = float(cand.confidence) * (1.0 + max(0.0, min(100.0, float(cand.quality_score))) / 100.0) if eligible else 0.0
+            state.plate_history.append(dict(frame_id=job.frame_id, raw_text=raw,
+                normalized_text=normalized, confidence=float(cand.confidence),
+                crop_quality=float(cand.quality_score), quality=float(cand.quality_score),
+                score=weight, eligible=eligible))
             del state.plate_history[:-self.history_size]
-
-            votes = Counter(item["normalized_text"] for item in state.plate_history if item.get("eligible", True))
-            state.vote_scores = dict(votes)
-
-            # Stage 1: SEARCHING -> PROVISIONAL
-            if state.status == "SEARCHING":
-                state.status = "PROVISIONAL"
-                state.provisional_plate = normalized
-                state.provisional_confidence = cand.confidence
-                state.provisional_score = cand_score
+            observations = [item for item in state.plate_history if item['eligible']]
+            if not observations:
+                return
+            counts = Counter(item['normalized_text'] for item in observations)
+            scores = {plate: sum(item['score'] for item in observations if item['normalized_text'] == plate)
+                      for plate in counts}
+            state.vote_scores = scores
+            winner = max(scores, key=scores.get)
+            total = sum(scores.values())
+            # Require exact whole-string agreement; never infer characters from a
+            # watchlist or concatenate uncertain OCR fragments.
+            confirmed = (counts[winner] >= max(2, self.min_observations)
+                         and counts[winner] / len(state.plate_history) >= self.consensus_ratio
+                         and total > 0 and scores[winner] / total >= self.consensus_ratio
+                         and sum(v == scores[winner] for v in scores.values()) == 1)
+            state.consensus_count = counts[winner]
+            state.candidate_text = winner
+            previous_plate = state.provisional_plate
+            if winner != previous_plate:
                 state.provisional_frame_id = job.frame_id
-                state.plate_text = normalized  # Display immediately
-                state.confidence = cand.confidence
-                state.plate_quality = cand.quality_score
+            state.provisional_plate = winner
+            state.plate_text = winner
+            state.status = 'PROVISIONAL' if len(state.plate_history) == 1 else 'CHECKING'
+            if eligible and normalized == winner:
+                state.confidence = float(cand.confidence)
+                state.plate_quality = float(cand.quality_score)
                 state.plate_bbox_native = cand.bbox_native
                 state.plate_crop = cand.raw_crop
                 state.frame_id = job.frame_id
-                state.candidate_text = normalized
-                state.consensus_count = 1
-
-                logger.info(
-                    "[PLATE_PROVISIONAL] track_id=%s frame_id=%s raw=%s normalized=%s "
-                    "ocr_conf=%.3f plate_det_conf=%.3f score=%.2f",
-                    job.track_id, job.frame_id, raw, normalized,
-                    cand.confidence, plate_det_conf, cand_score)
-                return
-
-            # Stage 2: PROVISIONAL -> CONFIRMED (or Conflict Handling)
-            if state.status in ("PROVISIONAL", "CHECKING"):
-                if normalized == state.provisional_plate:
-                    state.status = "CONFIRMED"
-                    state.confirmed_plate = normalized
-                    state.confirmed_frame_id = job.frame_id
-                    state.plate_text = normalized
-                    state.candidate_text = normalized
-                    state.consensus_count = votes[normalized]
-                    if cand.quality_score >= state.plate_quality:
-                        state.confidence = cand.confidence
-                        state.plate_quality = cand.quality_score
-                        state.plate_bbox_native = cand.bbox_native
-                        state.plate_crop = cand.raw_crop
-                        state.frame_id = job.frame_id
-
-                    if self._worker is not None:
-                        self._worker.discard(job.track_id)
-
-                    first_frame = state.provisional_frame_id
-                    logger.info(
-                        "[PLATE_CONFIRM] track_id=%s first_frame=%s confirm_frame=%s plate=%s observations=%s",
-                        job.track_id, first_frame, job.frame_id, normalized, votes[normalized])
-                else:
-                    if votes[normalized] >= self.min_observations:
-                        state.status = "CONFIRMED"
-                        state.confirmed_plate = normalized
-                        state.confirmed_frame_id = job.frame_id
-                        state.plate_text = normalized
-                        state.candidate_text = normalized
-                        state.consensus_count = votes[normalized]
-                        if cand.quality_score >= state.plate_quality:
-                            state.confidence = cand.confidence
-                            state.plate_quality = cand.quality_score
-                            state.plate_bbox_native = cand.bbox_native
-                            state.plate_crop = cand.raw_crop
-                            state.frame_id = job.frame_id
-
-                        if self._worker is not None:
-                            self._worker.discard(job.track_id)
-
-                        first_matching_frame = [
-                            it["frame_id"] for it in state.plate_history if it["normalized_text"] == normalized
-                        ][0]
-                        logger.info(
-                            "[PLATE_CONFIRM] track_id=%s first_frame=%s confirm_frame=%s plate=%s observations=%s",
-                            job.track_id, first_matching_frame, job.frame_id, normalized, votes[normalized])
-                    else:
-                        current_plate = state.provisional_plate
-                        current_score = state.provisional_score
-
-                        if cand_score > current_score:
-                            action = "REPLACE_PROVISIONAL"
-                            state.provisional_plate = normalized
-                            state.provisional_confidence = cand.confidence
-                            state.provisional_score = cand_score
-                            state.provisional_frame_id = job.frame_id
-                            state.plate_text = normalized
-                            state.confidence = cand.confidence
-                            state.plate_quality = cand.quality_score
-                            state.plate_bbox_native = cand.bbox_native
-                            state.plate_crop = cand.raw_crop
-                            state.frame_id = job.frame_id
-                            state.candidate_text = normalized
-                            state.consensus_count = votes[normalized]
-                        elif cand_score < current_score:
-                            action = "KEEP_CURRENT"
-                        else:
-                            action = "WAIT_FOR_TIEBREAK"
-
-                        logger.info(
-                            "[PLATE_CONFLICT] track_id=%s current_plate=%s current_score=%.2f new_plate=%s new_score=%.2f action=%s",
-                            job.track_id, current_plate, current_score, normalized, cand_score, action)
+                state.provisional_confidence = state.confidence
+                state.provisional_score = weight
+            # Only confirm on an actual winning observation so its evidence crop
+            # cannot come from a competing plate.
+            if confirmed and eligible and normalized == winner:
+                support = [item for item in observations if item['normalized_text'] == winner]
+                state.confidence = sum(item['confidence'] * item['score'] for item in support) / scores[winner]
+                state.status = 'CONFIRMED'
+                state.confirmed_plate = winner
+                state.confirmed_frame_id = job.frame_id
+                if self._worker is not None:
+                    self._worker.discard(job.track_id)
+                logger.info('[PLATE_CONFIRM] track_id=%s first_frame=%s confirm_frame=%s plate=%s observations=%s',
+                            job.track_id, state.provisional_frame_id, job.frame_id, winner, counts[winner])
+            elif len(state.plate_history) == 1:
+                logger.info('[PLATE_PROVISIONAL] track_id=%s normalized=%s', job.track_id, winner)
+            elif len(counts) > 1:
+                logger.info('[PLATE_CONFLICT] track_id=%s action=%s', job.track_id,
+                            'REPLACE_PROVISIONAL' if previous_plate != winner else 'KEEP_CURRENT')
 
     # ------------------------------------------------------------------
     # Public API

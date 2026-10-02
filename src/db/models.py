@@ -279,6 +279,7 @@ class VehicleWatchlist(Identity, Base):
     __table_args__ = (CheckConstraint("status IN ('active','disabled')", name="vehicle_watchlist_status"),)
     plate_number: Mapped[str] = mapped_column(String(100), unique=True)
     vehicle_type: Mapped[str] = mapped_column(String(100), default="car")
+    vehicle_color: Mapped[str | None] = mapped_column(String(20), nullable=True)
     display_name: Mapped[str] = mapped_column(String(255), default="")
     owner_info: Mapped[str] = mapped_column(Text, default="")
     notes: Mapped[str] = mapped_column(Text, default="")

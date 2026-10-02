@@ -6,6 +6,7 @@
     <title>DATT — HỆ THỐNG GIÁM SÁT THÔNG MINH</title>
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
     <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/alerts.css">
 </head>
 <body>
 
@@ -855,7 +856,7 @@
                     <div class="watchlist-toolbar">
                         <div class="toolbar-search-box">
                             <span class="search-input-icon">🔍</span>
-                            <input type="text" id="vehicleSearchInput" class="toolbar-input" placeholder="Tìm biển số, tên, chủ xe...">
+                            <input type="text" id="vehicleSearchInput" class="toolbar-input" placeholder="Tìm biển số, ghi chú...">
                         </div>
                         <div class="toolbar-filters">
                             <select id="vehicleTypeFilter" class="toolbar-select">
@@ -916,13 +917,12 @@
                                     <tr>
                                         <th style="width: 150px;">Biển số</th>
                                         <th style="width: 120px;">Loại phương tiện</th>
-                                        <th>Tên / Gợi nhớ</th>
-                                        <th>Chủ phương tiện</th>
+                                        <th>Màu sắc</th>
                                         <th style="width: 110px;">Trạng thái</th>
                                         <th style="width: 100px;">Số lần phát hiện</th>
                                         <th style="width: 140px;">Lần cuối</th>
                                         <th style="width: 150px;">Ngày thêm</th>
-                                        <th style="width: 80px; text-align: center;">Actions</th>
+                                        <th style="width: 80px; text-align: center;">Chi tiết</th>
                                     </tr>
                                 </thead>
                                 <tbody id="vehicleTableBody">
@@ -1432,8 +1432,8 @@
                                 <tr>
                                     <th style="width: 150px;">THỜI GIAN</th>
                                     <th style="width: 120px;">CAMERA</th>
-                                    <th style="width: 100px;">LOẠI SỰ KIỆN</th>
-                                    <th style="width: 100px;">ĐỐI TƯỢNG</th>
+                                    <th id="eventKindColorHeader" style="width: 100px;">LOẠI / MÀU XE</th>
+                                    <th id="eventObjectHeader" style="width: 100px;">ĐỐI TƯỢNG</th>
                                     <th style="width: 160px;">TARGET / BIỂN SỐ</th>
                                     <th style="width: 140px;">TƯƠNG ĐỒNG / TIN CẬY</th>
                                     <th style="width: 130px;">WATCHLIST MATCH</th>
@@ -1731,7 +1731,7 @@
                 </div>
                 <div class="drawer-sub-meta">
                     <span id="vehicleDrawerType" class="vehicle-type-tag">🚗 Ô tô</span>
-                    <span id="vehicleDrawerName" class="meta-name-tag">Xe đối tượng</span>
+                    <span id="vehicleDrawerColor" class="meta-name-tag">Chưa khai báo</span>
                 </div>
             </div>
             <button type="button" id="btnCloseVehicleDrawer" class="drawer-close-btn" title="Đóng">&times;</button>
@@ -1741,10 +1741,7 @@
             <!-- Vehicle Info Card -->
             <div class="drawer-section">
                 <div class="drawer-meta-list">
-                    <div class="drawer-meta-row">
-                        <span class="meta-row-label">Chủ phương tiện:</span>
-                        <span id="vehicleDrawerOwner" class="meta-row-val font-semibold">--</span>
-                    </div>
+
                     <div class="drawer-meta-row">
                         <span class="meta-row-label">Ghi chú theo dõi:</span>
                         <span id="vehicleDrawerNotes" class="meta-row-val">--</span>
@@ -2123,15 +2120,7 @@
                     </div>
                 </div>
 
-                <div class="form-group">
-                    <label for="inputNewVehicleName" class="input-label">Tên / Tên gợi nhớ</label>
-                    <input type="text" id="inputNewVehicleName" class="text-input" placeholder="Ví dụ: Xe cần theo dõi đặc biệt">
-                </div>
-
-                <div class="form-group">
-                    <label for="inputNewVehicleOwner" class="input-label">Thông tin chủ phương tiện</label>
-                    <input type="text" id="inputNewVehicleOwner" class="text-input" placeholder="Họ tên, đơn vị quản lý, SĐT...">
-                </div>
+<div class="form-group"><label for="selectNewVehicleColor" class="input-label">Màu sắc xe</label><select id="selectNewVehicleColor" class="select-input"><option value="">Chưa khai báo</option><option value="black">Đen</option><option value="white">Trắng</option><option value="gray">Xám</option><option value="silver">Bạc</option><option value="red">Đỏ</option><option value="blue">Xanh dương</option><option value="green">Xanh lá</option><option value="yellow">Vàng</option><option value="orange">Cam</option><option value="brown">Nâu</option><option value="other">Khác</option></select></div>
 
                 <div class="form-group">
                     <label for="inputNewVehicleNotes" class="input-label">Ghi chú</label>
@@ -2188,15 +2177,7 @@
                     </div>
                 </div>
 
-                <div class="form-group">
-                    <label for="inputEditVehicleName" class="input-label">Tên / Tên gợi nhớ</label>
-                    <input type="text" id="inputEditVehicleName" class="text-input" placeholder="Ví dụ: Xe cần theo dõi đặc biệt">
-                </div>
-
-                <div class="form-group">
-                    <label for="inputEditVehicleOwner" class="input-label">Thông tin chủ phương tiện</label>
-                    <input type="text" id="inputEditVehicleOwner" class="text-input" placeholder="Họ tên, đơn vị quản lý, SĐT...">
-                </div>
+<div class="form-group"><label for="selectEditVehicleColor" class="input-label">Màu sắc xe</label><select id="selectEditVehicleColor" class="select-input"><option value="">Chưa khai báo</option><option value="black">Đen</option><option value="white">Trắng</option><option value="gray">Xám</option><option value="silver">Bạc</option><option value="red">Đỏ</option><option value="blue">Xanh dương</option><option value="green">Xanh lá</option><option value="yellow">Vàng</option><option value="orange">Cam</option><option value="brown">Nâu</option><option value="other">Khác</option></select></div>
 
                 <div class="form-group">
                     <label for="inputEditVehicleNotes" class="input-label">Ghi chú</label>
@@ -2422,7 +2403,110 @@
         </div>
     </div>
 
+
+    <div id="alertsScreen" class="view-screen event-center-screen" style="display:none;">
+      <div class="app-layout">
+            <aside class="sidebar">
+                <div class="sidebar-brand-box">
+                    <div class="selection-badge">AI VISION MONITOR</div>
+                    <h2 class="brand-title">DATT</h2>
+                    <p class="brand-subtitle">HỆ THỐNG GIÁM SÁT THÔNG MINH</p>
+                </div>
+
+                <!-- Primary Platform Navigation -->
+                <nav class="primary-nav-menu">
+                    <button type="button" class="nav-item-btn" data-nav="dashboard">
+                        <span class="nav-icon">📊</span>
+                        <span class="nav-label">Dashboard</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="camera">
+                        <span class="nav-icon">📹</span>
+                        <span class="nav-label">Camera</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="live">
+                        <span class="nav-icon">🔴</span>
+                        <span class="nav-label">Live View</span>
+                    </button>
+                    <button type="button" class="nav-item-btn " data-nav="events">
+                        <span class="nav-icon">📋</span>
+                        <span class="nav-label">Event Center</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="watchlist">
+                        <span class="nav-icon">🎯</span>
+                        <span class="nav-label">Watchlist</span>
+                    </button>
+                    <button type="button" class="nav-item-btn active" data-nav="alerts">
+                        <span class="nav-icon">🔔</span>
+                        <span class="nav-label">Alerts</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="analytics">
+                        <span class="nav-icon">📈</span>
+                        <span class="nav-label">Analytics</span>
+                    </button>
+                    <button type="button" class="nav-item-btn" data-nav="settings">
+                        <span class="nav-icon">⚙️</span>
+                        <span class="nav-label">Settings</span>
+                    </button>
+                </nav>
+
+            </aside>
+        <main class="main-content">
+          <header class="content-header-row">
+            <div class="header-title-group">
+              <div class="page-title-badge">EMAIL DELIVERY HISTORY</div>
+              <h1 class="page-title">TRUNG TÂM CẢNH BÁO — ALERT CENTER</h1>
+              <p class="page-subtitle">Tự làm mới mỗi 10 giây khi mở trang (polling). Đã gửi = SMTP đã chấp nhận email.</p>
+            </div>
+            <button id="alertsRefresh" type="button" class="secondary-btn">↻ Làm mới</button>
+          </header>
+          <form id="alertsFilters" class="event-controls-card">
+            <div class="event-filters-grid">
+              <div class="filter-group"><label for="alertsStatus">Trạng thái gửi</label>
+                <select id="alertsStatus" class="select-input">
+                  <option value="">Tất cả trạng thái</option><option value="PENDING">Đang chờ gửi</option>
+                  <option value="SENT">Đã gửi</option><option value="FAILED">Gửi thất bại</option>
+                  <option value="SUPPRESSED">Không gửi (đã chặn)</option>
+                </select></div>
+              <div class="filter-group"><label for="alertsType">Loại cảnh báo</label>
+                <select id="alertsType" class="select-input"><option value="">Tất cả loại</option>
+                  <option value="FACE_WATCHLIST_MATCH">Face Watchlist Match</option>
+                  <option value="VEHICLE_WATCHLIST_MATCH">Vehicle Watchlist Match</option></select></div>
+              <div class="filter-group"><label for="alertsCamera">Camera ID</label>
+                <input id="alertsCamera" class="text-input" placeholder="Tất cả camera" maxlength="255"></div>
+              <button type="submit" class="primary-btn">Áp dụng bộ lọc</button>
+            </div>
+          </form>
+          <p id="alertsFeedback" role="status" aria-live="polite"></p>
+          <div class="event-table-container"><div class="data-table-wrapper">
+            <table class="data-table"><thead><tr><th>LOẠI CẢNH BÁO</th><th>CAMERA</th><th>EMAIL NGƯỜI NHẬN</th>
+              <th>TRẠNG THÁI</th><th>THỜI GIAN GỬI</th><th>THỜI GIAN TẠO</th><th>CHI TIẾT</th></tr></thead>
+              <tbody id="alertsBody"></tbody></table>
+          </div><div class="pagination-footer"><span id="alertsPage">Trang 1</span><div class="pagination-controls">
+            <button id="alertsPrev" class="pagination-btn" disabled>‹ Trước</button>
+            <button id="alertsNext" class="pagination-btn" disabled>Sau ›</button>
+          </div></div></div>
+          <section id="alertDetail" hidden aria-label="Chi tiết thông báo">
+            <div class="content-header-row"><h2>Chi tiết email</h2><button id="alertDetailClose" class="secondary-btn" type="button">Đóng</button></div>
+            <p id="alertDetailStatus" role="status"></p>
+            <dl id="alertDetailFields" hidden>
+              <div class="drawer-meta-row"><dt>Notification ID</dt><dd id="alertDetailId"></dd></div>
+              <div class="drawer-meta-row"><dt>Loại cảnh báo</dt><dd id="alertDetailType"></dd></div>
+              <div class="drawer-meta-row"><dt>Camera</dt><dd id="alertDetailCamera"></dd></div>
+              <div class="drawer-meta-row"><dt>Người nhận</dt><dd id="alertDetailRecipient"></dd></div>
+              <div class="drawer-meta-row"><dt>Target / biển số</dt><dd id="alertDetailTarget"></dd></div>
+              <div class="drawer-meta-row"><dt>Tạo lúc</dt><dd id="alertDetailCreated"></dd></div>
+              <div class="drawer-meta-row"><dt>Gửi lúc</dt><dd id="alertDetailSent"></dd></div>
+              <div class="drawer-meta-row"><dt>Lỗi / lý do</dt><dd id="alertDetailError"></dd></div>
+              <div class="drawer-meta-row"><dt>Số lần thử lại</dt><dd id="alertDetailRetries"></dd></div>
+              <div class="drawer-meta-row"><dt>Sự kiện nguồn</dt><dd><a id="alertEventLink">Xem Event</a></dd></div>
+            </dl>
+          </section>
+        </main>
+      </div>
+    </div>
+
     <!-- Main JavaScript Application -->
+    <script src="/static/alerts.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>

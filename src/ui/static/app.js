@@ -30,7 +30,8 @@
         ERROR: "ERROR",
         WATCHLIST: "WATCHLIST",
         CAMERA_MANAGEMENT: "CAMERA_MANAGEMENT",
-        EVENT_CENTER: "EVENT_CENTER"
+        EVENT_CENTER: "EVENT_CENTER",
+        ALERTS: "ALERTS"
     };
 
     // Client State
@@ -139,8 +140,6 @@
         vehicleDrawerPlateBadge: document.getElementById("vehicleDrawerPlateBadge"),
         vehicleDrawerStatus: document.getElementById("vehicleDrawerStatus"),
         vehicleDrawerType: document.getElementById("vehicleDrawerType"),
-        vehicleDrawerName: document.getElementById("vehicleDrawerName"),
-        vehicleDrawerOwner: document.getElementById("vehicleDrawerOwner"),
         vehicleDrawerNotes: document.getElementById("vehicleDrawerNotes"),
         vehicleDrawerCreatedAt: document.getElementById("vehicleDrawerCreatedAt"),
         vehicleDrawerDetectionCount: document.getElementById("vehicleDrawerDetectionCount"),
@@ -178,8 +177,6 @@
         plateNormalizedBadge: document.getElementById("plateNormalizedBadge"),
         selectNewVehicleType: document.getElementById("selectNewVehicleType"),
         selectNewVehicleStatus: document.getElementById("selectNewVehicleStatus"),
-        inputNewVehicleName: document.getElementById("inputNewVehicleName"),
-        inputNewVehicleOwner: document.getElementById("inputNewVehicleOwner"),
         inputNewVehicleNotes: document.getElementById("inputNewVehicleNotes"),
         addVehicleFeedback: document.getElementById("addVehicleFeedback"),
         btnSubmitAddVehicleWatchlist: document.getElementById("btnSubmitAddVehicleWatchlist"),
@@ -292,8 +289,6 @@
         badgeEditVehiclePlate: document.getElementById("badgeEditVehiclePlate"),
         selectEditVehicleType: document.getElementById("selectEditVehicleType"),
         selectEditVehicleStatus: document.getElementById("selectEditVehicleStatus"),
-        inputEditVehicleName: document.getElementById("inputEditVehicleName"),
-        inputEditVehicleOwner: document.getElementById("inputEditVehicleOwner"),
         inputEditVehicleNotes: document.getElementById("inputEditVehicleNotes"),
         editVehicleFeedback: document.getElementById("editVehicleFeedback"),
 
@@ -530,6 +525,9 @@
         state.uiState = newState;
         meta = meta || {};
 
+        window.DattAlerts.setActive(newState === UI_STATE.ALERTS);
+        document.getElementById("alertsScreen").style.display = "none";
+
         // Hide all screens first
         DOM.selectionScreen.style.display = "none";
         DOM.connectingScreen.style.display = "none";
@@ -584,6 +582,11 @@
             stopConnectionPolling();
             updateActiveNavHighlight("camera");
             loadManagementCameras();
+        } else if (newState === UI_STATE.ALERTS) {
+            document.getElementById("alertsScreen").style.display = "block";
+            stopMonitoringTimers();
+            stopConnectionPolling();
+            updateActiveNavHighlight("alerts");
         } else if (newState === UI_STATE.EVENT_CENTER) {
             if (DOM.eventCenterScreen) DOM.eventCenterScreen.style.display = "block";
             stopMonitoringTimers();
@@ -2056,7 +2059,8 @@
             history.pushState(null, "", url.toString());
             setUiState(UI_STATE.EVENT_CENTER);
         } else if (navKey === "alerts") {
-            showWatchlistBanner("Hệ thống Cảnh báo (Alerts Engine): Đang theo dõi các sự kiện thời gian thực.", "warning");
+            history.pushState(null, "", "/alerts");
+            setUiState(UI_STATE.ALERTS);
         } else if (navKey === "analytics") {
             showWatchlistBanner("Phân tích Thống kê (Analytics): Đang tổng hợp số liệu phát hiện.", "info");
         } else if (navKey === "settings") {
@@ -2346,9 +2350,8 @@
             filtered = filtered.filter(v => {
                 const plateMatch = (v.plate_number || "").toLowerCase().includes(search);
                 const normMatch = (v.normalized_plate || "").toLowerCase().includes(search);
-                const nameMatch = (v.name || "").toLowerCase().includes(search);
-                const ownerMatch = (v.owner_info || "").toLowerCase().includes(search);
-                return plateMatch || normMatch || nameMatch || ownerMatch;
+                const notesMatch = (v.notes || "").toLowerCase().includes(search);
+                return plateMatch || normMatch || notesMatch;
             });
         }
 
@@ -2388,13 +2391,7 @@
                     <td>
                         <span class="vehicle-type-tag">${typeLabel}</span>
                     </td>
-                    <td>
-                        <span class="table-target-name">${escapeHtml(v.name || "--")}</span>
-                        ${v.notes ? `<span class="table-target-sub">${escapeHtml(v.notes)}</span>` : ""}
-                    </td>
-                    <td>
-                        <span style="font-size: 0.82rem; color: var(--text-primary); font-weight: 500;">${escapeHtml(v.owner_info || "--")}</span>
-                    </td>
+                    <td>${escapeHtml(vehicleColorLabel(v.vehicle_color))}</td>
                     <td>
                         <span class="status-pill ${statusClass}">${statusText}</span>
                     </td>
@@ -2589,9 +2586,8 @@
         if (DOM.vehicleToggleBtnText) {
             DOM.vehicleToggleBtnText.textContent = isActive ? "Tạm ngưng" : "Kích hoạt";
         }
+        document.getElementById("vehicleDrawerColor").textContent = vehicleColorLabel(vehicle.vehicle_color);
         if (DOM.vehicleDrawerType) DOM.vehicleDrawerType.textContent = getVehicleTypeLabel(vehicle.vehicle_type);
-        if (DOM.vehicleDrawerName) DOM.vehicleDrawerName.textContent = vehicle.name || "--";
-        if (DOM.vehicleDrawerOwner) DOM.vehicleDrawerOwner.textContent = vehicle.owner_info || "--";
         if (DOM.vehicleDrawerNotes) DOM.vehicleDrawerNotes.textContent = vehicle.notes || "--";
         if (DOM.vehicleDrawerCreatedAt) DOM.vehicleDrawerCreatedAt.textContent = formatDateTime(vehicle.created_at);
 
@@ -2734,12 +2730,11 @@
         }
         if (!vehicle) return;
 
+        document.getElementById("selectEditVehicleColor").value = vehicle.vehicle_color || "";
         if (DOM.inputEditVehicleId) DOM.inputEditVehicleId.value = vehicle.id;
         if (DOM.badgeEditVehiclePlate) DOM.badgeEditVehiclePlate.textContent = vehicle.plate_number;
         if (DOM.selectEditVehicleType) DOM.selectEditVehicleType.value = vehicle.vehicle_type || "car";
         if (DOM.selectEditVehicleStatus) DOM.selectEditVehicleStatus.value = vehicle.status || "active";
-        if (DOM.inputEditVehicleName) DOM.inputEditVehicleName.value = vehicle.name || vehicle.display_name || "";
-        if (DOM.inputEditVehicleOwner) DOM.inputEditVehicleOwner.value = vehicle.owner_info || "";
         if (DOM.inputEditVehicleNotes) DOM.inputEditVehicleNotes.value = vehicle.notes || "";
         if (DOM.editVehicleFeedback) DOM.editVehicleFeedback.textContent = "";
 
@@ -2756,8 +2751,7 @@
         const payload = {
             vehicle_type: DOM.selectEditVehicleType ? DOM.selectEditVehicleType.value : "car",
             status: DOM.selectEditVehicleStatus ? DOM.selectEditVehicleStatus.value : "active",
-            display_name: (DOM.inputEditVehicleName ? DOM.inputEditVehicleName.value : "").trim(),
-            owner_info: (DOM.inputEditVehicleOwner ? DOM.inputEditVehicleOwner.value : "").trim(),
+            vehicle_color: document.getElementById("selectEditVehicleColor").value || null,
             notes: (DOM.inputEditVehicleNotes ? DOM.inputEditVehicleNotes.value : "").trim()
         };
 
@@ -3019,8 +3013,6 @@
         const plate = plateInput ? plateInput.value.trim().toUpperCase() : "";
         const vType = DOM.selectNewVehicleType ? DOM.selectNewVehicleType.value : "car";
         const status = DOM.selectNewVehicleStatus ? DOM.selectNewVehicleStatus.value : "active";
-        const name = DOM.inputNewVehicleName ? DOM.inputNewVehicleName.value.trim() : "";
-        const owner = DOM.inputNewVehicleOwner ? DOM.inputNewVehicleOwner.value.trim() : "";
         const notes = DOM.inputNewVehicleNotes ? DOM.inputNewVehicleNotes.value.trim() : "";
         const feedbackEl = DOM.addVehicleFeedback;
 
@@ -3057,8 +3049,7 @@
                     plate_number: plate,
                     vehicle_type: vType,
                     status: status,
-                    name: name,
-                    owner_info: owner,
+                    vehicle_color: document.getElementById("selectNewVehicleColor").value || null,
                     notes: notes
                 })
             });
@@ -3091,10 +3082,9 @@
     }
 
     function resetAddVehicleForm() {
+        document.getElementById('selectNewVehicleColor').value = '';
         if (DOM.inputNewVehiclePlate) DOM.inputNewVehiclePlate.value = "";
         if (DOM.plateNormalizedBadge) DOM.plateNormalizedBadge.textContent = "--";
-        if (DOM.inputNewVehicleName) DOM.inputNewVehicleName.value = "";
-        if (DOM.inputNewVehicleOwner) DOM.inputNewVehicleOwner.value = "";
         if (DOM.inputNewVehicleNotes) DOM.inputNewVehicleNotes.value = "";
         if (DOM.selectNewVehicleType) DOM.selectNewVehicleType.value = "car";
         if (DOM.selectNewVehicleStatus) DOM.selectNewVehicleStatus.value = "active";
@@ -4293,6 +4283,12 @@
     /**
      * Render Events Table Rows. Missing values must display "--". Never invent metadata.
      */
+    function vehicleColorLabel(color) {
+        const labels = {black:'Đen',white:'Trắng',gray:'Xám',silver:'Bạc','gray/silver':'Xám / bạc',
+            red:'Đỏ',blue:'Xanh dương',green:'Xanh lá',yellow:'Vàng',orange:'Cam',brown:'Nâu',other:'Khác',unknown:'Không xác định'};
+        return labels[color] || 'Chưa có dữ liệu';
+    }
+
     function renderEventTable(events) {
         if (!DOM.eventTableBody) return;
 
@@ -4301,6 +4297,10 @@
             return;
         }
 
+        const filterType = eventCenterState.currentTab === 'all' ? eventCenterState.filters.eventType : eventCenterState.currentTab;
+        const vehicleOnly = ['plate','vehicle','passage'].includes(filterType);
+        document.getElementById('eventKindColorHeader').textContent = vehicleOnly ? 'MÀU XE' : filterType === 'face' ? 'LOẠI SỰ KIỆN' : 'LOẠI / MÀU XE';
+        document.getElementById('eventObjectHeader').hidden = vehicleOnly;
         DOM.eventTableBody.innerHTML = events.map(ev => {
             const timeStr = ev.timestamp ? formatDateTime(ev.timestamp) : "--";
             const camId = ev.camera_id || "--";
@@ -4318,6 +4318,9 @@
                 evTypeBadge = `<span class="event-type-badge ${escapeHtml(evType)}">${escapeHtml(ev.semantic_type)}</span>`;
             }
 
+            if (['plate','vehicle','passage'].includes(evType)) {
+                evTypeBadge = escapeHtml(vehicleColorLabel(ev.detected_vehicle_color));
+            }
             // Target or Plate display
             let targetPlateHtml = "--";
             if (ev.plate) {
@@ -4374,7 +4377,7 @@
                     <td>
                         ${evTypeBadge}
                     </td>
-                    <td>
+                    <td ${vehicleOnly ? "hidden" : ""}>
                         <span style="font-size: 0.83rem;">${escapeHtml(objType)}</span>
                     </td>
                     <td>
@@ -4529,6 +4532,17 @@
                 } else {
                     DOM.evDrawerExtendedText.textContent = `Phương tiện: Camera ${ev.camera_id || '--'}, Đối tượng ${ev.object_type || '--'}`;
                 }
+            }
+
+            if (DOM.evDrawerExtendedText && ['plate','vehicle','passage'].includes(ev.event_type)) {
+                DOM.evDrawerExtendedText.textContent = [
+                    `Biển số confirmed: ${ev.plate || '--'}`,
+                    `Loại xe: ${ev.vehicle_type || '--'}`,
+                    `Màu Watchlist: ${vehicleColorLabel(ev.watchlist_vehicle_color)}`,
+                    `Màu detected: ${vehicleColorLabel(ev.detected_vehicle_color)}`,
+                    `Tin cậy màu (tỷ lệ pixel): ${ev.detected_vehicle_color_confidence == null ? '--' : (Number(ev.detected_vehicle_color_confidence)*100).toFixed(1)+'%'}`,
+                    `Track ID: ${ev.track_id ?? '--'}`
+                ].join(' · ');
             }
 
             // Evidence Loading: MUST use /api/event_center/events/{type}:{uuid}/evidence
@@ -4710,6 +4724,11 @@
         const urlParams = new URLSearchParams(window.location.search);
         const path = window.location.pathname;
 
+        if (path === "/alerts" || urlParams.get("view") === "alerts") {
+            setUiState(UI_STATE.ALERTS);
+            return;
+        }
+
         // Route: /cameras or /camera-management or query param
         if (path === "/cameras" || path === "/camera-management" || urlParams.has("camera_management") || urlParams.get("view") === "cameras") {
             setUiState(UI_STATE.CAMERA_MANAGEMENT);
@@ -4869,6 +4888,7 @@
         initWatchlistEvents();
         initCameraManagementEvents();
         initEventCenterEvents();
+        window.DattAlerts.init(apiUrl);
 
         // Listen to browser history navigation
         window.addEventListener("popstate", () => {

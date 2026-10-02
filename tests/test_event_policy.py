@@ -109,7 +109,7 @@ def test_vehicle_existing_plate_contract_and_no_normal_evidence(worker,plate,act
     now=datetime.now(timezone.utc)
     dto=VehiclePassageDTO(id=uuid4(),session_key=str(uuid4()),camera_id='a',track_id=3,
         first_seen_at=now,last_seen_at=now,is_final=True,finalized_at=now,
-        plate_text=plate,vehicle_color='white',best_vehicle_image_path='data/events/vehicle-test.jpg')
+        plate_text=plate,plate_status='CONFIRMED',vehicle_color='white',best_vehicle_image_path='data/events/vehicle-test.jpg')
     with patch('src.events.db_worker.save_image') as image:
         assert worker._persist_batch([('PASSAGE',dto,(None,None))])
         assert worker._persist_batch([('PASSAGE',dto,(None,None))])
