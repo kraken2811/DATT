@@ -12,6 +12,7 @@ Tests all 6 required scenarios:
 
 from collections import namedtuple
 from pathlib import Path
+from importlib.util import find_spec
 import sys
 import unittest
 from unittest.mock import patch
@@ -50,13 +51,13 @@ class TestLiveFaceRecAndCounterSync(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         """Load sample face images for realistic testing."""
-        face_path = PROJECT_ROOT / "venv" / "Lib" / "site-packages" / "insightface" / "data" / "images" / "Tom_Hanks_54745.png"
+        face_path = Path(find_spec("insightface").origin).parent / "data" / "images" / "Tom_Hanks_54745.png"
         if not face_path.is_file():
             raise FileNotFoundError(f"Missing test face image at {face_path}")
         cls.target_face_img = cv2.imread(str(face_path))
         assert cls.target_face_img is not None, "Failed to read target face image"
 
-        scene_path = PROJECT_ROOT / "venv" / "Lib" / "site-packages" / "insightface" / "data" / "images" / "t1.jpg"
+        scene_path = Path(find_spec("insightface").origin).parent / "data" / "images" / "t1.jpg"
         assert scene_path.is_file(), f"Missing scene image at {scene_path}"
         cls.scene_img = cv2.imread(str(scene_path))
         assert cls.scene_img is not None, "Failed to read scene image"

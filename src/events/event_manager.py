@@ -1,10 +1,4 @@
-"""Event Engine for DATT - People Counter and Vehicle Passage Tracker.
-
-Monitors runtime occupancy and vehicle passages, generates structured
-business events (VEHICLE_ENTER, PLATE_RECOGNIZED, ZONE_ENTER, ZONE_EXIT, VEHICLE_EXIT),
-and saves vehicle passages asynchronously to PostgreSQL via dedicated DB worker.
-Debug telemetry (OCR_ATTEMPT, WAIT_CADENCE, NO_PLATE_DETECTED) is strictly filtered.
-"""
+"""Per-camera meaningful events; normal detections remain transient in RAM."""
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -14,6 +8,7 @@ from uuid import UUID, uuid4
 
 import numpy as np
 
+from src.events.policy import ThresholdEpisodes, MEANINGFUL_EVENTS
 from src.events.db_worker import DatabaseWorker
 from src.events.event_dto import BusinessEventDTO, FaceEventDTO, VehiclePassageDTO
 from src.events.event_storage import EventStorage, event_storage
@@ -25,14 +20,7 @@ SIGNIFICANT_CHANGE = 5
 STABLE_TIME_SECONDS = 5.0
 SNAPSHOT_INTERVAL_SECONDS = 60.0
 
-VALID_BUSINESS_EVENTS = {
-    "VEHICLE_ENTER",
-    "PLATE_RECOGNIZED",
-    "ZONE_ENTER",
-    "ZONE_EXIT",
-    "VEHICLE_EXIT",
-    "PEOPLE_COUNT_CHANGED",
-}
+VALID_BUSINESS_EVENTS = MEANINGFUL_EVENTS
 
 CLASS_MAP = {
     2: "car",
@@ -163,7 +151,8 @@ class EventManager:
         self._candidate_since: float = 0.0
         self._last_report_time: float = time.time()
 
-        self._active_passages: dict[int, VehiclePassage] = {}
+        self._active_passages: dict[tuple[str, int], VehiclePassage] = {}
+        self._episodes = ThresholdEpisodes()
         self._emitted_face_tracks: set[str] = set()
         self.last_event_build_ms: float = 0.0
         self.last_db_work_ms: float = 0.0
@@ -171,354 +160,97 @@ class EventManager:
         # Dedicated PostgreSQL background persistence worker (zero realtime I/O)
         self.db_worker = db_worker or DatabaseWorker()
 
-    def process_frame(
-        self,
-        camera_id: str,
-        people_count: int,
-        annotated_frame: np.ndarray | None = None,
-        video_source_id: UUID | str | None = None,
-    ) -> dict[str, Any] | None:
-        """Evaluate occupancy count on new frame and trigger event if changed."""
-        t_eb_0 = time.perf_counter()
-        now_ts = time.time()
+    def process_frame(self, camera_id, people_count, annotated_frame=None, video_source_id=None, location=None):
+        """Persist only a continuously sustained crowd threshold episode."""
+        start = time.perf_counter()
+        event = self._episodes.people(camera_id, people_count, time.monotonic(), time.time(), location)
+        self.last_db_work_ms = 0.0
+        if event:
+            self._persist_threshold(camera_id, event, annotated_frame, video_source_id)
+        self.last_event_build_ms = (time.perf_counter() - start) * 1000.0
+        return event
 
-        if self._last_people_count is None or self._last_camera_id != camera_id:
-            self._last_people_count = people_count
-            self._last_camera_id = camera_id
-            self._last_saved_count = people_count
-            self._last_report_time = now_ts
-            self.state.update(last_saved_people_count=people_count)
-            self.last_event_build_ms = (time.perf_counter() - t_eb_0) * 1000.0
-            return None
+    def _persist_threshold(self, camera_id, event, frame, video_source_id):
+        start = time.perf_counter()
+        event['camera_id'] = camera_id
+        event['type'] = event['event_type']
+        dto = BusinessEventDTO(id=uuid4(), passage_id=None, camera_id=camera_id,
+            video_source_id=_parse_uuid(video_source_id), event_type=event['event_type'],
+            event_time=datetime.fromtimestamp(event['timestamp'], timezone.utc),
+            idempotency_key=f"{event['event_type']}:{camera_id}:{event['episode']}", metadata=event)
+        self.db_worker.enqueue_business_event(dto, snapshot=frame, is_critical=True)
+        self.last_db_work_ms = (time.perf_counter() - start) * 1000.0
 
-        self._last_people_count = people_count
-        old_count = self._last_saved_count if self._last_saved_count is not None else people_count
-        significant = abs(people_count - old_count) >= SIGNIFICANT_CHANGE
-        periodic = now_ts - self._last_report_time >= self.event_report_interval
-        if not significant and not periodic:
-            if people_count != old_count:
-                self.state.record_filtered_event()
-                logger.info("[DATT EVENT FILTER] Ignored: %d -> %d; Reason: normal fluctuation", old_count, people_count)
-            self._candidate_count = None
-            self.last_event_build_ms = (time.perf_counter() - t_eb_0) * 1000.0
-            return None
 
-        if self._candidate_count != people_count:
-            self._candidate_count, self._candidate_since = people_count, now_ts
-            self.last_event_build_ms = (time.perf_counter() - t_eb_0) * 1000.0
-            return None
-        if now_ts - self._candidate_since < STABLE_TIME_SECONDS:
-            self.last_event_build_ms = (time.perf_counter() - t_eb_0) * 1000.0
-            return None
-
-        new_count = people_count
-        self._last_saved_count = new_count
-        self._last_report_time = now_ts
-        self._candidate_count = None
-
-        now = datetime.now(timezone.utc)
-        timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S")
-
-        event_data = {
-            "time": timestamp_str,
-            "camera": camera_id,
-            "type": "PEOPLE_COUNT_CHANGED",
-            "old_count": old_count,
-            "new_count": new_count,
-        }
-
-        self.last_event_build_ms = (time.perf_counter() - t_eb_0) * 1000.0
-
-        # Non-blocking enqueue to DB worker
-        t_db_0 = time.perf_counter()
-        ev_dto = BusinessEventDTO(
-            id=uuid4(),
-            passage_id=None,
-            camera_id=camera_id,
-            video_source_id=_parse_uuid(video_source_id),
-            event_type="PEOPLE_COUNT_CHANGED",
-            event_time=now,
-            idempotency_key=f"PEOPLE:{camera_id}:{timestamp_str}",
-            metadata={"old_count": old_count, "new_count": new_count},
-        )
-        self.db_worker.enqueue_business_event(ev_dto, is_critical=True)
-        self.last_db_work_ms = (time.perf_counter() - t_db_0) * 1000.0
-
-        logger.info(
-            "[DATT EVENT] Saved occupancy event: [%s] Camera '%s' People Changed: %d -> %d",
-            timestamp_str,
-            camera_id,
-            old_count,
-            new_count,
-        )
-        return event_data
-
-    def process_vehicle_frame(
-        self,
-        camera_id: str,
-        vehicle_tracks: Any,
-        plate_results: dict[int, Any] | None = None,
-        in_zone_ids: Any = None,
-        zone_id: str | None = None,
-        frame: np.ndarray | None = None,
-        video_source_id: UUID | str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Evaluate vehicle passage lifecycle and emit business events (non-blocking)."""
-        t_eb_0 = time.perf_counter()
-        now_ts = time.time()
-        v_src_uuid = _parse_uuid(video_source_id)
-        emitted_events: list[dict[str, Any]] = []
-
-        active_tracker_ids = set()
-        xyxy = getattr(vehicle_tracks, "xyxy", None)
-        tracker_ids = getattr(vehicle_tracks, "tracker_id", None)
-        class_ids = getattr(vehicle_tracks, "class_id", None)
-        confidences = getattr(vehicle_tracks, "confidence", None)
-
-        t_db_accum = 0.0
-
-        if tracker_ids is not None and xyxy is not None:
-            for idx, tid in enumerate(tracker_ids):
+    def process_vehicle_frame(self, camera_id, vehicle_tracks, plate_results=None,
+                              in_zone_ids=None, zone_id=None, frame=None, video_source_id=None):
+        """Keep normal tracks in RAM; finalize through the existing watchlist gate."""
+        start = time.perf_counter()
+        now = time.time()
+        emitted = []
+        ids = getattr(vehicle_tracks, 'tracker_id', None)
+        boxes = getattr(vehicle_tracks, 'xyxy', None)
+        classes = getattr(vehicle_tracks, 'class_id', None)
+        confidences = getattr(vehicle_tracks, 'confidence', None)
+        vehicle_count = 0
+        if ids is not None and boxes is not None:
+            for i, tid in enumerate(ids):
                 if tid is None:
                     continue
-                tid_int = int(tid)
-                active_tracker_ids.add(tid_int)
-                box = xyxy[idx]
-                box_area = float((box[2] - box[0]) * (box[3] - box[1]))
-                cid = int(class_ids[idx]) if class_ids is not None and idx < len(class_ids) else 2
-                v_type = CLASS_MAP.get(cid, "vehicle")
-                v_conf = float(confidences[idx]) if confidences is not None and idx < len(confidences) else None
-
-                passage = self._active_passages.get(tid_int)
+                tid = int(tid)
+                cid = int(classes[i]) if classes is not None else 2
+                if cid in (2, 3) and (in_zone_ids is None or tid in in_zone_ids):
+                    vehicle_count += 1
+                key = (camera_id, tid)
+                passage = self._active_passages.get(key)
                 if passage is None:
-                    # NEW TRACK appearance -> start new VehiclePassage
-                    passage_id = uuid4()
-                    session_key = f"{camera_id}:{tid_int}:{int(now_ts * 1000)}"
+                    passage = VehiclePassage(camera_id=camera_id, track_id=tid,
+                        vehicle_type=CLASS_MAP.get(cid, 'vehicle'), first_seen=now, last_seen=now,
+                        video_source_id=_parse_uuid(video_source_id), zone_id=zone_id,
+                        vehicle_type_confidence=float(confidences[i]) if confidences is not None else None)
+                    self._active_passages[key] = passage
+                passage.last_seen = now
+                passage.duration = max(0.0, now-passage.first_seen)
+                box = boxes[i]
+                area = float((box[2]-box[0])*(box[3]-box[1]))
+                if frame is not None and area > passage.best_vehicle_area:
+                    x1,y1,x2,y2 = [max(0,int(v)) for v in box[:4]]
+                    h,w = frame.shape[:2]; x2=min(w,x2); y2=min(h,y2)
+                    if x2-x1 >= 30 and y2-y1 >= 30:
+                        passage.best_vehicle_area = area
+                        passage.best_vehicle_image = frame[y1:y2,x1:x2].copy()
+                state = (plate_results or {}).get(tid)
+                # Preserve the existing OCR result selection/first-result contract.
+                if state is not None and state.plate_text and not passage.plate_confirmed_emitted:
+                    passage.plate_text = state.plate_text
+                    passage.plate_status = state.status
+                    passage.plate_confidence = state.confidence
+                    passage.best_plate_image = state.plate_crop
+                    passage.plate_confirmed_emitted = True
+                    passage.confirmed_plate = state.plate_text
+        threshold = self._episodes.congestion(camera_id, vehicle_count, time.monotonic(), now, zone_id)
+        if threshold:
+            self._persist_threshold(camera_id, threshold, frame, video_source_id)
+            emitted.append(threshold)
+        for key, passage in list(self._active_passages.items()):
+            if key[0] == camera_id and now-passage.last_seen > 3.0:
+                self._finalize_vehicle(passage)
+                del self._active_passages[key]
+        self.last_event_build_ms = (time.perf_counter()-start)*1000.0
+        return emitted
 
-                    # Initial vehicle crop
-                    initial_veh_crop = None
-                    if frame is not None:
-                        bx1, by1, bx2, by2 = [max(0, int(v)) for v in box[:4]]
-                        vh, vw = frame.shape[:2]
-                        bx2, by2 = min(vw, bx2), min(vh, by2)
-                        if (bx2 - bx1) >= 30 and (by2 - by1) >= 30:
-                            initial_veh_crop = frame[by1:by2, bx1:bx2].copy()
+    def _finalize_vehicle(self, passage):
+        passage.exited = True
+        passage.duration = max(0.0, passage.last_seen-passage.first_seen)
+        if passage.vehicle_color is None and passage.best_vehicle_image is not None:
+            try:
+                from src.recognition.color_extractor import extract_vehicle_color
+                passage.vehicle_color = extract_vehicle_color(passage.best_vehicle_image)
+            except Exception:
+                passage.vehicle_color = 'other/unknown'
+        self.db_worker.enqueue_passage(passage.to_dto(is_final=True),
+            vehicle_crop=passage.best_vehicle_image, plate_crop=passage.best_plate_image, is_critical=True)
 
-                    passage = VehiclePassage(
-                        id=passage_id,
-                        session_key=session_key,
-                        camera_id=camera_id,
-                        track_id=tid_int,
-                        video_source_id=v_src_uuid,
-                        vehicle_type=v_type,
-                        vehicle_type_confidence=v_conf,
-                        first_seen=now_ts,
-                        last_seen=now_ts,
-                        entered=True,
-                        best_vehicle_area=box_area,
-                        best_vehicle_image=initial_veh_crop,
-                    )
-                    self._active_passages[tid_int] = passage
-
-
-                    ev = {
-                        "type": "VEHICLE_ENTER",
-                        "track_id": tid_int,
-                        "camera_id": camera_id,
-                        "timestamp": now_ts,
-                        "vehicle_type": v_type,
-                    }
-                    emitted_events.append(ev)
-
-                    # Enqueue VEHICLE_ENTER business event & initial passage record (non-blocking)
-                    t_db_s = time.perf_counter()
-                    ev_dto = BusinessEventDTO(
-                        id=uuid4(),
-                        passage_id=passage.id,
-                        camera_id=camera_id,
-                        video_source_id=passage.video_source_id,
-                        zone_id=passage.zone_id,
-                        track_id=tid_int,
-                        event_type="VEHICLE_ENTER",
-                        event_time=datetime.fromtimestamp(now_ts, tz=timezone.utc),
-                        vehicle_type=v_type,
-                        idempotency_key=f"{passage.id}:VEHICLE_ENTER",
-                        metadata=ev,
-                    )
-                    self.db_worker.enqueue_business_event(ev_dto, is_critical=True)
-                    self.db_worker.enqueue_passage(passage.to_dto(), is_critical=False)
-                    t_db_accum += (time.perf_counter() - t_db_s) * 1000.0
-
-                passage.last_seen = now_ts
-                passage.duration = max(0.0, now_ts - passage.first_seen)
-
-                # Update best vehicle crop in RAM (zero synchronous disk I/O)
-                if frame is not None and box_area > passage.best_vehicle_area:
-                    passage.best_vehicle_area = box_area
-                    bx1, by1, bx2, by2 = [max(0, int(v)) for v in box[:4]]
-                    vh, vw = frame.shape[:2]
-                    bx2, by2 = min(vw, bx2), min(vh, by2)
-                    if (bx2 - bx1) >= 30 and (by2 - by1) >= 30:
-                        passage.best_vehicle_image = frame[by1:by2, bx1:bx2].copy()
-
-                # Check PLATE_RECOGNIZED transition (strict duplicate suppression)
-                if plate_results and tid_int in plate_results:
-                    p_state = plate_results[tid_int]
-                    p_text = getattr(p_state, "plate_text", "")
-                    p_status = getattr(p_state, "status", "SEARCHING")
-                    p_conf = float(getattr(p_state, "confidence", 0.0))
-                    p_crop = getattr(p_state, "plate_crop", None)
-
-                    if p_text and not passage.plate_confirmed_emitted:
-                        passage.plate_text = p_text
-                        passage.plate_status = p_status
-                        passage.plate_confidence = p_conf
-                        passage.best_plate_image = p_crop
-                        passage.plate_confirmed_emitted = True
-                        passage.confirmed_plate = p_text
-
-                        ev = {
-                            "type": "PLATE_RECOGNIZED",
-                            "track_id": tid_int,
-                            "plate_text": passage.plate_text,
-                            "confidence": passage.plate_confidence,
-                            "camera_id": camera_id,
-                            "timestamp": now_ts,
-                        }
-                        emitted_events.append(ev)
-
-                        t_db_s = time.perf_counter()
-                        ev_dto = BusinessEventDTO(
-                            id=uuid4(),
-                            passage_id=passage.id,
-                            camera_id=camera_id,
-                            video_source_id=passage.video_source_id,
-                            zone_id=passage.zone_id,
-                            track_id=tid_int,
-                            event_type="PLATE_RECOGNIZED",
-                            event_time=datetime.fromtimestamp(now_ts, tz=timezone.utc),
-                            vehicle_type=passage.vehicle_type,
-                            plate_text=passage.plate_text,
-                            direction=passage.direction if passage.direction != "UNKNOWN" else None,
-                            idempotency_key=f"{passage.id}:PLATE_RECOGNIZED:{passage.plate_text}",
-                            metadata=ev,
-                        )
-                        self.db_worker.enqueue_business_event(ev_dto, is_critical=True)
-                        self.db_worker.enqueue_passage(passage.to_dto(), plate_crop=passage.best_plate_image, is_critical=True)
-                        t_db_accum += (time.perf_counter() - t_db_s) * 1000.0
-
-                # Check ZONE_ENTER / ZONE_EXIT transitions
-                if in_zone_ids is not None:
-                    in_zone = (tid_int in in_zone_ids)
-                    if in_zone and not passage.in_zone:
-                        passage.in_zone = True
-                        passage.zone_id = zone_id or "zone_1"
-                        ev = {
-                            "type": "ZONE_ENTER",
-                            "track_id": tid_int,
-                            "zone_id": passage.zone_id,
-                            "camera_id": camera_id,
-                            "timestamp": now_ts,
-                        }
-                        emitted_events.append(ev)
-                        t_db_s = time.perf_counter()
-                        ev_dto = BusinessEventDTO(
-                            id=uuid4(),
-                            passage_id=passage.id,
-                            camera_id=camera_id,
-                            video_source_id=passage.video_source_id,
-                            zone_id=passage.zone_id,
-                            track_id=tid_int,
-                            event_type="ZONE_ENTER",
-                            event_time=datetime.fromtimestamp(now_ts, tz=timezone.utc),
-                            vehicle_type=passage.vehicle_type,
-                            plate_text=passage.plate_text or None,
-                            idempotency_key=f"{passage.id}:ZONE_ENTER:{passage.zone_id}",
-                            metadata=ev,
-                        )
-                        self.db_worker.enqueue_business_event(ev_dto, is_critical=True)
-                        t_db_accum += (time.perf_counter() - t_db_s) * 1000.0
-                    elif not in_zone and passage.in_zone:
-                        passage.in_zone = False
-                        ev = {
-                            "type": "ZONE_EXIT",
-                            "track_id": tid_int,
-                            "zone_id": passage.zone_id,
-                            "camera_id": camera_id,
-                            "timestamp": now_ts,
-                        }
-                        emitted_events.append(ev)
-                        t_db_s = time.perf_counter()
-                        ev_dto = BusinessEventDTO(
-                            id=uuid4(),
-                            passage_id=passage.id,
-                            camera_id=camera_id,
-                            video_source_id=passage.video_source_id,
-                            zone_id=passage.zone_id,
-                            track_id=tid_int,
-                            event_type="ZONE_EXIT",
-                            event_time=datetime.fromtimestamp(now_ts, tz=timezone.utc),
-                            vehicle_type=passage.vehicle_type,
-                            plate_text=passage.plate_text or None,
-                            idempotency_key=f"{passage.id}:ZONE_EXIT:{passage.zone_id}",
-                            metadata=ev,
-                        )
-                        self.db_worker.enqueue_business_event(ev_dto, is_critical=True)
-                        t_db_accum += (time.perf_counter() - t_db_s) * 1000.0
-
-        # Check expired / lost tracks for VEHICLE_EXIT (timeout 3.0s)
-        expired_ids = []
-        for tid, passage in self._active_passages.items():
-            if (now_ts - passage.last_seen) > 3.0:
-                expired_ids.append(tid)
-
-        for tid in expired_ids:
-            passage = self._active_passages.pop(tid)
-            passage.exited = True
-            if passage.vehicle_color is None and passage.best_vehicle_image is not None:
-                try:
-                    from src.recognition.color_extractor import extract_vehicle_color
-                    passage.vehicle_color = extract_vehicle_color(passage.best_vehicle_image)
-                except Exception:
-                    passage.vehicle_color = "other/unknown"
-
-            ev = {
-                "type": "VEHICLE_EXIT",
-                "track_id": tid,
-                "camera_id": camera_id,
-                "duration": passage.duration,
-                "timestamp": now_ts,
-            }
-            emitted_events.append(ev)
-
-            t_db_s = time.perf_counter()
-            ev_dto = BusinessEventDTO(
-                id=uuid4(),
-                passage_id=passage.id,
-                camera_id=camera_id,
-                video_source_id=passage.video_source_id,
-                zone_id=passage.zone_id,
-                track_id=tid,
-                event_type="VEHICLE_EXIT",
-                event_time=datetime.fromtimestamp(now_ts, tz=timezone.utc),
-                vehicle_type=passage.vehicle_type,
-                plate_text=passage.plate_text or None,
-                direction=passage.direction if passage.direction != "UNKNOWN" else None,
-                idempotency_key=f"{passage.id}:VEHICLE_EXIT",
-                metadata=ev,
-            )
-            self.db_worker.enqueue_business_event(ev_dto, is_critical=True)
-            self.db_worker.enqueue_passage(
-                passage.to_dto(is_final=True),
-                vehicle_crop=passage.best_vehicle_image,
-                plate_crop=passage.best_plate_image,
-                is_critical=True,
-            )
-            t_db_accum += (time.perf_counter() - t_db_s) * 1000.0
-
-        self.last_event_build_ms = (time.perf_counter() - t_eb_0) * 1000.0
-        self.last_db_work_ms = t_db_accum
-        return emitted_events
 
     def process_face_matches(
         self,
@@ -591,7 +323,7 @@ class EventManager:
             )
             self.db_worker.enqueue_face_event(dto, face_crop=face_crop, is_critical=True)
             ev = {
-                "type": "FACE_MATCH",
+                "type": "FACE_WATCHLIST_MATCH",
                 "id": str(dto.id),
                 "track_id": int(tid),
                 "target_id": str(target_uuid) if target_uuid else target_id_str,
@@ -606,54 +338,14 @@ class EventManager:
 
         return emitted
 
-    def reset(self) -> None:
-        """Reset internal tracking count and finalize any active passages."""
-        now_ts = time.time()
-        self._emitted_face_tracks.clear()
-        for tid, passage in list(self._active_passages.items()):
-            passage.exited = True
-            passage.last_seen = now_ts
-            passage.duration = max(0.0, now_ts - passage.first_seen)
-            if passage.vehicle_color is None and passage.best_vehicle_image is not None:
-                try:
-                    from src.recognition.color_extractor import extract_vehicle_color
-                    passage.vehicle_color = extract_vehicle_color(passage.best_vehicle_image)
-                except Exception:
-                    passage.vehicle_color = "other/unknown"
-            dto = passage.to_dto(is_final=True)
-            self.db_worker.enqueue_passage(
-                dto,
-                vehicle_crop=passage.best_vehicle_image,
-                plate_crop=passage.best_plate_image,
-                is_critical=True,
-            )
-            ev = {
-                "type": "VEHICLE_EXIT",
-                "track_id": tid,
-                "camera_id": passage.camera_id,
-                "duration": passage.duration,
-                "timestamp": now_ts,
-            }
-            ev_dto = BusinessEventDTO(
-                id=uuid4(),
-                passage_id=passage.id,
-                camera_id=passage.camera_id,
-                zone_id=passage.zone_id,
-                track_id=tid,
-                event_type="VEHICLE_EXIT",
-                event_time=datetime.fromtimestamp(now_ts, tz=timezone.utc),
-                vehicle_type=passage.vehicle_type,
-                plate_text=passage.plate_text or None,
-                direction=passage.direction if passage.direction != "UNKNOWN" else None,
-                idempotency_key=f"{passage.id}:VEHICLE_EXIT",
-                metadata=ev,
-            )
-            self.db_worker.enqueue_business_event(ev_dto, is_critical=True)
+    def reset(self):
+        """Finalize pending vehicle sessions and end continuity on a source reset."""
+        for passage in self._active_passages.values():
+            self._finalize_vehicle(passage)
         self._active_passages.clear()
-        self._last_people_count = None
-        self._last_camera_id = None
-        self._last_saved_count = None
-        self._candidate_count = None
+        self._episodes.reset()
+        self._emitted_face_tracks.clear()
+
 
 
     def stop(self) -> None:

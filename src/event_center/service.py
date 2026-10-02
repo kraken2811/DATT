@@ -1,6 +1,7 @@
 """SQL UNION projection: no event copies, CV hooks, or binary DB payloads."""
 from datetime import datetime,timezone
 from uuid import UUID
+import json
 from sqlalchemy import select,union_all,literal,cast,String,Float,Boolean,func,case,or_
 from src.db.models import FaceEvent,PlateEvent,VehicleEvent,VehiclePassage,BusinessEvent,DetectionEvent,Notification,VehicleWatchlistResult
 from src.watchlists.vehicles import normalize_plate
@@ -14,25 +15,43 @@ def projection():
     notification=lambda kind,eid: select(func.max(case((Notification.status=='failed',4),(Notification.status=='pending',3),
         (Notification.status=='sent',2),(Notification.status=='suppressed',1),else_=0))).where(
         (Notification.event_id==eid) if kind=='face' else (Notification.plate_event_id==eid)).correlate_except(Notification).scalar_subquery()
-    def columns(model,kind,ts,camera,obj,target=None,plate=None,confidence=None,matched=None,evidence=None,notice=None):
+    def columns(model,kind,ts,camera,obj,target=None,plate=None,confidence=None,matched=None,evidence=None,notice=None,semantic=None,metadata=None):
         return [string(model.id).label('id'),literal(kind).label('event_type'),ts.label('timestamp'),string(camera).label('camera_id'),
             literal(obj).label('object_type'),string(target).label('target_id') if target is not None else empty().label('target_id'),
             string(plate).label('plate').label('plate') if plate is not None else empty().label('plate'),
             cast(confidence,Float).label('confidence') if confidence is not None else cast(literal(None),Float).label('confidence'),
             cast(matched,Boolean).label('watchlist_match') if matched is not None else literal(False).label('watchlist_match'),
             string(evidence).label('evidence_key') if evidence is not None else empty().label('evidence_key'),
-            notice.label('notification_rank') if notice is not None else literal(0).label('notification_rank')]
+            notice.label('notification_rank') if notice is not None else literal(0).label('notification_rank'),
+            (semantic if semantic is not None else literal(kind)).label('semantic_type'),
+            (string(metadata) if metadata is not None else literal('{}')).label('metadata')]
+    def marker(model, field):
+        return select(field).where(BusinessEvent.id==model.id).correlate(model).scalar_subquery()
+    def grouped(model):
+        return select(BusinessEvent.id).where(BusinessEvent.passage_id==model.id,
+            BusinessEvent.event_type=='VEHICLE_WATCHLIST_MATCH').correlate(model).exists()
     old_camera=select(Notification.camera_id).where(Notification.event_id==FaceEvent.id).order_by(Notification.created_at).limit(1).correlate(FaceEvent).scalar_subquery()
     face=select(*columns(FaceEvent,'face',FaceEvent.created_at,func.coalesce(FaceEvent.camera_id,string(DetectionEvent.camera_id),old_camera),'person',
-        target=FaceEvent.target_id,confidence=FaceEvent.similarity,matched=FaceEvent.decision=='FACE_MATCH',evidence=FaceEvent.face_crop_path,notice=notification('face',FaceEvent.id))).outerjoin(DetectionEvent,FaceEvent.detection_event_id==DetectionEvent.id)
+        target=FaceEvent.target_id,confidence=FaceEvent.similarity,matched=FaceEvent.decision=='FACE_MATCH',evidence=FaceEvent.face_crop_path,notice=notification('face',FaceEvent.id),
+        semantic=func.coalesce(marker(FaceEvent,BusinessEvent.event_type),literal('face')),
+        metadata=marker(FaceEvent,BusinessEvent.event_metadata))).outerjoin(DetectionEvent,FaceEvent.detection_event_id==DetectionEvent.id)
     plate=select(*columns(PlateEvent,'plate',PlateEvent.created_at,func.coalesce(VehicleWatchlistResult.camera_id,string(DetectionEvent.camera_id)),'plate',
         target=VehicleWatchlistResult.watchlist_id,plate=PlateEvent.plate_text,confidence=PlateEvent.confidence,
-        matched=VehicleWatchlistResult.decision=='MATCH',evidence=PlateEvent.plate_crop_path,notice=notification('plate',PlateEvent.id))).join(
+        matched=VehicleWatchlistResult.decision=='MATCH',evidence=func.coalesce(PlateEvent.plate_crop_path,VehicleEvent.vehicle_image_path),notice=notification('plate',PlateEvent.id),
+        semantic=func.coalesce(marker(PlateEvent,BusinessEvent.event_type),literal('plate')),
+        metadata=marker(PlateEvent,BusinessEvent.event_metadata))).join(
         VehicleEvent,PlateEvent.vehicle_event_id==VehicleEvent.id).outerjoin(DetectionEvent,VehicleEvent.detection_event_id==DetectionEvent.id).outerjoin(VehicleWatchlistResult,VehicleWatchlistResult.plate_event_id==PlateEvent.id)
-    vehicle=select(*columns(VehicleEvent,'vehicle',VehicleEvent.last_seen,DetectionEvent.camera_id,'vehicle',evidence=VehicleEvent.vehicle_image_path)).outerjoin(DetectionEvent,VehicleEvent.detection_event_id==DetectionEvent.id)
+    vehicle=select(*columns(VehicleEvent,'vehicle',VehicleEvent.last_seen,DetectionEvent.camera_id,'vehicle',evidence=VehicleEvent.vehicle_image_path)).outerjoin(DetectionEvent,VehicleEvent.detection_event_id==DetectionEvent.id).where(~grouped(VehicleEvent))
     passage=select(*columns(VehiclePassage,'passage',VehiclePassage.last_seen_at,VehiclePassage.camera_id,'vehicle',plate=VehiclePassage.plate_text,
-        confidence=VehiclePassage.plate_confidence,evidence=VehiclePassage.best_vehicle_image_path))
-    business=select(*columns(BusinessEvent,'business',BusinessEvent.event_time,BusinessEvent.camera_id,'business',plate=BusinessEvent.plate_text))
+        confidence=VehiclePassage.plate_confidence,evidence=VehiclePassage.best_vehicle_image_path)).where(~grouped(VehiclePassage))
+    business=select(*columns(BusinessEvent,'business',BusinessEvent.event_time,BusinessEvent.camera_id,'business',plate=BusinessEvent.plate_text,
+        semantic=BusinessEvent.event_type,metadata=BusinessEvent.event_metadata,
+        evidence=BusinessEvent.event_metadata['snapshot_path'].as_string())).where(
+            ~or_(
+                (BusinessEvent.event_type=='FACE_WATCHLIST_MATCH') &
+                    select(FaceEvent.id).where(FaceEvent.id==BusinessEvent.id).correlate(BusinessEvent).exists(),
+                (BusinessEvent.event_type=='VEHICLE_WATCHLIST_MATCH') &
+                    select(PlateEvent.id).where(PlateEvent.id==BusinessEvent.id).correlate(BusinessEvent).exists()))
     return union_all(face,plate,vehicle,passage,business).subquery('unified_events')
 
 
@@ -47,7 +66,10 @@ def timestamp(value):
 def serialize(row):
     ident=str(UUID(row.id))
     event_id=row.event_type+':'+ident
-    return dict(event_id=event_id,source_event_id=ident,event_type=row.event_type,timestamp=row.timestamp.isoformat(),camera_id=row.camera_id,
+    metadata=json.loads(row.metadata) if row.metadata else {}
+    if not isinstance(metadata,dict): metadata={}
+    return dict(event_id=event_id,source_event_id=ident,event_type=row.event_type,semantic_type=row.semantic_type,metadata=metadata,
+        match_type=metadata.get('match_type'),timestamp=row.timestamp.isoformat(),camera_id=row.camera_id,
         object_type=row.object_type,target_id=str(UUID(row.target_id)) if row.target_id else None,plate=row.plate,confidence=row.confidence,
         similarity=row.confidence if row.event_type=='face' else None,watchlist_match=bool(row.watchlist_match),
         evidence={'key':row.evidence_key,'url':'/api/event_center/events/'+event_id+'/evidence'} if row.evidence_key else None,
@@ -64,8 +86,9 @@ def query(session,params,ident=None):
         q=q.where(events.c.event_type==kind,events.c.id==(UUID(raw).hex if session.bind.dialect.name=='sqlite' else str(UUID(raw))))
     kind=params.get('event_type')
     if kind:
-        if kind not in KINDS: raise ValueError('INVALID_EVENT_TYPE')
-        q=q.where(events.c.event_type==kind)
+        from src.events.policy import MEANINGFUL_EVENTS
+        if kind not in KINDS and kind not in MEANINGFUL_EVENTS: raise ValueError('INVALID_EVENT_TYPE')
+        q=q.where(events.c.semantic_type==kind) if kind in MEANINGFUL_EVENTS else q.where(events.c.event_type==kind)
     for field in ('camera_id','target_id'):
         if params.get(field):
             value=params[field]

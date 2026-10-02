@@ -1627,6 +1627,13 @@
         DOM.streamResolution.textContent = data.input_size || "640x640";
 
         DOM.metricPeopleCount.textContent = data.people_count !== undefined ? data.people_count : 0;
+        const detectionStatus = document.getElementById("personDetectionStatus");
+        if (detectionStatus) {
+            detectionStatus.textContent = status !== "RUNNING" ? "Camera chưa hoạt động"
+                : Number(data.people_count) > 0
+                    ? `Đã phát hiện người (${Number(data.people_count)})`
+                    : "Chưa phát hiện người";
+        }
         if (DOM.metricCarCount) {
             DOM.metricCarCount.textContent = data.car_count !== undefined ? data.car_count : 0;
         }
@@ -1665,6 +1672,8 @@
     }
 
     function handleTelemetryError() {
+        const detectionStatus = document.getElementById("personDetectionStatus");
+        if (detectionStatus) detectionStatus.textContent = "Đang chờ dữ liệu camera mới";
         state.consecutiveErrors++;
         DOM.pingLatency.textContent = "-- ms";
         if (state.consecutiveErrors >= 3) {
@@ -1736,18 +1745,18 @@
             const timeStr = formatEventTime(ev.timestamp);
             const snapshotUrl = ev.snapshot_path
                 ? apiUrl(`/event_snapshot?path=${encodeURIComponent(ev.snapshot_path)}`)
-                : (ev.id ? apiUrl(`/event_snapshot?id=${encodeURIComponent(ev.id)}`) : "");
+                : "";
 
             return `
                 <div class="event-card">
                     <div class="event-thumb-wrapper">
                         ${snapshotUrl
-                            ? `<img class="event-thumb" src="${snapshotUrl}" alt="Event ${ev.id}" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'event-thumb-placeholder\\'>📷 No Image</div>';">`
-                            : `<div class="event-thumb-placeholder">📷 No Image</div>`}
+                            ? `<img class="event-thumb" src="${escapeHtml(snapshotUrl)}" alt="Ảnh camera" loading="lazy">`
+                            : `<div class="event-thumb-placeholder">Sự kiện cũ chưa có ảnh lưu</div>`}
                     </div>
                     <div class="event-details">
                         <div class="event-top-row">
-                            <span class="event-badge ${diffClass}">${diffSign} People</span>
+                            <span class="event-badge ${diffClass}">${ev.event_type === "CAMERA_SNAPSHOT" ? "Ảnh camera đã lưu" : `${diffSign} People`}</span>
                             <span class="event-time">${timeStr}</span>
                         </div>
                         <div class="event-count-flow">
@@ -1768,7 +1777,8 @@
     function formatEventTime(timestamp) {
         if (!timestamp) return "Just now";
         try {
-            const date = new Date(timestamp * 1000);
+            const date = typeof timestamp === "number" ? new Date(timestamp * 1000)
+                : new Date(String(timestamp).replace(" ", "T") + (/Z$|[+-]\d\d:\d\d$/.test(timestamp) ? "" : "Z"));
             return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
         } catch (e) {
             return "Just now";
@@ -4304,6 +4314,9 @@
             else if (evType === "vehicle") evTypeBadge = `<span class="event-type-badge vehicle">🚗 Vehicle</span>`;
             else if (evType === "passage") evTypeBadge = `<span class="event-type-badge passage">🛣️ Passage</span>`;
             else if (evType === "business") evTypeBadge = `<span class="event-type-badge business">💼 Business</span>`;
+            if (ev.semantic_type && ev.semantic_type !== evType) {
+                evTypeBadge = `<span class="event-type-badge ${escapeHtml(evType)}">${escapeHtml(ev.semantic_type)}</span>`;
+            }
 
             // Target or Plate display
             let targetPlateHtml = "--";
@@ -4480,7 +4493,7 @@
                 }
             }
 
-            if (DOM.evDrawerType) DOM.evDrawerType.textContent = ev.event_type || "--";
+            if (DOM.evDrawerType) DOM.evDrawerType.textContent = ev.semantic_type || ev.event_type || "--";
             if (DOM.evDrawerTimestamp) DOM.evDrawerTimestamp.textContent = ev.timestamp ? formatDateTime(ev.timestamp) : "--";
             if (DOM.evDrawerCamera) DOM.evDrawerCamera.textContent = ev.camera_id || "--";
             if (DOM.evDrawerObjectType) DOM.evDrawerObjectType.textContent = ev.object_type || "--";
@@ -4805,6 +4818,44 @@
      * Application Initialization.
      */
     function init() {
+        DOM.eventsContainer.addEventListener("error", (event) => {
+            if (event.target.matches("img.event-thumb")) {
+                const placeholder = document.createElement("div");
+                placeholder.className = "event-thumb-placeholder";
+                placeholder.textContent = "Không tải được ảnh camera";
+                event.target.replaceWith(placeholder);
+            }
+        }, true);
+        const captureButton = document.getElementById("captureCameraButton");
+        if (captureButton) captureButton.addEventListener("click", async () => {
+            const feedback = document.getElementById("captureCameraStatus");
+            captureButton.disabled = true;
+            feedback.textContent = "Đang chụp và lưu…";
+            try {
+                const response = await fetch(apiUrl("/api/camera_capture"), { method: "POST" });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.detail || "Không lưu được ảnh camera.");
+                feedback.textContent = "Đã lưu ảnh camera";
+                let preview = document.getElementById("manualCameraCapturePreview");
+                if (!preview) {
+                    preview = document.createElement("a");
+                    preview.id = "manualCameraCapturePreview";
+                    preview.target = "_blank";
+                    preview.rel = "noopener";
+                    const image = document.createElement("img");
+                    image.alt = "Ảnh camera vừa chụp";
+                    image.style.cssText = "display:block;max-width:100%;margin-top:12px;border-radius:8px";
+                    preview.appendChild(image);
+                    feedback.insertAdjacentElement("afterend", preview);
+                }
+                preview.href = apiUrl(result.image_url);
+                preview.querySelector("img").src = preview.href;
+            } catch (error) {
+                feedback.textContent = error.message;
+            } finally {
+                captureButton.disabled = false;
+            }
+        });
         initTabs();
         initProviderSelector();
         initSearch();

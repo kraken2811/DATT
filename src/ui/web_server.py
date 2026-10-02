@@ -40,7 +40,7 @@ import cv2
 import httpx
 import numpy as np
 import uvicorn
-from src.storage import get_storage, validate_key
+from src.storage import get_storage, validate_key, StorageUploadTooLarge
 
 from src.face.face_embedder import decode_face_image_bytes
 from src.recognition.target_matcher import TargetRegistrationError, target_manager
@@ -67,6 +67,15 @@ app = FastAPI(
     description="FastAPI Web UI replacing Streamlit for continuous, rock-solid monitoring on Colab and Server.",
     version="4.4.0",
 )
+
+from src.ui.camera_capture import router as camera_capture_router
+app.include_router(camera_capture_router)
+
+
+@app.get('/api/runtime_devices')
+def runtime_devices(instrument: bool = False):
+    from src.runtime.device_audit import snapshot
+    return snapshot(instrument=instrument)
 
 # Enable CORS for maximum flexibility
 app.add_middleware(
@@ -543,9 +552,28 @@ async def select_source(request: Request) -> JSONResponse:
     preview_manager.stop_preview()
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        # Match switch_camera: DB/Storage-backed initialization can exceed 15s.
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(f"{b_url}/select_source", json=body)
             return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    except httpx.TimeoutException:
+        return JSONResponse(
+            content={"status": "error", "code": "BACKEND_TIMEOUT",
+                     "message": "AI backend timed out while selecting the camera source. Check source status before retrying."},
+            status_code=504,
+        )
+    except httpx.RequestError:
+        return JSONResponse(
+            content={"status": "error", "code": "BACKEND_UNAVAILABLE",
+                     "message": "Cannot reach the AI backend. Check that the camera pipeline is running in CPU/GPU mode and the backend URL is correct; API-only mode cannot activate cameras."},
+            status_code=503,
+        )
+    except ValueError:
+        return JSONResponse(
+            content={"status": "error", "code": "BACKEND_INVALID_RESPONSE",
+                     "message": "AI backend returned an invalid response. Check the backend URL and any proxy or tunnel."},
+            status_code=502,
+        )
     except Exception as exc:
         return JSONResponse(
             content={"status": "error", "message": f"Failed selecting camera source on backend: {exc}"},
@@ -760,6 +788,10 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
     try:
         with target_path.open("rb") as source:
             get_storage().save(rel_storage_path, source)
+    except StorageUploadTooLarge:
+        target_path.unlink(missing_ok=True)
+        return JSONResponse(content={"status": "error", "code": "VIDEO_TOO_LARGE_FOR_STORAGE",
+            "message": "Video vượt giới hạn dung lượng Storage. Hãy chọn video nhỏ hơn hoặc tăng giới hạn Storage; video chưa được lưu."}, status_code=413)
     except Exception:
         logger.error("[VIDEO_STORAGE_ERROR] Persistent storage write failed")
         return JSONResponse(content={"status": "error", "message": "Video storage unavailable"}, status_code=503)
@@ -1320,6 +1352,7 @@ async def get_events(request: Request) -> Response:
                     normalized.append({
                         "id": ev_id,
                         "snapshot_id": ev_id,
+                        "event_type": ev.get("event_type", "PEOPLE_COUNT_CHANGED"),
                         "timestamp": ev.get("timestamp"),
                         "camera_id": ev.get("camera_id"),
                         "old_count": ev.get("old_value", 0),
@@ -1354,6 +1387,7 @@ async def get_events(request: Request) -> Response:
             normalized.append({
                 "id": ev_id,
                 "snapshot_id": ev_id,
+                "event_type": ev.get("event_type", "PEOPLE_COUNT_CHANGED"),
                 "timestamp": ev.get("timestamp"),
                 "camera_id": ev.get("camera_id"),
                 "old_count": ev.get("old_value", 0),
@@ -1594,6 +1628,8 @@ async def get_event_snapshot(request: Request) -> Response:
 
     if not rel_path and not event_id:
         raise HTTPException(status_code=400, detail="Missing snapshot path or id")
+    if not rel_path:
+        raise HTTPException(status_code=404, detail="Event snapshot not found")
 
     # Security check: resolve strictly within data/events/
     target_file = None
@@ -1636,8 +1672,10 @@ async def get_event_snapshot(request: Request) -> Response:
             raise HTTPException(status_code=resp.status_code, detail="Snapshot not found on backend")
     except HTTPException:
         raise
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=f"Snapshot unavailable: {exc}")
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Snapshot backend timed out") from None
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="Snapshot backend unavailable") from None
 
 
 # -----------------------------------------------------------------------------

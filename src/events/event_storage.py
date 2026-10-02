@@ -159,15 +159,19 @@ class EventStorage:
             if db.engine.url.get_backend_name() == "postgresql":
                 with db.transaction() as session:
                     repo = BusinessEventRepository(session)
-                    events = repo.query_events(camera_id=camera_id, limit=limit)
+                    events = []
+                    for kind in ("PEOPLE_COUNT_CHANGED", "CAMERA_SNAPSHOT"):
+                        events.extend(repo.query_events(camera_id=camera_id, event_type=kind, limit=limit))
+                    events.sort(key=lambda e: e.event_time, reverse=True)
+                    events = events[:limit]
                     return [
                         {
                             "id": str(e.id),
                             "timestamp": e.event_time.strftime("%Y-%m-%d %H:%M:%S"),
                             "camera_id": e.camera_id,
                             "event_type": e.event_type,
-                            "old_value": e.track_id or 0,
-                            "new_value": 1,
+                            "old_value": (e.event_metadata or {}).get("old_count", 0),
+                            "new_value": (e.event_metadata or {}).get("new_count", 0),
                             "snapshot_path": e.event_metadata.get("snapshot_path", "") if isinstance(e.event_metadata, dict) else "",
                         }
                         for e in events

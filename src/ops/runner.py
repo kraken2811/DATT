@@ -39,7 +39,7 @@ class SafeOutput:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--token', required=True)
-    p.add_argument('--mode', choices=['api', 'gpu'], required=True)
+    p.add_argument('--mode', choices=['api', 'cpu', 'gpu'], required=True)
     p.add_argument('--port', type=int, required=True)
     p.add_argument('--ai-port', type=int, required=True)
     args = p.parse_args()
@@ -69,10 +69,13 @@ def main():
                 server.should_exit = True
             run = server.run
         else:
+            if args.mode == 'cpu':
+                import config
+                config.DEVICE = 'cpu'
             # Preserve the canonical src/main.py preflight and RuntimeManager flow.
             import _thread
             from src.main import main as run_main
-            sys.argv = ['src/main.py', '--port', str(args.port), '--ai-port', str(args.ai_port)]
+            sys.argv = ['src/main.py', '--host', '127.0.0.1', '--port', str(args.port), '--ai-port', str(args.ai_port)]
             shutdown = _thread.interrupt_main
             run = run_main
 

@@ -11,6 +11,7 @@ Verifies:
 from collections import namedtuple
 import io
 from pathlib import Path
+from importlib.util import find_spec
 import sys
 import unittest
 
@@ -52,7 +53,7 @@ class TestFaceRegistrationFix(unittest.TestCase):
         if scratch_p.is_file():
             pil_img = Image.open(str(scratch_p))
         else:
-            ins_p = PROJECT_ROOT / "venv" / "Lib" / "site-packages" / "insightface" / "data" / "images" / "Tom_Hanks_54745.png"
+            ins_p = Path(find_spec("insightface").origin).parent / "data" / "images" / "Tom_Hanks_54745.png"
             pil_img = Image.open(str(ins_p))
 
         buf = io.BytesIO()

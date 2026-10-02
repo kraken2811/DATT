@@ -65,13 +65,15 @@ class TestWebServer(unittest.TestCase):
         response = self.client.get("/favicon.ico")
         self.assertIn(response.status_code, [200, 204])
         if response.status_code == 200:
-            self.assertIn("image/x-icon", response.headers.get("content-type", ""))
+            self.assertIn(response.headers.get("content-type", "").split(";", 1)[0],
+                          {"image/x-icon", "image/vnd.microsoft.icon"})
 
     def test_static_favicon_ico(self) -> None:
         """GET /static/favicon.ico must return HTTP 200."""
         response = self.client.get("/static/favicon.ico")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("image/x-icon", response.headers.get("content-type", ""))
+        self.assertIn(response.headers.get("content-type", "").split(";", 1)[0],
+                          {"image/x-icon", "image/vnd.microsoft.icon"})
 
     # -------------------------------------------------------------------------
     # 2. Telemetry Endpoint (Backend Online / Offline Handling)

@@ -236,7 +236,9 @@ class TestYouTubeVODWorkflow(unittest.TestCase):
             temp_cookie = f.name
 
         try:
-            with patch.dict(os.environ, {"YTDLP_COOKIE_FILE": temp_cookie}):
+            with patch.dict(os.environ, {"YTDLP_COOKIE_FILE": temp_cookie, "DENO_PATH": ""}), \
+                    patch("src.stream.youtube_resolver.shutil.which",
+                          side_effect=lambda name: "/test/bin/deno" if name == "deno" else None):
                 opts_probe = build_ydl_opts(is_vod=False, is_probe=True)
                 opts_resolve = build_ydl_opts(is_vod=True, is_probe=False)
 

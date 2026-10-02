@@ -5,7 +5,15 @@ from unittest.mock import patch
 import pytest
 import requests
 
-from src.storage import SupabaseStorageBackend
+from src.storage import SupabaseStorageBackend, StorageUploadTooLarge
+
+
+def test_supabase_wrapped_size_error(tmp_path):
+    response = Response(400)
+    response.json = lambda: {'statusCode': '413', 'code': 'EntityTooLarge'}
+    with patch('requests.request', return_value=response):
+        with pytest.raises(StorageUploadTooLarge):
+            backend(tmp_path).save_bytes('data/uploads/videos/large.mp4', b'x')
 
 
 class Response:

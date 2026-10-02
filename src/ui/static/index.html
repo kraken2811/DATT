@@ -454,7 +454,11 @@
                                 <div class="overlay-sub">Reconnecting automatically in 3 seconds...</div>
                             </div>
                         </div>
-                        <div class="video-caption">Server-side MJPEG relay; latest-frame display, target 30 FPS.</div>
+                        <div class="video-caption">
+                            <span id="personDetectionStatus" role="status">Chưa có dữ liệu camera</span>
+                            <button id="captureCameraButton" type="button" class="btn-secondary">Chụp và lưu ảnh camera</button>
+                            <span id="captureCameraStatus" role="status"></span>
+                        </div>
                     </section>
 
                     <!-- Right Column (35%): Realtime AI Telemetry -->

@@ -20,6 +20,10 @@ from typing import BinaryIO
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+class StorageUploadTooLarge(OSError):
+    """The storage provider rejected the object's size (safe to expose)."""
+
+
 def validate_key(key: str) -> str:
     parts = PurePosixPath(key).parts
     if (not key or "\\" in key or ":" in key or "\x00" in key
@@ -175,12 +179,17 @@ class SupabaseStorageBackend(StorageBackend):
         except requests.RequestException:
             raise OSError("Supabase Storage request failed") from None
         missing = response.status_code == 404
+        too_large = response.status_code == 413
         if response.status_code == 400:
             try:
                 body = response.json()
                 missing = body.get("code") == "NoSuchKey" or str(body.get("statusCode")) == "404"
+                too_large = body.get("code") == "EntityTooLarge" or str(body.get("statusCode")) == "413"
             except (ValueError, AttributeError):
                 pass
+        if too_large:
+            response.close()
+            raise StorageUploadTooLarge("Supabase Storage HTTP 413: object exceeds storage size limit")
         if missing:
             response.close()
             raise FileNotFoundError(key)

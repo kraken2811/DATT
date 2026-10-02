@@ -37,11 +37,18 @@ External fsspec options remain available through `DATT_STORAGE_URL` and
 `DATT_STORAGE_OPTIONS`. Install the selected provider driver yourself.
 
 Installation is explicit: bootstrap validates the environment but never upgrades
-packages. `scripts/colab_install.py` installs the repository requirement files,
-constrains the existing Torch/torchvision versions and restores ORT GPU 1.26.0.
+packages. `scripts/colab_install.py` checks the repository requirements first,
+installs missing packages while constraining installed versions, and fails on
+existing version conflicts. A CPU ORT overlap introduced by a new InsightFace
+installation is repaired once with the repository's pinned GPU ORT 1.26.0.
 Model provisioning is explicit through `models`, with the same download sources
 as the legacy notebook. `cv-check` validates provisioning/provider availability;
 it does not initialize every recognition model or claim inference accuracy.
+
+The ordered startup notebook and its restart/failure rules are documented in
+[`colab-startup.md`](colab-startup.md). Its separate disposable model probe calls
+production YOLO, FaceEmbedder, AdaptiveFacePipeline, PlateDetector and OCR
+initializers; it does not retain GPU models in the notebook kernel.
 
 For isolated local development explicitly set a SQLite URL,
 `DATT_STORAGE_BACKEND=local`, `DATT_STORAGE_ROOT` to a disposable directory, and

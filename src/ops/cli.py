@@ -186,7 +186,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='DATT operations; API mode never initializes CV models.')
     parser.add_argument('command', metavar='command', help=', '.join(COMMANDS),
                         choices=COMMANDS + ['test-environment', 'dependencies', 'fixture-create', 'fixture-verify', 'fixture-cleanup'])
-    parser.add_argument('--mode', choices=['api', 'gpu'], default='api')
+    parser.add_argument('--mode', choices=['api', 'cpu', 'gpu'], default='api',
+                        help='api: data management only; cpu/gpu: full video processing runtime')
     parser.add_argument('--port', type=int, default=8501)
     parser.add_argument('--ai-port', type=int, default=8000)
     parser.add_argument('--timeout', type=float, default=90)

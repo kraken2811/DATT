@@ -6,6 +6,7 @@ Maintains bounded queue, coalescing, retry buffer, and transaction boundaries.
 
 from datetime import datetime, timezone
 import logging
+import os
 from pathlib import Path
 import queue
 import threading
@@ -16,6 +17,9 @@ from uuid import UUID
 import cv2
 from src.storage import save_image
 import numpy as np
+from sqlalchemy import select
+from src.db.models import Target, VehicleWatchlist, FaceEvent
+from src.watchlists.vehicles import normalize_plate
 
 from src.db.database import Database
 from src.db.repositories import (
@@ -28,6 +32,7 @@ from src.db.repositories import (
     VehiclePassageRepository,
 )
 from src.events.event_dto import BusinessEventDTO, FaceEventDTO, VehiclePassageDTO
+from src.events.policy import MEANINGFUL_EVENTS
 from src.recognition.color_extractor import extract_vehicle_color
 
 logger = logging.getLogger("datt.events.db_worker")
@@ -68,7 +73,8 @@ class DatabaseWorker:
         # Notification transport runs independently of both CV and DB persistence.
         from src.notifications.service import NotificationService
         self.notifications = NotificationService(self.db)
-        self.notifications.start()
+        if os.environ.get('DATT_EVENT_AUDIT_ONLY') != '1':
+            self.notifications.start()
 
         self._worker_thread = threading.Thread(
             target=self._worker_loop,
@@ -90,6 +96,8 @@ class DatabaseWorker:
     ) -> bool:
         """Enqueue a VehiclePassageDTO non-blockingly."""
         t0 = time.perf_counter()
+        if not dto.is_final:
+            return True  # Normal track updates stay in EventManager RAM.
         task = ("PASSAGE", dto, (vehicle_crop, plate_crop))
         success = self._put_task(task, is_critical=is_critical or dto.is_final)
         self.enqueue_latencies.append((time.perf_counter() - t0) * 1000.0)
@@ -99,10 +107,13 @@ class DatabaseWorker:
         self,
         dto: BusinessEventDTO,
         is_critical: bool = True,
+        snapshot: np.ndarray | None = None,
     ) -> bool:
         """Enqueue a BusinessEventDTO non-blockingly."""
         t0 = time.perf_counter()
-        task = ("BUSINESS_EVENT", dto, None)
+        if dto.event_type not in MEANINGFUL_EVENTS:
+            return True
+        task = ("BUSINESS_EVENT", dto, snapshot.copy() if snapshot is not None else None)
         success = self._put_task(task, is_critical=is_critical)
         self.enqueue_latencies.append((time.perf_counter() - t0) * 1000.0)
         return success
@@ -122,6 +133,8 @@ class DatabaseWorker:
 
 
     def _put_task(self, task: tuple[str, Any, Any], is_critical: bool) -> bool:
+        if os.environ.get('DATT_EVENT_AUDIT_ONLY') == '1':
+            return True  # Explicit diagnostic mode: no DB/Storage/email mutation.
         try:
             self._task_queue.put_nowait(task)
             return True
@@ -196,17 +209,20 @@ class DatabaseWorker:
         t_w0 = time.perf_counter()
         # Coalesce passages by session_key: keep only latest state
         passages_by_key: dict[str, tuple[VehiclePassageDTO, Any]] = {}
-        events: list[BusinessEventDTO] = []
+        events: list[tuple[BusinessEventDTO, Any]] = []
         face_events_list: list[tuple[FaceEventDTO, Any]] = []
 
         for task_type, item, aux in batch:
             if task_type == "PASSAGE":
                 dto: VehiclePassageDTO = item
+                if not dto.is_final:
+                    continue
                 if dto.session_key in passages_by_key:
                     self.queue_coalesced += 1
                 passages_by_key[dto.session_key] = (dto, aux)
             elif task_type == "BUSINESS_EVENT":
-                events.append(item)
+                if item.event_type in MEANINGFUL_EVENTS:
+                    events.append((item, aux))
             elif task_type == "FACE_EVENT":
                 face_events_list.append((item, aux))
 
@@ -218,6 +234,13 @@ class DatabaseWorker:
 
                 # Persist passages
                 for session_key, (dto, crops) in passages_by_key.items():
+                    # Match the existing exact-plate ACTIVE watchlist contract before
+                    # any snapshot, passage, detection or event is newly persisted.
+                    target = session.scalar(select(VehicleWatchlist).where(
+                        VehicleWatchlist.plate_number == normalize_plate(dto.plate_text),
+                        VehicleWatchlist.status == 'active').with_for_update())
+                    if target is None:
+                        continue
                     veh_crop, plt_crop = crops if crops else (None, None)
                     best_veh_path = dto.best_vehicle_image_path
                     best_plt_path = dto.best_plate_image_path
@@ -346,6 +369,16 @@ class DatabaseWorker:
 
                                 from src.watchlists.vehicles import record_plate_result
                                 match = record_plate_result(session, plate_event, dto.camera_id)
+                                event_repo.insert_idempotent(
+                                    id=plate_event.id, passage_id=dto.id, camera_id=dto.camera_id,
+                                    video_source_id=dto.video_source_id, zone_id=dto.zone_id,
+                                    track_id=dto.track_id, event_type='VEHICLE_WATCHLIST_MATCH',
+                                    event_time=dto.last_seen_at, vehicle_type=dto.vehicle_type,
+                                    plate_text=dto.plate_text,
+                                    idempotency_key=f'{dto.id}:VEHICLE_WATCHLIST_MATCH:{target.id}',
+                                    metadata={'match_type':'PLATE','watchlist_target_id':str(target.id),
+                                              'snapshot_path':best_plt_path or best_veh_path,
+                                              'vehicle_color':v_color,'location':dto.zone_id})
                                 try:
                                     with session.begin_nested():
                                         self.notifications.enqueue_vehicle(session, plate_event, match)
@@ -353,7 +386,14 @@ class DatabaseWorker:
                                     logger.warning('[NOTIFICATIONS] vehicle enqueue failed; check migration/configuration')
 
                 # Persist business events idempotently
-                for ev_dto in events:
+                for ev_dto, snapshot in events:
+                    metadata = dict(ev_dto.metadata)
+                    if snapshot is not None:
+                        filename = f"occupancy_{ev_dto.id}.jpg"
+                        if not save_image(str(self.snapshot_dir / filename), snapshot,
+                                          [cv2.IMWRITE_JPEG_QUALITY, 85]):
+                            raise OSError("Occupancy snapshot encoding failed")
+                        metadata["snapshot_path"] = f"data/events/{filename}"
                     event_repo.insert_idempotent(
                         id=ev_dto.id,
                         passage_id=ev_dto.passage_id,
@@ -367,13 +407,18 @@ class DatabaseWorker:
                         plate_text=ev_dto.plate_text,
                         direction=ev_dto.direction,
                         idempotency_key=ev_dto.idempotency_key,
-                        metadata=ev_dto.metadata,
+                        metadata=metadata,
                     )
 
                 # Persist face recognition events
                 if face_events_list:
                     face_repo = FaceEventRepository(session)
                     for f_dto, f_crop in face_events_list:
+                        target = session.get(Target, f_dto.target_id) if f_dto.target_id else None
+                        if target is None or not target.active or f_dto.decision != 'FACE_MATCH':
+                            continue
+                        if session.get(FaceEvent, f_dto.id) is not None:
+                            continue
                         f_path = f_dto.face_crop_path
                         if f_crop is not None and getattr(f_crop, "size", 0) > 0 and not f_path:
                             ts_compact = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
@@ -401,6 +446,14 @@ class DatabaseWorker:
                             face_crop_path=f_path,
                             created_at=f_dto.created_at,
                         )
+                        event_repo.insert_idempotent(
+                            id=f_dto.id, camera_id=f_dto.camera_id,
+                            video_source_id=f_dto.video_source_id, track_id=f_dto.track_id,
+                            event_type='FACE_WATCHLIST_MATCH', event_time=f_dto.created_at,
+                            idempotency_key=f'{f_dto.id}:FACE_WATCHLIST_MATCH',
+                            metadata={'watchlist_target_id':str(f_dto.target_id),
+                                      'similarity':f_dto.similarity,'snapshot_path':f_path,
+                                      'location':f_dto.metadata.get('location')})
                         # Same commit as FaceEvent; delivery cannot observe rolled-back events.
                         # A notification schema/config problem must not lose the FaceEvent.
                         try:

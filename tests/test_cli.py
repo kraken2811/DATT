@@ -32,6 +32,26 @@ def test_missing_db_config(isolated, monkeypatch):
     assert checks.database_check()['database_configured'] is False
 
 
+def test_cpu_mode_requires_video_service_health(monkeypatch):
+    record = dict(pid=123, port=8501, ai_port=8000, mode='cpu', token='test')
+    monkeypatch.setattr(process, 'state', lambda: record)
+    monkeypatch.setattr(process, 'owned', lambda value: True)
+    monkeypatch.setattr(process, 'http', lambda port, *args, **kwargs: 200 if port == 8501 else 0)
+    assert process.status()['health'] == 'FAIL'
+    monkeypatch.setattr(process, 'http', lambda *args, **kwargs: 200)
+    assert process.status()['health'] == 'PASS'
+
+
+def test_cli_accepts_cpu_runtime(isolated, monkeypatch):
+    calls = []
+    def start(mode, port, ai_port, timeout):
+        calls.append((mode, port, ai_port))
+        return {'health': 'PASS'}
+    monkeypatch.setattr(process, 'start', start)
+    assert cli.main(['start', '--mode', 'cpu']) == 0
+    assert calls == [('cpu', 8501, 8000)]
+
+
 def test_configuration_precedence_and_colab_child(isolated, monkeypatch):
     import types
     from src.ops import config

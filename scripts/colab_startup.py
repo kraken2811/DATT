@@ -193,6 +193,13 @@ class Startup:
         require(status['health'] == 'PASS' and status['mode'] == 'gpu', 'Backend ownership/health/GPU mode failed')
         listeners = {c.pid for c in psutil.net_connections('tcp') if c.status == 'LISTEN' and c.laddr.port == 8501}
         require(listeners == {record['pid']}, 'Expected exactly one CLI-owned backend listener')
+        runners = []
+        for candidate in psutil.process_iter(['pid', 'cmdline', 'cwd']):
+            info = candidate.info
+            if ('src.ops.runner' in (info.get('cmdline') or [])
+                    and info.get('cwd') and Path(info['cwd']).resolve() == ROOT.resolve()):
+                runners.append(info['pid'])
+        require(runners == [record['pid']], 'More than one DATT runner exists in this project')
         db, storage = self.cli('db-check'), self.cli('storage-check')
         require(db.get('database_connected') == 'true' and db.get('alembic') == 'PASS', 'Database health failed')
         require(storage.get('storage_connected') == 'true' and storage.get('storage_cleanup') == 'PASS', 'Storage health/cleanup failed')

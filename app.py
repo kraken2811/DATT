@@ -414,8 +414,9 @@ def run_pipeline(
                 event_manager.process_frame(
                     camera_id=active_cam.id if active_cam else "camera_01",
                     people_count=last_people_in_view,
-                    annotated_frame=annotated_frame,
+                    annotated_frame=frame,
                     video_source_id=getattr(active_cam, "video_source_id", None),
+                    location="zone_1" if is_zone_on else None,
                 )
                 _t_event_build_ms += event_manager.last_event_build_ms
                 _t_db_work_ms += event_manager.last_db_work_ms

@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 
 class Database:
@@ -36,7 +37,12 @@ class Database:
             raise RuntimeError("Persistent deployment requires PostgreSQL; SQLite is only for local/test use")
         if parsed.drivername in ("postgres", "postgresql"):
             parsed = parsed.set(drivername="postgresql+psycopg")
-        self.engine = create_engine(parsed, echo=echo, pool_pre_ping=True)
+        # API handlers create short-lived Database instances. A separate idle
+        # pool per instance exhausts Supabase's session-pooler connection limit.
+        # Let the external pooler own pooling and release each DBAPI connection
+        # when its transaction ends. Keep SQLite's existing pooling semantics.
+        options = {"poolclass": NullPool} if parsed.get_backend_name() == "postgresql" else {}
+        self.engine = create_engine(parsed, echo=echo, pool_pre_ping=True, **options)
         if parsed.get_backend_name() == "sqlite":
             @event.listens_for(self.engine, "connect")
             def configure_sqlite(connection, _record):

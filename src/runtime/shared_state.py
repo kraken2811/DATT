@@ -552,6 +552,16 @@ class SharedRuntimeState:
         with self._lock:
             return self._frame_id, self._latest_frame
 
+    def capture_camera_frame(self):
+        """Copy a fresh raw camera frame with its metadata under the same lock."""
+        with self._lock:
+            if self._latest_frame is None or time.time() - self._timestamp > 5.0:
+                return None
+            return self._latest_frame.copy(), {
+                "frame_id": self._frame_id, "camera_id": self._camera_id,
+                "people_count": self._people_count, "timestamp": self._timestamp,
+            }
+
     def get_frame_packet(self) -> tuple[bytes, dict[str, Any]] | None:
         """Read the JPEG and its publication-time metrics as one atomic packet."""
         with self._lock:

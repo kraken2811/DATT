@@ -2,7 +2,7 @@
 
 Validates all 9 user requirements:
 1. Video Library: Upload MP4 -> persisted storage -> video_sources PostgreSQL -> list -> select -> delete
-2. Target Person: Register -> original image persisted -> ArcFace 512D in target_embeddings -> select/toggle
+2. Target Person: Register -> original image persisted -> AdaFace 512D in target_embeddings -> select/toggle
 3. Motorcycle Plate OCR: Motorcycle detection -> ByteTrack -> ROI -> plate detection -> OCR -> consensus -> PlateEvent (no rider/person dependency)
 4. Vehicle Event: 1 VehicleEvent per vehicle track on exit with HSV color, best crop image, first_seen/last_seen, linked PlateEvent
 5. Source Traceability: video_source_id -> video -> frame/time -> track -> VehicleEvent / FaceEvent / PlateEvent
@@ -156,7 +156,7 @@ class TestEndToEndBackendDatabase:
         assert not server_path.exists()
 
     def test_02_target_person_e2e_flow(self) -> None:
-        """Requirement 2 & 7: Target Person Registration, 512D ArcFace, Selection, and DB Persistence."""
+        """Requirement 2 & 7: Target Person Registration, 512D AdaFace, Selection, and DB Persistence."""
         # 1. Create a dummy synthetic face image
         face_img = np.ones((100, 100, 3), dtype=np.uint8) * 190
         cv2.circle(face_img, (50, 50), 30, (80, 80, 220), -1)
@@ -199,7 +199,7 @@ class TestEndToEndBackendDatabase:
 
             embs = session.query(TargetEmbedding).filter_by(target_id=t_rec.id).all()
             assert len(embs) == 1
-            assert embs[0].model_name == "arcface"
+            assert embs[0].model_name == "adaface_ir50_ms1mv2"
             assert len(list(embs[0].embedding)) == 512
 
         # 3. Test list targets API

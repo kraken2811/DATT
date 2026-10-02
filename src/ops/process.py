@@ -75,7 +75,7 @@ def status():
     record = state()
     running = owned(record)
     code = http(record['port'], token=record['token']) if running else 0
-    if running and record['mode'] == 'gpu' and http(record['ai_port'], '/telemetry') != 200:
+    if running and record['mode'] != 'api' and http(record['ai_port'], '/telemetry') != 200:
         code = 0
     return dict(pid=record['pid'] if record else None, status='RUNNING' if running else 'STOPPED',
                 port=record['port'] if record else 8501,
@@ -90,7 +90,7 @@ def start(mode='api', port=8501, ai_port=8000, timeout=90):
         if (record['mode'], record['port'], record['ai_port']) != (mode, port, ai_port):
             raise RuntimeError('running_configuration_differs')
         return status()
-    for check_port in ([port, ai_port] if mode == 'gpu' else [port]):
+    for check_port in ([port, ai_port] if mode != 'api' else [port]):
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', check_port))
     import psutil
@@ -112,7 +112,7 @@ def start(mode='api', port=8501, ai_port=8000, timeout=90):
     while time.monotonic() < deadline:
         if child.poll() is not None:
             raise RuntimeError('backend_exited')
-        if http(port, token=token) == 200 and (mode != 'gpu' or http(ai_port, '/telemetry') == 200):
+        if http(port, token=token) == 200 and (mode == 'api' or http(ai_port, '/telemetry') == 200):
             return status()
         time.sleep(.2)
     stop(timeout=min(timeout, 15))
