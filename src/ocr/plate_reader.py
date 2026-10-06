@@ -183,6 +183,8 @@ class LicensePlateReader:
         self._device: str = "CPU"
         self._infer_lock = threading.Lock()
         self._ocr_context = threading.local()
+        self._line_recognizer = None
+        self._line_recognizer_attempted = False
 
         # Bounded debug sample tracking in scratch/plate_debug/
         self._debug_dir = Path("scratch/plate_debug")
@@ -1120,6 +1122,32 @@ class LicensePlateReader:
         # Stage 0: Dedicated YOLO plate detector
         # ----------------------------------------------------------------
         plate_det_res = self._detect_plate_bbox(vehicle_crop, track_id, frame_id)
+
+        if plate_det_res is not None:
+            if not self._line_recognizer_attempted:
+                self._line_recognizer_attempted = True
+                try:
+                    from src.ocr.plate_line_recognizer import MODEL_PATH, PlateLineRecognizer
+                    if MODEL_PATH.is_file():
+                        self._line_recognizer = PlateLineRecognizer()
+                except Exception as exc:
+                    logger.warning('[PLATE_LINE_MODEL] unavailable; retaining EasyOCR: %s', type(exc).__name__)
+            if self._line_recognizer is not None:
+                try:
+                    line = self._line_recognizer.read_plate(vehicle_crop, plate_det_res, is_valid_plate_format)
+                    if line is not None:
+                        px1, py1, px2, py2 = line.bbox
+                        gray = cv2.cvtColor(line.crop, cv2.COLOR_BGR2GRAY)
+                        sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                        quality = line.confidence * 50 + min(sharpness, 200) * .3 + min(px2-px1, 150) * .2
+                        logger.info('[PLATE_LINE_OCR] track=%s frame=%s text=%s conf=%.3f',
+                                    track_id, frame_id, line.text, line.confidence)
+                        return PlateCandidate(line.text, line.confidence, line.bbox,
+                            (int(vx1+px1), int(vy1+py1), int(vx1+px2), int(vy1+py2)),
+                            line.crop, line.crop, sharpness, quality, raw_text=line.raw_text)
+                except Exception as exc:
+                    self._line_recognizer = None
+                    logger.warning('[PLATE_LINE_OCR] failed; retaining EasyOCR: %s', type(exc).__name__)
 
         if plate_det_res is not None:
             px1, py1, px2, py2, det_conf = plate_det_res

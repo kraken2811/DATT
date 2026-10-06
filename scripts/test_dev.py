@@ -11,6 +11,7 @@ SUITE = (
     'database_pool_lifecycle', 'select_source_proxy', 'supabase_storage',
     'cli', 'web_server', 'youtube_vod_workflow',
     'vehicle_color_flow', 'plate_consensus', 'async_plate_scheduling',
+    'plate_reading_recovery', 'frame_packet',
 )
 
 

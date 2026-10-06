@@ -70,9 +70,12 @@ def snapshot(instrument=False):
     adaface = getattr(getattr(getattr(matcher, 'face_pipeline', None), 'embedder', None), '_session', None)
     plate_module = sys.modules.get('src.ocr.plate_reader')
     reader = getattr(getattr(plate_module, 'plate_reader', None), '_reader', None)
+    line_reader = getattr(getattr(plate_module, 'plate_reader', None), '_line_recognizer', None)
+    line_session = getattr(line_reader, 'session', None)
     _observe(scrfd, 'run', 'scrfd_inference', instrument)
     _observe(adaface, 'run', 'adaface_inference', instrument)
     _observe(reader, 'readtext', 'ocr', instrument)
+    _observe(line_session, 'run', 'plate_line_inference', instrument)
     with _lock:
         timings = {k:dict(count=len(v), p50_ms=float(np.percentile(v, 50)),
                          p95_ms=float(np.percentile(v, 95))) for k,v in _samples.items() if v}
@@ -81,4 +84,5 @@ def snapshot(instrument=False):
         yolo_device=yolo_device, scrfd=_providers(scrfd), adaface=_providers(adaface),
         adaface_input_devices=inputs.get('adaface_inference'),
         ocr_device=str(reader.device) if reader is not None else None,
+        plate_line_ocr=_providers(line_session),
         timings=timings, audit_only=os.environ.get('DATT_EVENT_AUDIT_ONLY')=='1')
