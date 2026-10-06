@@ -1,8 +1,14 @@
 ﻿# Repeatable Colab startup
 
-Use `notebooks/DATT_Colab_GPU.ipynb`, which contains 13 ordered executable cells.
-Deploy this source version to `/content/DATT` before running it. The notebook
-never clones, pulls, resets, replaces source files, commits, or pushes.
+Use `notebooks/DATT_Colab_GPU.ipynb`. Run the Drive cache cell first, then the
+13 ordered startup cells. The first cell mounts Google Drive and stores a Git
+mirror, pip download cache, and verified model assets under
+`MyDrive/DATT-Colab-cache`. A fresh runtime restores the `dev` checkout from
+the mirror, fetches only source changes, and copies model assets into
+`/content/DATT/models`. If the cache is empty, it clones source once and Cell 6
+requests the production model zip once. Cell 6 saves models to Drive only after
+the production GPU probe passes. Never cache `.env`, credentials, uploaded media,
+face images, or videos there; use Colab Secrets for configuration across sessions.
 
 1. Runtime preflight provisions the exact Torch/vision/audio cu126 stack from
    the official PyTorch wheel index when the installed versions differ (including
