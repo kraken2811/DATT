@@ -178,6 +178,36 @@ def test_occupied_port_no_launch(isolated):
     assert process.state() is None
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX streaming socket rebind semantics')
+def test_closed_stream_socket_does_not_block_restart(isolated, monkeypatch):
+    # The server actively closes an accepted connection, leaving FIN/TIME_WAIT.
+    with socket.socket() as listener, socket.socket() as client:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(('127.0.0.1', 0))
+        port = listener.getsockname()[1]
+        listener.listen()
+        client.connect(('127.0.0.1', port))
+        accepted, _ = listener.accept()
+        accepted.close()
+    class LaunchReached(Exception):
+        pass
+    def launch(*args, **kwargs):
+        raise LaunchReached()
+    monkeypatch.setattr(process.subprocess, 'Popen', launch)
+    with pytest.raises(LaunchReached):
+        process.start(port=port, timeout=1)
+
+
+def test_reusable_live_listener_still_blocks_launch(isolated):
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(('127.0.0.1', 0))
+        listener.listen()
+        with pytest.raises(OSError):
+            process.start(port=listener.getsockname()[1], timeout=1)
+    assert process.state() is None
+
+
 def test_log_redaction(monkeypatch):
     import io
     from src.ops.runner import SafeOutput

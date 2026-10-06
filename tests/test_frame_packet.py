@@ -56,6 +56,20 @@ def test_clear_frames_does_not_serve_previous_camera_packet():
     assert metrics["camera_id"] == "camera-b"
 
 
+def test_packet_reports_dynamic_age_without_mutating_publication(monkeypatch):
+    import importlib
+    shared_state = importlib.import_module('src.runtime.shared_state')
+    monkeypatch.setattr(shared_state.time, 'time', lambda: 1000.0)
+    state = SharedRuntimeState()
+    publish(state, 1)
+    first = state.get_frame_packet()[1]
+    monkeypatch.setattr(shared_state.time, 'time', lambda: 1004.0)
+    second = state.get_frame_packet()[1]
+    assert first['frame_age_ms'] == 0
+    assert second['frame_age_ms'] == 4000
+    assert first['frame_id'] == second['frame_id'] == 1
+
+
 def test_http_packet_header_and_body_survive_publication_during_send():
     import io
     import json
@@ -94,3 +108,37 @@ def test_proxy_preserves_packet_metadata_and_jpeg(monkeypatch):
     response = asyncio.run(web_server.frame_packet(None))
     assert response.body == b"jpeg"
     assert response.headers["x-frame-telemetry"] == '{"frame_id":12,"people_count":4}'
+
+
+def test_stream_relays_matching_packets_skips_duplicates_and_closes(monkeypatch):
+    import asyncio
+    import json
+    import struct
+    import httpx
+    from types import SimpleNamespace
+    from src.ui import web_server
+
+    calls = []
+    async def get(url, **kwargs):
+        frame_id = [1, 1, 2][len(calls)]
+        calls.append(frame_id)
+        return httpx.Response(200, content=str(frame_id).encode(), headers={
+            'X-Frame-Telemetry': json.dumps({'frame_id': frame_id, 'source_generation': 1})})
+    async def disconnected():
+        return len(calls) >= 3
+    async def sleep(seconds):
+        pass
+    monkeypatch.setattr(web_server, 'get_backend_url', lambda request: 'http://backend')
+    monkeypatch.setattr(web_server, 'get_backend_http_client', lambda: SimpleNamespace(get=get))
+    monkeypatch.setattr(web_server.asyncio, 'sleep', sleep)
+    async def collect():
+        response = await web_server.frame_stream(SimpleNamespace(is_disconnected=disconnected))
+        return [part async for part in response.body_iterator]
+    parts = asyncio.run(collect())
+    assert len(parts) == 2
+    for part, frame_id in zip(parts, [1, 2]):
+        meta_size, jpeg_size = struct.unpack('!II', part[:8])
+        metrics = json.loads(part[8:8 + meta_size])
+        assert metrics['frame_id'] == frame_id
+        assert part[8 + meta_size:] == str(frame_id).encode()
+        assert jpeg_size == 1

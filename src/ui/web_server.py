@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import struct
 import time
 from typing import Any
 import urllib.parse
@@ -40,18 +41,17 @@ import cv2
 import httpx
 import numpy as np
 import uvicorn
-from src.storage import get_storage, validate_key, StorageUploadTooLarge
+# Ensure repository root is on sys.path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.storage import get_storage, validate_key, StorageUploadTooLarge
 from src.face.face_embedder import decode_face_image_bytes
 from src.recognition.target_matcher import TargetRegistrationError, target_manager
 from src.stream.caltrans_service import caltrans_service
 from src.stream.preview_manager import preview_manager
 from src.stream.seattle_sdot_service import seattle_service
-
-# Ensure repository root is on sys.path
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1701,6 +1701,51 @@ async def frame_packet(request: Request) -> Response:
                         media_type="image/jpeg", headers=headers)
     except httpx.HTTPError:
         return Response(status_code=503, headers={"Cache-Control": "no-store"})
+
+
+def _encode_frame_stream_packet(metrics: dict, jpeg: bytes = b"") -> bytes:
+    metadata = json.dumps(metrics, separators=(",", ":")).encode("utf-8")
+    if len(metadata) > 65536 or len(jpeg) > 4 * 1024 * 1024:
+        raise ValueError("Frame packet exceeds preview limits")
+    return struct.pack("!II", len(metadata), len(jpeg)) + metadata + jpeg
+
+
+@app.get("/frame_stream")
+@app.get("/api/frame_stream")
+async def frame_stream(request: Request) -> StreamingResponse:
+    """Keep image/metrics together without a browser-to-Colab RTT per frame."""
+    target = f"{get_backend_url(request).rstrip('/')}/frame_packet"
+    client = get_backend_http_client()
+
+    async def frames():
+        last_key = None
+        heartbeat = 0.0
+        while not await request.is_disconnected():
+            started = time.monotonic()
+            try:
+                response = await client.get(target, timeout=3.0)
+                if response.status_code == 200:
+                    metrics = json.loads(response.headers.get("X-Frame-Telemetry", "null"))
+                    if not isinstance(metrics, dict):
+                        raise ValueError("Missing frame metadata")
+                    key = (metrics.get("source_generation"), metrics.get("frame_id"))
+                    if key != last_key and float(metrics.get("frame_age_ms", 0)) <= 3000:
+                        packet = _encode_frame_stream_packet(metrics, response.content)
+                        last_key = key
+                        yield packet
+                        heartbeat = time.monotonic()
+            except (httpx.HTTPError, ValueError, TypeError):
+                # The client watchdog exposes stale images. Keep retrying the
+                # backend without accumulating queued frames or stale payloads.
+                await asyncio.sleep(.25)
+            if time.monotonic() - heartbeat >= 1.0:
+                yield _encode_frame_stream_packet({"idle": True})
+                heartbeat = time.monotonic()
+            await asyncio.sleep(max(0.005, 1 / 30 - (time.monotonic() - started)))
+
+    return StreamingResponse(frames(), media_type="application/octet-stream",
+        headers={"Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no",
+                 "X-DATT-Frame-Protocol": "1"})
 
 
 @app.get("/video_feed")

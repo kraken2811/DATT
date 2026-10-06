@@ -568,7 +568,9 @@ class SharedRuntimeState:
             obs, _ = self._stream_observation_locked()
             if obs is None or not obs.jpeg_bytes or obs.telemetry is None:
                 return None
-            return obs.jpeg_bytes, dict(obs.telemetry)
+            metrics = dict(obs.telemetry)
+            metrics['frame_age_ms'] = max(0.0, (time.time() - obs.timestamp) * 1000.0)
+            return obs.jpeg_bytes, metrics
 
     def get_observation(self) -> Observation | None:
         """Fetch current synchronized observation snapshot."""

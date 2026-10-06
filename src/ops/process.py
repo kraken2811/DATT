@@ -92,6 +92,11 @@ def start(mode='api', port=8501, ai_port=8000, timeout=90):
         return status()
     for check_port in ([port, ai_port] if mode != 'api' else [port]):
         with socket.socket() as sock:
+            # Match the POSIX server's rebind semantics after streaming clients
+            # disconnect. A live listener still fails; Windows reuse can steal
+            # an occupied port, so retain its exclusive default there.
+            if os.name != 'nt':
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(('127.0.0.1', check_port))
     import psutil
     token = uuid4().hex
