@@ -24,6 +24,7 @@
 
     // UI States
     const UI_STATE = {
+        DASHBOARD: "DASHBOARD",
         SELECT_CAMERA: "SELECT_CAMERA",
         CONNECTING: "CONNECTING",
         MONITORING: "MONITORING",
@@ -306,8 +307,9 @@
         evPlateVehicleCount: document.getElementById("evPlateVehicleCount"),
         evMatchCount: document.getElementById("evMatchCount"),
 
-        // Event Center Tabs & Filters
+        // Event Center Tabs & Minimal Filters
         eventTabsBar: document.getElementById("eventTabsBar"),
+        eventSearchInput: document.getElementById("eventSearchInput"),
         eventFilterCamera: document.getElementById("eventFilterCamera"),
         eventFilterType: document.getElementById("eventFilterType"),
         eventFilterTarget: document.getElementById("eventFilterTarget"),
@@ -339,7 +341,16 @@
         btnEventNextPage: document.getElementById("btnEventNextPage"),
         eventCurrentPageBadge: document.getElementById("eventCurrentPageBadge"),
 
-        // Event Center Detail Drawer
+        // Event Detail Popup Modal (Enterprise Minimalist Modal)
+        eventDetailModal: document.getElementById("eventDetailModal"),
+        evModalHeading: document.getElementById("evModalHeading"),
+        evModalBadgeType: document.getElementById("evModalBadgeType"),
+        evModalMatchPill: document.getElementById("evModalMatchPill"),
+        evModalBody: document.getElementById("evModalBody"),
+        btnCloseEventModal: document.getElementById("btnCloseEventModal"),
+        btnCloseEventModalFooter: document.getElementById("btnCloseEventModalFooter"),
+
+        // Legacy Drawer Fallback references
         drawerEventDetail: document.getElementById("drawerEventDetail"),
         btnCloseEventDrawer: document.getElementById("btnCloseEventDrawer"),
         btnCloseEventDrawerFooter: document.getElementById("btnCloseEventDrawerFooter"),
@@ -526,64 +537,88 @@
         meta = meta || {};
 
         window.DattAlerts.setActive(newState === UI_STATE.ALERTS);
-        document.getElementById("alertsScreen").style.display = "none";
+
+        const appContainer = document.getElementById("appContainer");
+        const streamScreen = document.getElementById("streamScreen");
+        const dashboardScreen = document.getElementById("dashboardScreen");
+        const alertsScreen = document.getElementById("alertsScreen");
 
         // Hide all screens first
-        DOM.selectionScreen.style.display = "none";
-        DOM.connectingScreen.style.display = "none";
-        DOM.errorScreen.style.display = "none";
-        DOM.monitoringScreen.style.display = "none";
+        if (DOM.selectionScreen) DOM.selectionScreen.style.display = "none";
+        if (DOM.connectingScreen) DOM.connectingScreen.style.display = "none";
+        if (DOM.errorScreen) DOM.errorScreen.style.display = "none";
+        if (dashboardScreen) dashboardScreen.style.display = "none";
         if (DOM.watchlistScreen) DOM.watchlistScreen.style.display = "none";
         if (DOM.cameraManagementScreen) DOM.cameraManagementScreen.style.display = "none";
         if (DOM.eventCenterScreen) DOM.eventCenterScreen.style.display = "none";
+        if (alertsScreen) alertsScreen.style.display = "none";
+        if (streamScreen) streamScreen.style.display = "none";
 
-        if (newState === UI_STATE.SELECT_CAMERA) {
-            DOM.selectionScreen.style.display = "flex";
-            stopMonitoringTimers();
+        if (newState === UI_STATE.MONITORING) {
+            // CAMERA STREAM VIEW: NO SIDEBAR! NO NAVIGATION! NO EVENT FEED!
+            if (appContainer) appContainer.style.display = "none";
+            if (streamScreen) streamScreen.style.display = "flex";
             stopConnectionPolling();
-            updateActiveNavHighlight("camera");
-            window.dattLoadMetrics = window.dattLoadMetrics || { startTime: performance.now() };
-            window.dattLoadMetrics.uiShellReady = performance.now();
-            fetchPublicCctvCameras();
-            // Note: Defer fetchConfigCameras() to when YouTube tab is selected to keep initial load lightweight
-        } else if (newState === UI_STATE.CONNECTING) {
-            DOM.connectingScreen.style.display = "flex";
-            stopMonitoringTimers();
-            const camName = meta.name || "Camera";
-            DOM.connectingTargetName.textContent = `Đang kết nối luồng "${camName}" và đợi khung hình đầu tiên...`;
-            resetConnectingSteps();
-        } else if (newState === UI_STATE.ERROR) {
-            DOM.errorScreen.style.display = "flex";
-            stopMonitoringTimers();
-            stopConnectionPolling();
-            DOM.errorMessageText.textContent = meta.message || "Không thể kết nối camera. Vui lòng kiểm tra lại luồng phát.";
-            if (meta.debug) {
-                DOM.errorDebugBox.style.display = "block";
-                DOM.errorDebugBox.textContent = `Chi tiết lỗi: ${meta.debug}`;
-            } else {
-                DOM.errorDebugBox.style.display = "none";
-            }
-        } else if (newState === UI_STATE.MONITORING) {
-            DOM.monitoringScreen.style.display = "block";
-            stopConnectionPolling();
-            updateActiveNavHighlight("dashboard");
-            updateSourceHeader(meta.name, meta.provider, meta.source_type);
+            const camName = meta.name || state.activeCameraName || "Camera";
+            const streamTitle = document.getElementById("streamCamTitle");
+            if (streamTitle) streamTitle.textContent = camName;
+            const fsCam = document.getElementById("fsCamName");
+            if (fsCam) fsCam.textContent = camName.toUpperCase();
             triggerVideoRefresh();
             startMonitoringTimers();
-        } else if (newState === UI_STATE.WATCHLIST) {
-            if (DOM.watchlistScreen) DOM.watchlistScreen.style.display = "block";
+            return;
+        }
+
+        // For all other states: Show #appContainer (which has the unified white sidebar!)
+        if (appContainer) appContainer.style.display = "flex";
+
+        if (newState === UI_STATE.DASHBOARD) {
+            if (dashboardScreen) dashboardScreen.style.display = "block";
             stopMonitoringTimers();
             stopConnectionPolling();
-            updateActiveNavHighlight("watchlist");
-            loadWatchlist();
+            updateActiveNavHighlight("dashboard");
+            updateDashboardMetrics();
         } else if (newState === UI_STATE.CAMERA_MANAGEMENT) {
             if (DOM.cameraManagementScreen) DOM.cameraManagementScreen.style.display = "block";
             stopMonitoringTimers();
             stopConnectionPolling();
             updateActiveNavHighlight("camera");
             loadManagementCameras();
+        } else if (newState === UI_STATE.SELECT_CAMERA) {
+            if (DOM.selectionScreen) DOM.selectionScreen.style.display = "block";
+            stopMonitoringTimers();
+            stopConnectionPolling();
+            updateActiveNavHighlight("camera");
+            fetchPublicCctvCameras();
+        } else if (newState === UI_STATE.CONNECTING) {
+            if (DOM.connectingScreen) DOM.connectingScreen.style.display = "flex";
+            stopMonitoringTimers();
+            const camName = meta.name || "Camera";
+            if (DOM.connectingTargetName) {
+                DOM.connectingTargetName.textContent = `Đang kết nối luồng "${camName}" và đợi khung hình đầu tiên...`;
+            }
+            resetConnectingSteps();
+        } else if (newState === UI_STATE.ERROR) {
+            if (DOM.errorScreen) DOM.errorScreen.style.display = "flex";
+            stopMonitoringTimers();
+            stopConnectionPolling();
+            if (DOM.errorMessageText) {
+                DOM.errorMessageText.textContent = meta.message || "Không thể kết nối camera. Vui lòng kiểm tra lại luồng phát.";
+            }
+            if (meta.debug && DOM.errorDebugBox) {
+                DOM.errorDebugBox.style.display = "block";
+                DOM.errorDebugBox.textContent = `Chi tiết lỗi: ${meta.debug}`;
+            } else if (DOM.errorDebugBox) {
+                DOM.errorDebugBox.style.display = "none";
+            }
+        } else if (newState === UI_STATE.WATCHLIST) {
+            if (DOM.watchlistScreen) DOM.watchlistScreen.style.display = "block";
+            stopMonitoringTimers();
+            stopConnectionPolling();
+            updateActiveNavHighlight(watchlistState.activeTab === "vehicle" ? "vehicle-watchlist" : "face-watchlist");
+            loadWatchlist();
         } else if (newState === UI_STATE.ALERTS) {
-            document.getElementById("alertsScreen").style.display = "block";
+            if (alertsScreen) alertsScreen.style.display = "block";
             stopMonitoringTimers();
             stopConnectionPolling();
             updateActiveNavHighlight("alerts");
@@ -1535,12 +1570,14 @@
     let frameEpoch = 0;
     let frameController = null;
     let frameTimer = null;
+    let frameWatchdog = null;
 
     function stopFramePackets() {
         frameEpoch++;
         if (frameController) frameController.abort();
         frameController = null;
         clearTimeout(frameTimer);
+        clearTimeout(frameWatchdog);
     }
 
     function triggerVideoRefresh() {
@@ -1554,19 +1591,79 @@
         }
     }
 
-    function setupVideoStream() {}
+    function setupVideoStream() {
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) stopFramePackets();
+            else if (state.uiState === UI_STATE.MONITORING) startFramePackets();
+        });
+    }
     function pollTelemetry() { /* Compatibility alias for telemetry streaming */ }
 
     function startFramePackets() {
         stopFramePackets();
+        if (typeof document !== "undefined" && document.hidden) return;
         const epoch = frameEpoch;
         let lastKey = null;
+        let lastPaintAt = performance.now();
+        let painted = false;
+        let displayTimes = [];
+        // A short proxy hiccup must not hide a usable frame. Conversely, a
+        // stream repeating the same JPEG must never keep reporting RUNNING.
+        function checkFreshness() {
+            if (epoch !== frameEpoch) return;
+            if (performance.now() - lastPaintAt >= 3000) {
+                DOM.videoErrorOverlay.style.display = "flex";
+                if (DOM.metricStreamFps) DOM.metricStreamFps.textContent = "0.0";
+                handleTelemetryError();
+            }
+            frameWatchdog = setTimeout(checkFreshness, 1000);
+        }
+        frameWatchdog = setTimeout(checkFreshness, 1000);
+        async function paintPacket(metrics, blob) {
+            if (!metrics || metrics.frame_id == null || metrics.source_generation == null)
+                throw new Error("Frame metadata missing");
+            if (Number(metrics.frame_age_ms || 0) > 3000)
+                throw new Error("Camera frame is stale");
+            const key = `${metrics.source_generation}:${metrics.frame_id}`;
+            if (epoch !== frameEpoch) return;
+            if (key !== lastKey) {
+                const bitmap = await createImageBitmap(blob);
+                try {
+                    await new Promise((resolve, reject) => requestAnimationFrame(() => {
+                        try {
+                            if (epoch !== frameEpoch) return;
+                            const canvas = DOM.videoFeed;
+                            if (canvas.width !== bitmap.width) canvas.width = bitmap.width;
+                            if (canvas.height !== bitmap.height) canvas.height = bitmap.height;
+                            canvas.getContext("2d").drawImage(bitmap, 0, 0);
+                            applyTelemetry(metrics);
+                            canvas.dataset.frameId = String(metrics.frame_id);
+                            canvas.dataset.sourceGeneration = String(metrics.source_generation);
+                            lastKey = key;
+                            lastPaintAt = performance.now();
+                            painted = true;
+                            displayTimes.push(lastPaintAt);
+                            displayTimes = displayTimes.filter(t => lastPaintAt - t <= 2000);
+                            if (DOM.metricStreamFps) {
+                                const span = lastPaintAt - displayTimes[0];
+                                DOM.metricStreamFps.textContent = span > 0
+                                    ? ((displayTimes.length - 1) * 1000 / span).toFixed(1) : "--";
+                            }
+                        } catch (error) { reject(error); } finally { resolve(); }
+                    }));
+                } finally { bitmap.close(); }
+            }
+            if (epoch !== frameEpoch) return;
+            if (painted && performance.now() - lastPaintAt < 3000)
+                DOM.videoErrorOverlay.style.display = "none";
+            if (performance.now() - lastPaintAt < 3000) state.consecutiveErrors = 0;
+        }
         async function nextFrame() {
             if (epoch !== frameEpoch || state.uiState !== UI_STATE.MONITORING) return;
             const started = performance.now();
             const controller = new AbortController();
             frameController = controller;
-            const timeout = setTimeout(() => controller.abort(), 5000);
+            const timeout = setTimeout(() => controller.abort(), 8000);
             let failed = false;
             try {
                 const response = await fetch(apiUrl("/frame_packet"), {
@@ -1574,41 +1671,20 @@
                 });
                 if (epoch !== frameEpoch) return;
                 if (response.status === 204) {
-                    DOM.videoErrorOverlay.style.display = "flex";
+                    failed = true;
                     return;
                 }
                 if (!response.ok) throw new Error(`Frame HTTP ${response.status}`);
                 const metrics = JSON.parse(response.headers.get("X-Frame-Telemetry"));
-                const key = `${metrics.source_generation}:${metrics.frame_id}`;
-                const blob = await response.blob();
-                if (epoch !== frameEpoch) return;
-                if (key !== lastKey) {
-                    const bitmap = await createImageBitmap(blob);
-                    try {
-                        await new Promise(resolve => requestAnimationFrame(() => {
-                            try {
-                                if (epoch !== frameEpoch) return;
-                                const canvas = DOM.videoFeed;
-                                if (canvas.width !== bitmap.width) canvas.width = bitmap.width;
-                                if (canvas.height !== bitmap.height) canvas.height = bitmap.height;
-                                canvas.getContext("2d").drawImage(bitmap, 0, 0);
-                                applyTelemetry(metrics);
-                                canvas.dataset.frameId = String(metrics.frame_id);
-                                canvas.dataset.sourceGeneration = String(metrics.source_generation);
-                                lastKey = key;
-                            } finally { resolve(); }
-                        }));
-                    } finally { bitmap.close(); }
-                }
-                if (epoch !== frameEpoch) return;
-                DOM.videoErrorOverlay.style.display = "none";
+                await paintPacket(metrics, await response.blob());
                 DOM.pingLatency.textContent = `${Math.round(performance.now() - started)} ms`;
-                state.consecutiveErrors = 0;
+                if (performance.now() - lastPaintAt < 3000) state.consecutiveErrors = 0;
             } catch (error) {
                 failed = true;
                 if (epoch === frameEpoch) {
-                    DOM.videoErrorOverlay.style.display = "flex";
-                    handleTelemetryError();
+                    // Watchdog handles visible failure by frame age, including
+                    // stalled fetch/decode and successful-but-duplicate packets.
+                    DOM.pingLatency.textContent = "Đang kết nối lại…";
                 }
             } finally {
                 clearTimeout(timeout);
@@ -1617,7 +1693,53 @@
                 }
             }
         }
-        nextFrame();
+        let streamFailures = 0;
+        async function connectFrameStream() {
+            if (epoch !== frameEpoch || state.uiState !== UI_STATE.MONITORING) return;
+            const controller = new AbortController();
+            frameController = controller;
+            let reader = null, timeout = null;
+            const armTimeout = () => {
+                clearTimeout(timeout);
+                timeout = setTimeout(() => controller.abort(), 8000);
+            };
+            try {
+                armTimeout();
+                const response = await fetch(apiUrl("/frame_stream"), {cache: "no-store", signal: controller.signal});
+                if (!response.ok || response.headers.get("X-DATT-Frame-Protocol") !== "1" || !response.body)
+                    throw new Error("Streaming preview unavailable");
+                if (epoch !== frameEpoch) return;
+                reader = response.body.getReader();
+                const parser = new DattFrameStreamParser();
+                DOM.videoFeed.dataset.transport = "stream";
+                while (epoch === frameEpoch) {
+                    const {value, done} = await reader.read();
+                    if (done) throw new Error("Preview stream ended");
+                    armTimeout();
+                    const packet = parser.push(value);
+                    if (packet) {
+                        await paintPacket(packet.metrics, packet.blob);
+                        streamFailures = 0;
+                        DOM.pingLatency.textContent = "Streaming";
+                    }
+                }
+            } catch (error) {
+                streamFailures++;
+            } finally {
+                clearTimeout(timeout);
+                if (reader) { try { await reader.cancel(); } catch (_) {} }
+                controller.abort();
+                if (epoch === frameEpoch) {
+                    // Proxies without streaming support retain the atomic JPEG fallback.
+                    if (streamFailures >= 3) {
+                        DOM.videoFeed.dataset.transport = "poll";
+                        frameTimer = setTimeout(nextFrame, 500);
+                    } else frameTimer = setTimeout(connectFrameStream, 500);
+                }
+            }
+        }
+        if (typeof DattFrameStreamParser === "undefined") nextFrame();
+        else connectFrameStream();
     }
 
     function applyTelemetry(data) {
@@ -1630,6 +1752,18 @@
         DOM.streamResolution.textContent = data.input_size || "640x640";
 
         DOM.metricPeopleCount.textContent = data.people_count !== undefined ? data.people_count : 0;
+        const peopleCount = data.people_count !== undefined ? data.people_count : 0;
+        const vehicleCount = data.car_count !== undefined ? data.car_count : 0;
+        const elFsPeople = document.getElementById("fsPeopleCount");
+        if (elFsPeople) elFsPeople.textContent = peopleCount;
+        const elFsVehicle = document.getElementById("fsVehicleCount");
+        if (elFsVehicle) elFsVehicle.textContent = vehicleCount;
+        const elStreamTitle = document.getElementById("streamCamTitle");
+        if (elStreamTitle) elStreamTitle.textContent = data.camera_name || data.camera_id || state.activeCameraName || "Camera";
+        const elFsCam = document.getElementById("fsCamName");
+        if (elFsCam) elFsCam.textContent = (data.camera_name || data.camera_id || state.activeCameraName || "Camera").toUpperCase();
+        const elStreamStatus = document.getElementById("streamStatusPill");
+        if (elStreamStatus) elStreamStatus.textContent = (status === "RUNNING") ? "● LIVE" : (status || "OFFLINE");
         const detectionStatus = document.getElementById("personDetectionStatus");
         if (detectionStatus) {
             detectionStatus.textContent = status !== "RUNNING" ? "Camera chưa hoạt động"
@@ -1659,7 +1793,7 @@
         DOM.metricDetections.textContent = data.detection_count == null ? "?" : data.detection_count;
         DOM.metricTracks.textContent = data.track_count || 0;
         DOM.metricProcessingFps.textContent = Number(data.processing_fps || 0).toFixed(1);
-        DOM.metricStreamFps.textContent = Number(data.stream_fps || 0).toFixed(1);
+        // Display FPS is measured after canvas paint, not source capture FPS.
         DOM.metricYoloLatency.textContent = `${Number(data.yolo_latency_ms || 0).toFixed(1)} ms`;
         DOM.metricPipelineLatency.textContent = `${Number(data.pipeline_latency_ms || 0).toFixed(1)} ms`;
 
@@ -2037,13 +2171,29 @@
             }
             history.pushState(null, "", url.toString());
             setUiState(UI_STATE.WATCHLIST);
+        } else if (navKey === "face-watchlist") {
+            const url = new URL(window.location);
+            url.pathname = "/watchlist";
+            url.searchParams.set("type", "face");
+            history.pushState(null, "", url.toString());
+            switchWatchlistTab("face", false);
+            setUiState(UI_STATE.WATCHLIST);
+        } else if (navKey === "vehicle-watchlist") {
+            const url = new URL(window.location);
+            url.pathname = "/watchlist";
+            url.searchParams.set("type", "vehicle");
+            history.pushState(null, "", url.toString());
+            switchWatchlistTab("vehicle", false);
+            setUiState(UI_STATE.WATCHLIST);
         } else if (navKey === "camera") {
             const url = new URL(window.location);
             url.pathname = "/cameras";
             history.pushState(null, "", url.toString());
             setUiState(UI_STATE.CAMERA_MANAGEMENT);
-        } else if (navKey === "dashboard" || navKey === "live") {
+        } else if (navKey === "dashboard") {
             history.pushState(null, "", "/");
+            setUiState(UI_STATE.DASHBOARD);
+        } else if (navKey === "live") {
             if (state.activeCameraName) {
                 setUiState(UI_STATE.MONITORING, {
                     name: state.activeCameraName,
@@ -2051,7 +2201,7 @@
                     source_type: state.activeSourceType
                 });
             } else {
-                checkInitialAppState();
+                setUiState(UI_STATE.CAMERA_MANAGEMENT);
             }
         } else if (navKey === "events") {
             const url = new URL(window.location);
@@ -2062,11 +2212,13 @@
             history.pushState(null, "", "/alerts");
             setUiState(UI_STATE.ALERTS);
         } else if (navKey === "analytics") {
-            showWatchlistBanner("Phân tích Thống kê (Analytics): Đang tổng hợp số liệu phát hiện.", "info");
+            showGlobalToast("Analytics", "Tính năng phân tích đang tổng hợp số liệu phát hiện.", "info");
         } else if (navKey === "settings") {
-            showWatchlistBanner("Cài đặt Hệ thống (Settings): Cấu hình tham số nhận diện và ngưỡng so khớp.", "info");
+            const sm = document.getElementById("settingsModal");
+            if (sm) sm.style.display = "flex";
         }
     }
+    window.dattNavigateTo = navigateTo;
 
     /**
      * Switch Watchlist Tab (Face vs Vehicle).
@@ -2318,14 +2470,14 @@
                     </td>
                     <td onclick="event.stopPropagation();">
                         <div class="table-actions-cell">
-                            <button type="button" class="row-action-btn" title="Xem chi tiết" onclick="window.dattOpenFaceDrawer('${escapeHtml(t.id)}')">
-                                👁️
+                            <button type="button" class="table-action-icon-btn btn-action-primary" title="Xem chi tiết" onclick="window.dattOpenFaceDrawer('${escapeHtml(t.id)}')">
+                                <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                             </button>
-                            <button type="button" class="row-action-btn" title="${isSelected ? 'Tạm ngưng' : 'Kích hoạt'}" onclick="window.dattToggleFaceActive('${escapeHtml(t.id)}', ${!isSelected})">
-                                ${isSelected ? '⏸️' : '▶️'}
+                            <button type="button" class="table-action-icon-btn" title="${isSelected ? 'Tạm ngưng' : 'Kích hoạt'}" onclick="window.dattToggleFaceActive('${escapeHtml(t.id)}', ${!isSelected})">
+                                ${isSelected ? '<svg viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>' : '<svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>'}
                             </button>
-                            <button type="button" class="row-action-btn btn-delete" title="Xóa đối tượng" onclick="window.dattConfirmDelete('face', '${escapeHtml(t.id)}', '${escapeHtml(t.name)}')">
-                                🗑️
+                            <button type="button" class="table-action-icon-btn btn-delete" title="Xóa đối tượng" onclick="window.dattConfirmDelete('face', '${escapeHtml(t.id)}', '${escapeHtml(t.name)}')">
+                                <svg viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
                             </button>
                         </div>
                     </td>
@@ -2406,17 +2558,17 @@
                     </td>
                     <td onclick="event.stopPropagation();">
                         <div class="table-actions-cell">
-                            <button type="button" class="row-action-btn" title="Xem chi tiết" onclick="window.dattOpenVehicleDrawer('${escapeHtml(v.id)}')">
-                                👁️
+                            <button type="button" class="table-action-icon-btn btn-action-primary" title="Xem chi tiết" onclick="window.dattOpenVehicleDrawer('${escapeHtml(v.id)}')">
+                                <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                             </button>
-                            <button type="button" class="row-action-btn" title="Chỉnh sửa" onclick="window.dattOpenEditVehicleModal('${escapeHtml(v.id)}')">
-                                ✏️
+                            <button type="button" class="table-action-icon-btn" title="Chỉnh sửa" onclick="window.dattOpenEditVehicleModal('${escapeHtml(v.id)}')">
+                                <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                             </button>
-                            <button type="button" class="row-action-btn" title="${isActive ? 'Tạm ngưng' : 'Kích hoạt'}" onclick="window.dattToggleVehicleActive('${escapeHtml(v.id)}', '${isActive ? 'disabled' : 'active'}')">
-                                ${isActive ? '⏸️' : '▶️'}
+                            <button type="button" class="table-action-icon-btn" title="${isActive ? 'Tạm ngưng' : 'Kích hoạt'}" onclick="window.dattToggleVehicleActive('${escapeHtml(v.id)}', '${isActive ? 'disabled' : 'active'}')">
+                                ${isActive ? '<svg viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>' : '<svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>'}
                             </button>
-                            <button type="button" class="row-action-btn btn-delete" title="Xóa phương tiện" onclick="window.dattConfirmDelete('vehicle', '${escapeHtml(v.id)}', '${escapeHtml(v.plate_number)}')">
-                                🗑️
+                            <button type="button" class="table-action-icon-btn btn-delete" title="Xóa phương tiện" onclick="window.dattConfirmDelete('vehicle', '${escapeHtml(v.id)}', '${escapeHtml(v.plate_number)}')">
+                                <svg viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
                             </button>
                         </div>
                     </td>
@@ -3519,20 +3671,22 @@
                     </td>
                     <td>
                         <div class="table-actions-cell">
-                            <button type="button" class="row-action-btn" title="Mở giám sát trực tiếp" onclick="window.dattLaunchMonitoring('${escapeHtml(cam.id)}')">
-                                🖥️
+                            <button type="button" class="table-action-icon-btn btn-action-primary" title="Xem camera trực tiếp" onclick="window.dattLaunchMonitoring('${escapeHtml(cam.id)}')">
+                                <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                             </button>
-                            <button type="button" class="row-action-btn" title="Xem chi tiết" onclick="window.dattOpenCamDrawer('${escapeHtml(cam.id)}')">
-                                👁️
+                            <button type="button" class="table-action-icon-btn" title="Xem chi tiết" onclick="window.dattOpenCamDrawer('${escapeHtml(cam.id)}')">
+                                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
                             </button>
-                            <button type="button" class="row-action-btn" title="Chỉnh sửa" onclick="window.dattOpenEditCamModal('${escapeHtml(cam.id)}')">
-                                ✏️
+                            <button type="button" class="table-action-icon-btn" title="Chỉnh sửa" onclick="window.dattOpenEditCamModal('${escapeHtml(cam.id)}')">
+                                <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                             </button>
-                            <button type="button" class="row-action-btn" title="${toggleTitle}" onclick="window.dattToggleCamStatus('${escapeHtml(cam.id)}')">
-                                ${toggleIcon}
+                            <button type="button" class="table-action-icon-btn" title="${toggleTitle}" onclick="window.dattToggleCamStatus('${escapeHtml(cam.id)}')">
+                                ${cam.status === "disabled"
+                                    ? '<svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>'
+                                    : '<svg viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>'}
                             </button>
-                            <button type="button" class="row-action-btn btn-delete" title="Xóa" onclick="window.dattOpenDeleteCamModal('${escapeHtml(cam.id)}')">
-                                🗑️
+                            <button type="button" class="table-action-icon-btn btn-delete" title="Xóa camera" onclick="window.dattOpenDeleteCamModal('${escapeHtml(cam.id)}')">
+                                <svg viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
                             </button>
                         </div>
                     </td>
@@ -4050,6 +4204,11 @@
      * EVENT CENTER CONTROLLER & STATE (TASK 2)
      * =========================================================================
      */
+    /**
+     * =========================================================================
+     * EVENT CENTER CONTROLLER & STATE (TASK 2 - MINIMALIST & POPUP)
+     * =========================================================================
+     */
     const eventCenterState = {
         currentTab: "all",
         page: 1,
@@ -4057,12 +4216,9 @@
         sort: "desc",
         total: 0,
         filters: {
+            search: "",
             camera: "",
             eventType: "",
-            targetId: "",
-            plate: "",
-            watchlistMatch: "",
-            notificationStatus: "",
             fromTime: "",
             toTime: ""
         },
@@ -4071,16 +4227,131 @@
         isLoading: false
     };
 
+    // Cache for Face Targets and Vehicle Watchlists
+    let faceTargetNameCache = null;
+    async function getFaceTargetName(targetId) {
+        if (!targetId) return null;
+        if (!faceTargetNameCache) {
+            try {
+                const resp = await fetch(apiUrl("/api/targets"));
+                if (resp.ok) {
+                    const data = await resp.json();
+                    faceTargetNameCache = {};
+                    const list = Array.isArray(data) ? data : (data && Array.isArray(data.targets) ? data.targets : []);
+                    list.forEach(t => {
+                        if (t && t.id) {
+                            faceTargetNameCache[t.id] = t.name;
+                            faceTargetNameCache[t.id.replace(/-/g, "")] = t.name;
+                        }
+                    });
+                }
+            } catch (e) {
+                faceTargetNameCache = {};
+            }
+        }
+        return (faceTargetNameCache && (faceTargetNameCache[targetId] || faceTargetNameCache[targetId.replace(/-/g, "")])) || null;
+    }
+
+    let vehicleWatchlistCache = null;
+    async function getVehicleWatchlistInfo(targetId, plate) {
+        if (!targetId && !plate) return null;
+        if (!vehicleWatchlistCache) {
+            try {
+                const resp = await fetch(apiUrl("/api/watchlist/vehicles"));
+                if (resp.ok) {
+                    const data = await resp.json();
+                    vehicleWatchlistCache = Array.isArray(data) ? data : (data && (data.vehicles || data.items) || []);
+                }
+            } catch (e) {
+                vehicleWatchlistCache = [];
+            }
+        }
+        const normPlate = plate ? plate.replace(/[^A-Za-z0-9]/g, "").toUpperCase() : "";
+        return (vehicleWatchlistCache || []).find(v => {
+            if (targetId && (v.id === targetId || (typeof v.id === "string" && v.id.replace(/-/g, "") === targetId.replace(/-/g, "")))) return true;
+            if (normPlate && v.plate_number && v.plate_number.replace(/[^A-Za-z0-9]/g, "").toUpperCase() === normPlate) return true;
+            return false;
+        }) || null;
+    }
+
+    function splitDateTime(isoString) {
+        if (!isoString) return { time: "--", date: "--" };
+        try {
+            const d = new Date(isoString);
+            if (isNaN(d.getTime())) return { time: isoString, date: "" };
+            const pad = (n) => String(n).padStart(2, "0");
+            const day = pad(d.getDate());
+            const month = pad(d.getMonth() + 1);
+            const year = d.getFullYear();
+            const hours = pad(d.getHours());
+            const mins = pad(d.getMinutes());
+            const secs = pad(d.getSeconds());
+            return {
+                time: `${hours}:${mins}:${secs}`,
+                date: `${day}/${month}/${year}`
+            };
+        } catch (e) {
+            return { time: isoString, date: "" };
+        }
+    }
+
+    function formatFullDateTime(isoString) {
+        if (!isoString) return "--";
+        try {
+            const d = new Date(isoString);
+            if (isNaN(d.getTime())) return isoString;
+            const pad = (n) => String(n).padStart(2, "0");
+            const day = pad(d.getDate());
+            const month = pad(d.getMonth() + 1);
+            const year = d.getFullYear();
+            const hours = pad(d.getHours());
+            const mins = pad(d.getMinutes());
+            const secs = pad(d.getSeconds());
+            return `${day}/${month}/${year} ${hours}:${mins}:${secs}`;
+        } catch (e) {
+            return isoString;
+        }
+    }
+
+    function vehicleColorLabel(color) {
+        if (!color) return "";
+        const labels = {
+            black: 'Đen', white: 'Trắng', gray: 'Xám', silver: 'Bạc', 'gray/silver': 'Xám / bạc',
+            red: 'Đỏ', blue: 'Xanh dương', green: 'Xanh lá', yellow: 'Vàng', orange: 'Cam',
+            brown: 'Nâu', other: 'Khác', unknown: 'Không xác định'
+        };
+        return labels[color.toLowerCase()] || color;
+    }
+
+    function getEventTypeDisplayName(evType) {
+        if (evType === "face") return "Khuôn mặt (Face)";
+        if (evType === "plate") return "Biển số xe (Plate)";
+        if (evType === "vehicle") return "Phương tiện (Vehicle)";
+        if (evType === "passage") return "Lượt xe qua (Passage)";
+        if (evType === "business") return "Sự kiện nghiệp vụ (Business)";
+        return evType ? evType.toUpperCase() : "--";
+    }
+
+    function getCameraDisplayName(camId) {
+        if (!camId) return "--";
+        const found = (cameraMgmtState.cameras || []).find(c => c.id === camId);
+        if (found && found.name) {
+            return `${found.name} (${camId})`;
+        }
+        return camId;
+    }
+
     /**
      * Load Real Summary Card Metrics for Event Center.
      */
     async function loadEventCenterSummary() {
         try {
-            const [respTotal, respFace, respPlate, respVehicle, respMatch] = await Promise.allSettled([
+            const [respTotal, respFace, respPlate, respVehicle, respPassage, respMatch] = await Promise.allSettled([
                 fetch(apiUrl("/api/event_center/events?page_size=1")),
                 fetch(apiUrl("/api/event_center/events?event_type=face&page_size=1")),
                 fetch(apiUrl("/api/event_center/events?event_type=plate&page_size=1")),
                 fetch(apiUrl("/api/event_center/events?event_type=vehicle&page_size=1")),
+                fetch(apiUrl("/api/event_center/events?event_type=passage&page_size=1")),
                 fetch(apiUrl("/api/event_center/events?watchlist_match=true&page_size=1"))
             ]);
 
@@ -4088,6 +4359,7 @@
             let faceCount = 0;
             let plateCount = 0;
             let vehicleCount = 0;
+            let passageCount = 0;
             let matchCount = 0;
 
             if (respTotal.status === "fulfilled" && respTotal.value.ok) {
@@ -4106,6 +4378,10 @@
                 const d = await respVehicle.value.json();
                 vehicleCount = d.total || 0;
             }
+            if (respPassage.status === "fulfilled" && respPassage.value.ok) {
+                const d = await respPassage.value.json();
+                passageCount = d.total || 0;
+            }
             if (respMatch.status === "fulfilled" && respMatch.value.ok) {
                 const d = await respMatch.value.json();
                 matchCount = d.total || 0;
@@ -4113,7 +4389,7 @@
 
             if (DOM.evTotalCount) DOM.evTotalCount.textContent = totalCount;
             if (DOM.evFaceCount) DOM.evFaceCount.textContent = faceCount;
-            if (DOM.evPlateVehicleCount) DOM.evPlateVehicleCount.textContent = (plateCount + vehicleCount);
+            if (DOM.evPlateVehicleCount) DOM.evPlateVehicleCount.textContent = (plateCount + vehicleCount + passageCount);
             if (DOM.evMatchCount) DOM.evMatchCount.textContent = matchCount;
             if (DOM.navEventCountBadge) DOM.navEventCountBadge.textContent = totalCount;
         } catch (e) {
@@ -4160,7 +4436,6 @@
             }
         });
 
-        // Also sync eventFilterType dropdown if applicable
         if (DOM.eventFilterType) {
             DOM.eventFilterType.value = (tabName === "all" ? "" : tabName);
         }
@@ -4187,30 +4462,20 @@
         params.set("page_size", String(eventCenterState.pageSize));
         params.set("sort", eventCenterState.sort || "desc");
 
-        // Event Type determination: Tab takes precedence if specific, else dropdown
-        if (eventCenterState.currentTab && eventCenterState.currentTab !== "all") {
-            params.set("event_type", eventCenterState.currentTab);
-        } else if (eventCenterState.filters.eventType) {
+        if (eventCenterState.filters.eventType) {
             params.set("event_type", eventCenterState.filters.eventType);
         }
-
         if (eventCenterState.filters.camera) {
             params.set("camera", eventCenterState.filters.camera);
         }
-        if (eventCenterState.filters.targetId) {
-            params.set("target_id", eventCenterState.filters.targetId);
+        if (eventCenterState.filters.search) {
+            const s = eventCenterState.filters.search.trim();
+            if (s.includes("-") && s.length >= 32) {
+                params.set("target_id", s);
+            } else {
+                params.set("plate", s);
+            }
         }
-        if (eventCenterState.filters.plate) {
-            params.set("plate", eventCenterState.filters.plate);
-        }
-        if (eventCenterState.filters.watchlistMatch) {
-            params.set("watchlist_match", eventCenterState.filters.watchlistMatch);
-        }
-        if (eventCenterState.filters.notificationStatus) {
-            params.set("notification_status", eventCenterState.filters.notificationStatus);
-        }
-
-        // Time Filters: backend requires timezone (ISO8601)
         if (eventCenterState.filters.fromTime) {
             try {
                 const dt = new Date(eventCenterState.filters.fromTime);
@@ -4242,13 +4507,9 @@
             if (DOM.eventTableSkeleton) DOM.eventTableSkeleton.style.display = "none";
 
             const hasActiveFilters = Boolean(
-                (eventCenterState.currentTab && eventCenterState.currentTab !== "all") ||
+                eventCenterState.filters.search ||
                 eventCenterState.filters.camera ||
                 eventCenterState.filters.eventType ||
-                eventCenterState.filters.targetId ||
-                eventCenterState.filters.plate ||
-                eventCenterState.filters.watchlistMatch ||
-                eventCenterState.filters.notificationStatus ||
                 eventCenterState.filters.fromTime ||
                 eventCenterState.filters.toTime
             );
@@ -4281,14 +4542,13 @@
     }
 
     /**
-     * Render Events Table Rows. Missing values must display "--". Never invent metadata.
+     * Render Events Table Rows: EXACTLY 5 MINIMALIST COLUMNS
+     * 1. Thời gian
+     * 2. Hình ảnh (Thumbnail 68x42, aspect ratio chuẩn, không stretch, fallback SVG không broken image)
+     * 3. Loại sự kiện (Badge gọn gàng)
+     * 4. Camera
+     * 5. Chi tiết (CHỈ DUY NHẤT một Eye icon monochrome, outline đẹp, tooltip "Xem chi tiết")
      */
-    function vehicleColorLabel(color) {
-        const labels = {black:'Đen',white:'Trắng',gray:'Xám',silver:'Bạc','gray/silver':'Xám / bạc',
-            red:'Đỏ',blue:'Xanh dương',green:'Xanh lá',yellow:'Vàng',orange:'Cam',brown:'Nâu',other:'Khác',unknown:'Không xác định'};
-        return labels[color] || 'Chưa có dữ liệu';
-    }
-
     function renderEventTable(events) {
         if (!DOM.eventTableBody) return;
 
@@ -4297,109 +4557,89 @@
             return;
         }
 
-        const filterType = eventCenterState.currentTab === 'all' ? eventCenterState.filters.eventType : eventCenterState.currentTab;
-        const vehicleOnly = ['plate','vehicle','passage'].includes(filterType);
-        document.getElementById('eventKindColorHeader').textContent = vehicleOnly ? 'MÀU XE' : filterType === 'face' ? 'LOẠI SỰ KIỆN' : 'LOẠI / MÀU XE';
-        document.getElementById('eventObjectHeader').hidden = vehicleOnly;
         DOM.eventTableBody.innerHTML = events.map(ev => {
-            const timeStr = ev.timestamp ? formatDateTime(ev.timestamp) : "--";
+            const dt = splitDateTime(ev.timestamp);
             const camId = ev.camera_id || "--";
-            const evType = ev.event_type || "--";
-            const objType = ev.object_type || "--";
+            const camName = getCameraDisplayName(camId);
+            const evType = ev.event_type || "";
+            const isMatch = Boolean(ev.watchlist_match);
 
-            // Event type badge formatting
-            let evTypeBadge = `<span class="event-type-badge ${escapeHtml(evType)}">${escapeHtml(evType.toUpperCase())}</span>`;
-            if (evType === "face") evTypeBadge = `<span class="event-type-badge face">👤 Face</span>`;
-            else if (evType === "plate") evTypeBadge = `<span class="event-type-badge plate">🔍 Plate</span>`;
-            else if (evType === "vehicle") evTypeBadge = `<span class="event-type-badge vehicle">🚗 Vehicle</span>`;
-            else if (evType === "passage") evTypeBadge = `<span class="event-type-badge passage">🛣️ Passage</span>`;
-            else if (evType === "business") evTypeBadge = `<span class="event-type-badge business">💼 Business</span>`;
-            if (ev.semantic_type && ev.semantic_type !== evType) {
-                evTypeBadge = `<span class="event-type-badge ${escapeHtml(evType)}">${escapeHtml(ev.semantic_type)}</span>`;
-            }
+            // 1. CỘT THỜI GIAN
+            const timeHtml = `
+                <div style="display: flex; flex-direction: column;">
+                    <span class="font-mono" style="font-size: 13px; font-weight: 600; color: var(--color-text-title);">${escapeHtml(dt.time)}</span>
+                    <span class="font-mono text-muted" style="font-size: 11px;">${escapeHtml(dt.date)}</span>
+                </div>
+            `;
 
-            if (['plate','vehicle','passage'].includes(evType)) {
-                evTypeBadge = escapeHtml(vehicleColorLabel(ev.detected_vehicle_color));
-            }
-            // Target or Plate display
-            let targetPlateHtml = "--";
-            if (ev.plate) {
-                targetPlateHtml = `<span class="license-plate-badge-sm font-mono font-semibold">${escapeHtml(ev.plate)}</span>`;
-            } else if (ev.target_id) {
-                targetPlateHtml = `<span class="font-mono text-muted" style="font-size:0.8rem;" title="${escapeHtml(ev.target_id)}">🎯 ${escapeHtml(ev.target_id.slice(0, 8))}...</span>`;
-            }
-
-            // Similarity or Confidence display
-            let confidenceStr = "--";
-            if (ev.similarity !== null && ev.similarity !== undefined) {
-                confidenceStr = `${(Number(ev.similarity) * 100).toFixed(1)}%`;
-            } else if (ev.confidence !== null && ev.confidence !== undefined) {
-                confidenceStr = `${(Number(ev.confidence) * 100).toFixed(1)}%`;
-            }
-
-            // Watchlist match badge
-            let matchHtml = `<span class="status-pill status-neutral">--</span>`;
-            if (ev.watchlist_match === true) {
-                matchHtml = `<span class="status-pill status-danger font-semibold">✓ MATCH</span>`;
-            } else if (ev.watchlist_match === false) {
-                matchHtml = `<span class="status-pill status-neutral">Không khớp</span>`;
-            }
-
-            // Notification status badge
-            let noticeHtml = "--";
-            if (ev.notification_status) {
-                const s = ev.notification_status;
-                if (s === "sent") noticeHtml = `<span class="status-pill status-active">✓ Đã gửi</span>`;
-                else if (s === "pending") noticeHtml = `<span class="status-pill status-warning">⏳ Chờ gửi</span>`;
-                else if (s === "failed") noticeHtml = `<span class="status-pill status-danger">✕ Thất bại</span>`;
-                else if (s === "suppressed") noticeHtml = `<span class="status-pill status-neutral">Bị chặn</span>`;
-                else noticeHtml = `<span class="status-pill status-neutral">${escapeHtml(s)}</span>`;
-            }
-
-            // Evidence button/thumbnail
-            let evidenceHtml = `<span class="text-muted">--</span>`;
+            // 2. CỘT HÌNH ẢNH (Thumbnail 68x42, aspect ratio chuẩn, không stretch, fallback SVG không broken image)
+            let thumbHtml = `
+                <div class="event-thumbnail-wrap" title="Xem chi tiết sự kiện" onclick="window.dattOpenEventDetailModal('${escapeHtml(ev.event_id)}')">
+                    <div class="event-thumb-empty" title="Không có hình ảnh">
+                        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><line x1="21" y1="21" x2="3" y2="3"/></svg>
+                        <span>Trống</span>
+                    </div>
+                </div>
+            `;
             if (ev.evidence && ev.evidence.url) {
-                evidenceHtml = `
-                    <button type="button" class="row-action-btn" title="Xem bằng chứng hình ảnh" onclick="window.dattOpenEventDetailDrawer('${escapeHtml(ev.event_id)}')">
-                        🖼️
-                    </button>
+                const imgUrl = apiUrl(ev.evidence.url);
+                thumbHtml = `
+                    <div class="event-thumbnail-wrap" title="Bấm để xem chi tiết ảnh" onclick="window.dattOpenEventDetailModal('${escapeHtml(ev.event_id)}')">
+                        <img src="${imgUrl}" alt="Thumbnail" class="event-table-thumb" loading="lazy" onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'event-thumb-empty\\' title=\\'Lỗi tải ảnh\\'><svg viewBox=\\'0 0 24 24\\'><rect x=\\'3\\' y=\\'3\\' width=\\'18\\' height=\\'18\\' rx=\\'2\\'/><line x1=\\'9\\' y1=\\'9\\' x2=\\'15\\' y2=\\'15\\'/><line x1=\\'15\\' y1=\\'9\\' x2=\\'9\\' y2=\\'15\\'/></svg><span>Lỗi</span></div>';">
+                    </div>
                 `;
             }
 
+            // 3. CỘT LOẠI SỰ KIỆN (Badge gọn gàng)
+            let evTypeBadge = `<span class="event-type-badge">${escapeHtml(evType || "EVENT")}</span>`;
+            if (evType === "face") {
+                if (isMatch) {
+                    evTypeBadge = `<span class="event-type-badge face" style="background:#FEE2E2; color:#B91C1C; border-color:#FECACA; font-weight:600;">Face Watchlist</span>`;
+                } else {
+                    evTypeBadge = `<span class="event-type-badge face">Khuôn mặt</span>`;
+                }
+            } else if (evType === "plate") {
+                if (isMatch) {
+                    evTypeBadge = `<span class="event-type-badge plate" style="background:#FEF3C7; color:#B45309; border-color:#FDE68A; font-weight:600;">Vehicle Watchlist</span>`;
+                } else {
+                    evTypeBadge = `<span class="event-type-badge plate">Biển số xe</span>`;
+                }
+            } else if (evType === "vehicle") {
+                evTypeBadge = `<span class="event-type-badge vehicle">Phương tiện</span>`;
+            } else if (evType === "passage") {
+                evTypeBadge = `<span class="event-type-badge passage">Lượt xe qua</span>`;
+            } else if (evType === "business") {
+                evTypeBadge = `<span class="event-type-badge business">Nghiệp vụ</span>`;
+            }
+
+            // 4. CỘT CAMERA
+            const camHtml = `
+                <div style="display: flex; align-items: center; gap: 6px;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px; color: var(--color-text-muted); flex-shrink: 0;">
+                        <path d="M23 7l-7 5 7 5V7z"/>
+                        <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+                    </svg>
+                    <span class="font-medium text-highlight" style="font-size: 13px;" title="${escapeHtml(camId)}">${escapeHtml(camName)}</span>
+                </div>
+            `;
+
+            // 5. CỘT CHI TIẾT (CHỈ DUY NHẤT một Eye icon monochrome, outline đẹp, tooltip "Xem chi tiết")
+            const detailBtnHtml = `
+                <button type="button" class="table-action-icon-btn" title="Xem chi tiết" aria-label="Xem chi tiết" onclick="window.dattOpenEventDetailModal('${escapeHtml(ev.event_id)}')">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 17px; height: 17px;">
+                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                        <circle cx="12" cy="12" r="3"/>
+                    </svg>
+                </button>
+            `;
+
             return `
                 <tr data-event-id="${escapeHtml(ev.event_id)}">
-                    <td>
-                        <span class="font-mono text-muted" style="font-size: 0.8rem;">${escapeHtml(timeStr)}</span>
-                    </td>
-                    <td>
-                        <span class="font-semibold text-highlight" style="font-size: 0.85rem;">📹 ${escapeHtml(camId)}</span>
-                    </td>
-                    <td>
-                        ${evTypeBadge}
-                    </td>
-                    <td ${vehicleOnly ? "hidden" : ""}>
-                        <span style="font-size: 0.83rem;">${escapeHtml(objType)}</span>
-                    </td>
-                    <td>
-                        ${targetPlateHtml}
-                    </td>
-                    <td>
-                        <span class="font-mono font-semibold" style="font-size: 0.85rem;">${escapeHtml(confidenceStr)}</span>
-                    </td>
-                    <td>
-                        ${matchHtml}
-                    </td>
-                    <td>
-                        ${noticeHtml}
-                    </td>
-                    <td style="text-align: center;">
-                        ${evidenceHtml}
-                    </td>
-                    <td style="text-align: center;">
-                        <button type="button" class="row-action-btn" title="Xem chi tiết sự kiện" onclick="window.dattOpenEventDetailDrawer('${escapeHtml(ev.event_id)}')">
-                            👁️
-                        </button>
-                    </td>
+                    <td>${timeHtml}</td>
+                    <td style="text-align: center; vertical-align: middle;">${thumbHtml}</td>
+                    <td>${evTypeBadge}</td>
+                    <td>${camHtml}</td>
+                    <td style="text-align: center; vertical-align: middle;">${detailBtnHtml}</td>
                 </tr>
             `;
         }).join("");
@@ -4428,47 +4668,31 @@
     }
 
     /**
-     * Open Event Detail Drawer and Fetch Full Event Data.
-     * Evidence must use /api/event_center/events/{type}:{uuid}/evidence.
+     * Open Event Detail Popup Modal (Enterprise Popup).
+     * Adaptive rendering by event type, large image, label-value layout, no empty fields, no raw JSON blobs.
      */
-    window.dattOpenEventDetailDrawer = async function(eventId) {
+    window.dattOpenEventDetailModal = async function(eventId) {
         if (!eventId) return;
 
-        // Reset fields to --
-        if (DOM.evDrawerTitle) DOM.evDrawerTitle.textContent = eventId;
-        if (DOM.evDrawerIdSub) DOM.evDrawerIdSub.textContent = eventId;
-        if (DOM.evDrawerId) DOM.evDrawerId.textContent = eventId;
-        if (DOM.evDrawerBadgeType) DOM.evDrawerBadgeType.textContent = "EVENT PROFILE";
-        if (DOM.evDrawerMatchPill) {
-            DOM.evDrawerMatchPill.textContent = "--";
-            DOM.evDrawerMatchPill.className = "status-pill";
+        if (DOM.eventDetailModal) {
+            DOM.eventDetailModal.style.display = "flex";
+            DOM.eventDetailModal.setAttribute("aria-hidden", "false");
         }
-        if (DOM.evDrawerType) DOM.evDrawerType.textContent = "--";
-        if (DOM.evDrawerTimestamp) DOM.evDrawerTimestamp.textContent = "--";
-        if (DOM.evDrawerCamera) DOM.evDrawerCamera.textContent = "--";
-        if (DOM.evDrawerObjectType) DOM.evDrawerObjectType.textContent = "--";
-        if (DOM.evDrawerTarget) DOM.evDrawerTarget.textContent = "--";
-        if (DOM.evDrawerPlate) DOM.evDrawerPlate.textContent = "--";
-        if (DOM.evDrawerSimilarity) DOM.evDrawerSimilarity.textContent = "--";
-        if (DOM.evDrawerConfidence) DOM.evDrawerConfidence.textContent = "--";
-        if (DOM.evDrawerMatch) DOM.evDrawerMatch.textContent = "--";
-        if (DOM.evDrawerNotification) DOM.evDrawerNotification.textContent = "--";
-        if (DOM.evDrawerExtendedText) DOM.evDrawerExtendedText.textContent = "Đang tải dữ liệu...";
 
-        // Evidence frame reset
-        if (DOM.evDrawerEvidenceLoading) DOM.evDrawerEvidenceLoading.style.display = "flex";
-        if (DOM.evDrawerEvidenceImg) {
-            DOM.evDrawerEvidenceImg.style.display = "none";
-            DOM.evDrawerEvidenceImg.src = "";
+        if (DOM.evModalHeading) DOM.evModalHeading.textContent = "Chi Tiết Sự Kiện";
+        if (DOM.evModalBadgeType) {
+            DOM.evModalBadgeType.textContent = "EVENT";
+            DOM.evModalBadgeType.className = "event-type-badge";
         }
-        if (DOM.evDrawerEvidenceUnavailable) DOM.evDrawerEvidenceUnavailable.style.display = "none";
-        if (DOM.evDrawerEvidenceStatusBadge) DOM.evDrawerEvidenceStatusBadge.textContent = "Đang tải...";
+        if (DOM.evModalMatchPill) DOM.evModalMatchPill.style.display = "none";
 
-        if (DOM.drawerEventDetail) {
-            DOM.drawerEventDetail.classList.add("open");
-        }
-        if (DOM.drawerBackdrop) {
-            DOM.drawerBackdrop.style.display = "block";
+        if (DOM.evModalBody) {
+            DOM.evModalBody.innerHTML = `
+                <div style="padding: 40px; text-align: center; color: var(--color-text-muted);">
+                    <div class="spinner-sm" style="margin: 0 auto 12px auto;"></div>
+                    <div>Đang tải thông tin chi tiết sự kiện...</div>
+                </div>
+            `;
         }
 
         try {
@@ -4480,129 +4704,280 @@
             const ev = data.event || {};
             eventCenterState.selectedEvent = ev;
 
-            // Populate metadata
-            if (DOM.evDrawerTitle) DOM.evDrawerTitle.textContent = ev.event_id || eventId;
-            if (DOM.evDrawerIdSub) DOM.evDrawerIdSub.textContent = ev.source_event_id || ev.event_id || "--";
-            if (DOM.evDrawerId) DOM.evDrawerId.textContent = ev.event_id || "--";
-            if (DOM.evDrawerBadgeType) DOM.evDrawerBadgeType.textContent = (ev.event_type || "EVENT").toUpperCase();
-            
-            if (DOM.evDrawerMatchPill) {
-                if (ev.watchlist_match) {
-                    DOM.evDrawerMatchPill.className = "status-pill status-danger font-semibold";
-                    DOM.evDrawerMatchPill.textContent = "WATCHLIST MATCH";
+            // Resolve target name or vehicle watchlist info if applicable
+            let personName = null;
+            let vehicleInfo = null;
+
+            if (ev.event_type === "face" && ev.target_id) {
+                personName = await getFaceTargetName(ev.target_id);
+            } else if (['plate', 'vehicle', 'passage'].includes(ev.event_type)) {
+                vehicleInfo = await getVehicleWatchlistInfo(ev.target_id, ev.plate);
+            }
+
+            // Update Modal Header
+            const evType = ev.event_type || "";
+            const isMatch = Boolean(ev.watchlist_match);
+
+            if (DOM.evModalBadgeType) {
+                if (evType === "face") {
+                    DOM.evModalBadgeType.textContent = isMatch ? "FACE WATCHLIST" : "KHUÔN MẶT";
+                    DOM.evModalBadgeType.className = `event-type-badge face`;
+                } else if (evType === "plate") {
+                    DOM.evModalBadgeType.textContent = isMatch ? "VEHICLE WATCHLIST" : "BIỂN SỐ XE";
+                    DOM.evModalBadgeType.className = `event-type-badge plate`;
+                } else if (evType === "vehicle") {
+                    DOM.evModalBadgeType.textContent = "PHƯƠNG TIỆN";
+                    DOM.evModalBadgeType.className = `event-type-badge vehicle`;
+                } else if (evType === "passage") {
+                    DOM.evModalBadgeType.textContent = "LƯỢT XE QUA";
+                    DOM.evModalBadgeType.className = `event-type-badge passage`;
+                } else if (evType === "business") {
+                    DOM.evModalBadgeType.textContent = "NGHIỆP VỤ";
+                    DOM.evModalBadgeType.className = `event-type-badge business`;
                 } else {
-                    DOM.evDrawerMatchPill.className = "status-pill status-neutral";
-                    DOM.evDrawerMatchPill.textContent = "NORMAL EVENT";
+                    DOM.evModalBadgeType.textContent = evType.toUpperCase();
+                    DOM.evModalBadgeType.className = `event-type-badge`;
                 }
             }
 
-            if (DOM.evDrawerType) DOM.evDrawerType.textContent = ev.semantic_type || ev.event_type || "--";
-            if (DOM.evDrawerTimestamp) DOM.evDrawerTimestamp.textContent = ev.timestamp ? formatDateTime(ev.timestamp) : "--";
-            if (DOM.evDrawerCamera) DOM.evDrawerCamera.textContent = ev.camera_id || "--";
-            if (DOM.evDrawerObjectType) DOM.evDrawerObjectType.textContent = ev.object_type || "--";
-            if (DOM.evDrawerTarget) DOM.evDrawerTarget.textContent = ev.target_id || "--";
-            if (DOM.evDrawerPlate) DOM.evDrawerPlate.textContent = ev.plate || "--";
-            if (DOM.evDrawerSimilarity) {
-                DOM.evDrawerSimilarity.textContent = (ev.similarity !== null && ev.similarity !== undefined) 
-                    ? `${(Number(ev.similarity) * 100).toFixed(1)}%` 
-                    : "--";
-            }
-            if (DOM.evDrawerConfidence) {
-                DOM.evDrawerConfidence.textContent = (ev.confidence !== null && ev.confidence !== undefined) 
-                    ? `${(Number(ev.confidence) * 100).toFixed(1)}%` 
-                    : "--";
-            }
-            if (DOM.evDrawerMatch) {
-                DOM.evDrawerMatch.textContent = ev.watchlist_match ? "✓ Trùng khớp với Watchlist" : "Không trùng khớp Watchlist";
-            }
-            if (DOM.evDrawerNotification) {
-                DOM.evDrawerNotification.textContent = ev.notification_status ? ev.notification_status.toUpperCase() : "--";
-            }
-
-            // Extended Metadata display
-            if (DOM.evDrawerExtendedText) {
-                if (ev.event_type === "passage") {
-                    DOM.evDrawerExtendedText.textContent = `Lượt xe qua (Vehicle Passage): Biển số ${ev.plate || '--'}, Tin cậy: ${ev.confidence ? (Number(ev.confidence)*100).toFixed(1)+'%' : '--'}`;
-                } else if (ev.event_type === "business") {
-                    DOM.evDrawerExtendedText.textContent = `Sự kiện nghiệp vụ (Business Event): Biển số ${ev.plate || '--'}, Camera: ${ev.camera_id || '--'}`;
-                } else if (ev.event_type === "face") {
-                    DOM.evDrawerExtendedText.textContent = `Nhận diện khuôn mặt ArcFace: Target ${ev.target_id || 'Chưa định danh'}, Tương đồng: ${ev.similarity ? (Number(ev.similarity)*100).toFixed(1)+'%' : '--'}`;
-                } else if (ev.event_type === "plate") {
-                    DOM.evDrawerExtendedText.textContent = `Biển số phương tiện: ${ev.plate || '--'}, Watchlist Decision: ${ev.watchlist_match ? 'MATCH' : 'NO_MATCH'}`;
+            if (DOM.evModalMatchPill) {
+                if (isMatch) {
+                    DOM.evModalMatchPill.style.display = "inline-block";
+                    DOM.evModalMatchPill.className = "status-pill status-danger font-semibold";
+                    DOM.evModalMatchPill.textContent = "✓ MATCH WATCHLIST";
                 } else {
-                    DOM.evDrawerExtendedText.textContent = `Phương tiện: Camera ${ev.camera_id || '--'}, Đối tượng ${ev.object_type || '--'}`;
+                    DOM.evModalMatchPill.style.display = "none";
                 }
             }
 
-            if (DOM.evDrawerExtendedText && ['plate','vehicle','passage'].includes(ev.event_type)) {
-                DOM.evDrawerExtendedText.textContent = [
-                    `Biển số confirmed: ${ev.plate || '--'}`,
-                    `Loại xe: ${ev.vehicle_type || '--'}`,
-                    `Màu Watchlist: ${vehicleColorLabel(ev.watchlist_vehicle_color)}`,
-                    `Màu detected: ${vehicleColorLabel(ev.detected_vehicle_color)}`,
-                    `Tin cậy màu (tỷ lệ pixel): ${ev.detected_vehicle_color_confidence == null ? '--' : (Number(ev.detected_vehicle_color_confidence)*100).toFixed(1)+'%'}`,
-                    `Track ID: ${ev.track_id ?? '--'}`
-                ].join(' · ');
+            // Helper to render label-value row (RETURNS EMPTY STRING IF VALUE IS EMPTY)
+            function renderRow(label, valHtml) {
+                if (valHtml === null || valHtml === undefined || valHtml === "") return "";
+                return `
+                    <div class="modal-meta-row">
+                        <span class="modal-meta-label">${escapeHtml(label)}</span>
+                        <span class="modal-meta-val">${valHtml}</span>
+                    </div>
+                `;
             }
 
-            // Evidence Loading: MUST use /api/event_center/events/{type}:{uuid}/evidence
+            // 1. Evidence Image Box (Top of Modal, max-height 45vh, contain, dark box)
+            let imageHtml = "";
             if (ev.evidence && ev.evidence.url) {
-                const evidenceUrl = apiUrl(ev.evidence.url);
-                if (DOM.evDrawerEvidenceImg) {
-                    DOM.evDrawerEvidenceImg.onload = function() {
-                        if (DOM.evDrawerEvidenceLoading) DOM.evDrawerEvidenceLoading.style.display = "none";
-                        if (DOM.evDrawerEvidenceUnavailable) DOM.evDrawerEvidenceUnavailable.style.display = "none";
-                        DOM.evDrawerEvidenceImg.style.display = "block";
-                        if (DOM.evDrawerEvidenceStatusBadge) {
-                            DOM.evDrawerEvidenceStatusBadge.textContent = "Bằng chứng đã xác thực";
-                            DOM.evDrawerEvidenceStatusBadge.className = "count-pill";
-                        }
-                    };
-                    DOM.evDrawerEvidenceImg.onerror = function() {
-                        if (DOM.evDrawerEvidenceLoading) DOM.evDrawerEvidenceLoading.style.display = "none";
-                        DOM.evDrawerEvidenceImg.style.display = "none";
-                        if (DOM.evDrawerEvidenceUnavailable) DOM.evDrawerEvidenceUnavailable.style.display = "flex";
-                        if (DOM.evDrawerEvidenceStatusBadge) {
-                            DOM.evDrawerEvidenceStatusBadge.textContent = "Không khả dụng";
-                            DOM.evDrawerEvidenceStatusBadge.className = "count-pill";
-                        }
-                    };
-                    DOM.evDrawerEvidenceImg.src = evidenceUrl;
-                }
+                const imgUrl = apiUrl(ev.evidence.url);
+                imageHtml = `
+                    <div class="modal-evidence-box">
+                        <img src="${imgUrl}" alt="Hình ảnh sự kiện" onerror="this.onerror=null; this.parentElement.innerHTML='<div style=\\'color:#94A3B8; text-align:center; padding:30px;\\'><svg style=\\'width:36px;height:36px;margin-bottom:8px;stroke:currentColor;fill:none;stroke-width:1.5;\\' viewBox=\\'0 0 24 24\\'><rect x=\\'3\\' y=\\'3\\' width=\\'18\\' height=\\'18\\' rx=\\'2\\'/><line x1=\\'9\\' y1=\\'9\\' x2=\\'15\\' y2=\\'15\\'/><line x1=\\'15\\' y1=\\'9\\' x2=\\'9\\' y2=\\'15\\'/></svg><div style=\\'font-size:13px;font-weight:500;\\'>Không thể tải hình ảnh sự kiện</div></div>';">
+                    </div>
+                `;
             } else {
-                if (DOM.evDrawerEvidenceLoading) DOM.evDrawerEvidenceLoading.style.display = "none";
-                if (DOM.evDrawerEvidenceImg) DOM.evDrawerEvidenceImg.style.display = "none";
-                if (DOM.evDrawerEvidenceUnavailable) DOM.evDrawerEvidenceUnavailable.style.display = "flex";
-                if (DOM.evDrawerEvidenceStatusBadge) {
-                    DOM.evDrawerEvidenceStatusBadge.textContent = "Không có bằng chứng";
-                    DOM.evDrawerEvidenceStatusBadge.className = "count-pill";
+                imageHtml = `
+                    <div class="modal-evidence-box" style="background-color: #1E293B;">
+                        <div style="color: #94A3B8; text-align: center; padding: 30px;">
+                            <svg style="width: 36px; height: 36px; margin-bottom: 8px; stroke: currentColor; fill: none; stroke-width: 1.5;" viewBox="0 0 24 24">
+                                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                                <circle cx="8.5" cy="8.5" r="1.5"/>
+                                <line x1="21" y1="21" x2="3" y2="3"/>
+                            </svg>
+                            <div style="font-size: 13px; font-weight: 500;">Không có hình ảnh</div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // 2. Section: Thông tin sự kiện
+            const camName = getCameraDisplayName(ev.camera_id);
+            const evRows = [
+                renderRow("Thời gian", formatFullDateTime(ev.timestamp)),
+                renderRow("Camera", escapeHtml(camName)),
+                renderRow("Loại sự kiện", escapeHtml(getEventTypeDisplayName(ev.event_type))),
+                (ev.semantic_type && ev.semantic_type !== ev.event_type) ? renderRow("Phân loại nghiệp vụ", escapeHtml(ev.semantic_type)) : "",
+                isMatch ? renderRow("Trạng thái Watchlist", '<span class="status-pill status-danger font-semibold">✓ Trùng khớp danh sách theo dõi</span>') : ""
+            ].filter(Boolean).join("");
+
+            const eventSection = `
+                <div class="modal-section">
+                    <div class="modal-section-title">
+                        <svg viewBox="0 0 24 24" style="width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                        <span>Thông tin sự kiện</span>
+                    </div>
+                    <div class="modal-meta-list">
+                        ${evRows}
+                    </div>
+                </div>
+            `;
+
+            // 3. Section: Thông tin nhận diện & đối tượng (Thích ứng thông minh)
+            let targetSection = "";
+
+            if (ev.event_type === "face") {
+                const faceRows = [
+                    personName ? renderRow("Họ và tên đối tượng", `<strong style="color: var(--color-primary); font-size: 14px;">${escapeHtml(personName)}</strong>`) : "",
+                    (ev.similarity !== null && ev.similarity !== undefined) ? renderRow("Độ tương đồng (Similarity)", `<span class="font-mono font-semibold" style="color: var(--color-primary);">${(Number(ev.similarity) * 100).toFixed(1)}%</span>`) : "",
+                    renderRow("Quyết định nhận diện", isMatch ? '<span class="status-pill status-danger font-semibold">✓ Trùng khớp khuôn mặt (Watchlist Match)</span>' : '<span class="status-pill status-neutral">Bình thường</span>'),
+                    ev.track_id ? renderRow("Track ID", `<span class="font-mono">${escapeHtml(String(ev.track_id))}</span>`) : ""
+                ].filter(Boolean).join("");
+
+                if (faceRows) {
+                    targetSection = `
+                        <div class="modal-section">
+                            <div class="modal-section-title">
+                                <svg viewBox="0 0 24 24" style="width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2;"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/></svg>
+                                <span>Thông tin đối tượng khuôn mặt</span>
+                            </div>
+                            <div class="modal-meta-list">
+                                ${faceRows}
+                            </div>
+                        </div>
+                    `;
+                }
+
+            } else if (['plate', 'vehicle', 'passage'].includes(ev.event_type)) {
+                const vehicleRows = [
+                    ev.plate ? renderRow("Biển số xe", `<span class="license-plate-badge-sm font-mono font-semibold" style="font-size: 14px; padding: 4px 10px;">${escapeHtml(ev.plate)}</span>`) : "",
+                    vehicleInfo ? renderRow("Phương tiện theo dõi", `<strong style="color: var(--color-primary);">${escapeHtml(vehicleInfo.display_name)}</strong>`) : "",
+                    (vehicleInfo && vehicleInfo.owner_info) ? renderRow("Chủ xe", escapeHtml(vehicleInfo.owner_info)) : "",
+                    (vehicleInfo && vehicleInfo.notes) ? renderRow("Ghi chú theo dõi", escapeHtml(vehicleInfo.notes)) : "",
+                    ev.vehicle_type ? renderRow("Loại phương tiện", escapeHtml(ev.vehicle_type)) : "",
+                    ev.detected_vehicle_color ? renderRow("Màu xe phát hiện", `<span class="font-semibold">${escapeHtml(vehicleColorLabel(ev.detected_vehicle_color))}</span>`) : "",
+                    (ev.detected_vehicle_color_confidence !== null && ev.detected_vehicle_color_confidence !== undefined) ? renderRow("Độ tin cậy màu xe", `<span class="font-mono">${(Number(ev.detected_vehicle_color_confidence) * 100).toFixed(1)}%</span>`) : "",
+                    ev.watchlist_vehicle_color ? renderRow("Màu xe Watchlist", `<span class="font-semibold">${escapeHtml(vehicleColorLabel(ev.watchlist_vehicle_color))}</span>`) : "",
+                    (ev.confidence !== null && ev.confidence !== undefined) ? renderRow("Độ tin cậy OCR", `<span class="font-mono font-semibold" style="color: var(--color-primary);">${(Number(ev.confidence) * 100).toFixed(1)}%</span>`) : "",
+                    renderRow("Quyết định biển số", isMatch ? '<span class="status-pill status-danger font-semibold">✓ Trùng khớp biển số xe theo dõi</span>' : '<span class="status-pill status-neutral">Không nằm trong Watchlist</span>'),
+                    ev.match_type ? renderRow("Hình thức khớp", escapeHtml(ev.match_type)) : "",
+                    ev.track_id ? renderRow("Track ID", `<span class="font-mono">${escapeHtml(String(ev.track_id))}</span>`) : ""
+                ].filter(Boolean).join("");
+
+                if (vehicleRows) {
+                    targetSection = `
+                        <div class="modal-section">
+                            <div class="modal-section-title">
+                                <svg viewBox="0 0 24 24" style="width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2;"><rect x="1" y="6" width="22" height="12" rx="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><path d="M5 6l2-3h10l2 3"/></svg>
+                                <span>Thông tin phương tiện & nhận diện biển số</span>
+                            </div>
+                            <div class="modal-meta-list">
+                                ${vehicleRows}
+                            </div>
+                        </div>
+                    `;
+                }
+
+            } else {
+                // Generic / Business
+                const metaRows = [];
+                if (ev.plate) metaRows.push(renderRow("Biển số xe", `<span class="license-plate-badge-sm font-mono font-semibold">${escapeHtml(ev.plate)}</span>`));
+                if (ev.object_type) metaRows.push(renderRow("Loại đối tượng", escapeHtml(ev.object_type)));
+                if (ev.metadata && typeof ev.metadata === "object") {
+                    Object.keys(ev.metadata).forEach(k => {
+                        if (['snapshot_path', 'detected_vehicle_color'].includes(k)) return;
+                        const v = ev.metadata[k];
+                        if (v !== null && v !== undefined && v !== "") {
+                            metaRows.push(renderRow(k.replace(/_/g, ' '), typeof v === "object" ? JSON.stringify(v) : String(v)));
+                        }
+                    });
+                }
+                const combined = metaRows.filter(Boolean).join("");
+                if (combined) {
+                    targetSection = `
+                        <div class="modal-section">
+                            <div class="modal-section-title">
+                                <svg viewBox="0 0 24 24" style="width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2;"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+                                <span>Dữ liệu nhận diện</span>
+                            </div>
+                            <div class="modal-meta-list">
+                                ${combined}
+                            </div>
+                        </div>
+                    `;
                 }
             }
+
+            // 4. Section: Thông tin cảnh báo (Chỉ hiển thị khi có notification status)
+            let noticeSection = "";
+            if (ev.notification_status) {
+                let statusBadge = "";
+                const s = ev.notification_status;
+                if (s === "sent") statusBadge = `<span class="status-pill status-active font-semibold">✓ Đã gửi thông báo thành công</span>`;
+                else if (s === "pending") statusBadge = `<span class="status-pill status-warning">⏳ Đang chờ gửi thông báo</span>`;
+                else if (s === "failed") statusBadge = `<span class="status-pill status-danger">✕ Gửi cảnh báo thất bại</span>`;
+                else if (s === "suppressed") statusBadge = `<span class="status-pill status-neutral">Bị chặn (Hạn chế gửi liên tục)</span>`;
+                else statusBadge = `<span class="status-pill status-neutral">${escapeHtml(s)}</span>`;
+
+                noticeSection = `
+                    <div class="modal-section">
+                        <div class="modal-section-title">
+                            <svg viewBox="0 0 24 24" style="width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2;"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+                            <span>Thông tin cảnh báo & thông báo</span>
+                        </div>
+                        <div class="modal-meta-list">
+                            ${renderRow("Trạng thái thông báo", statusBadge)}
+                        </div>
+                    </div>
+                `;
+            }
+
+            // 5. Section: Thông tin kỹ thuật (Đặt ở cuối)
+            const techRows = [
+                renderRow("Mã sự kiện (Event ID)", `<code class="font-mono text-muted" style="font-size: 11px;">${escapeHtml(ev.event_id)}</code>`),
+                ev.source_event_id ? renderRow("Source Event ID", `<code class="font-mono text-muted" style="font-size: 11px;">${escapeHtml(ev.source_event_id)}</code>`) : "",
+                ev.target_id ? renderRow("Target ID", `<code class="font-mono text-muted" style="font-size: 11px;">${escapeHtml(ev.target_id)}</code>`) : "",
+                (ev.confidence !== null && ev.confidence !== undefined) ? renderRow("Điểm tin cậy gốc", `<code class="font-mono text-muted" style="font-size: 11px;">${ev.confidence}</code>`) : "",
+                (ev.evidence && ev.evidence.key) ? renderRow("Khóa lưu trữ (Storage Key)", `<code class="font-mono text-muted" style="font-size: 11px;">${escapeHtml(ev.evidence.key)}</code>`) : ""
+            ].filter(Boolean).join("");
+
+            const techSection = `
+                <div class="modal-section" style="margin-bottom: 0;">
+                    <div class="modal-section-title">
+                        <svg viewBox="0 0 24 24" style="width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2;"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                        <span>Thông tin kỹ thuật</span>
+                    </div>
+                    <div class="modal-meta-list">
+                        ${techRows}
+                    </div>
+                </div>
+            `;
+
+            // Inject All Into Modal Body
+            DOM.evModalBody.innerHTML = `
+                ${imageHtml}
+                ${eventSection}
+                ${targetSection}
+                ${noticeSection}
+                ${techSection}
+            `;
 
         } catch (err) {
-            console.warn("Lỗi tải chi tiết sự kiện:", err);
-            if (DOM.evDrawerExtendedText) DOM.evDrawerExtendedText.textContent = `Lỗi: ${err.message}`;
-            if (DOM.evDrawerEvidenceLoading) DOM.evDrawerEvidenceLoading.style.display = "none";
-            if (DOM.evDrawerEvidenceUnavailable) DOM.evDrawerEvidenceUnavailable.style.display = "flex";
-            if (DOM.evDrawerEvidenceStatusBadge) DOM.evDrawerEvidenceStatusBadge.textContent = "Lỗi kết nối";
+            console.error("Lỗi khi tải chi tiết sự kiện:", err);
+            if (DOM.evModalBody) {
+                DOM.evModalBody.innerHTML = `
+                    <div style="padding: 30px; text-align: center; color: var(--color-error);">
+                        <svg style="width: 36px; height: 36px; margin-bottom: 8px; stroke: currentColor; fill: none; stroke-width: 2;" viewBox="0 0 24 24">
+                            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                        </svg>
+                        <div style="font-weight: 600; margin-bottom: 4px;">Không thể tải chi tiết sự kiện</div>
+                        <div style="font-size: 12px; color: var(--color-text-muted);">${escapeHtml(err.message)}</div>
+                    </div>
+                `;
+            }
         }
     };
 
     /**
-     * Close Event Detail Drawer.
+     * Close Event Detail Modal.
      */
-    window.dattCloseEventDrawer = function() {
-        if (DOM.drawerEventDetail) {
-            DOM.drawerEventDetail.classList.remove("open");
+    window.dattCloseEventDetailModal = function() {
+        if (DOM.eventDetailModal) {
+            DOM.eventDetailModal.style.display = "none";
+            DOM.eventDetailModal.setAttribute("aria-hidden", "true");
         }
-        if (DOM.evDrawerEvidenceImg) {
-            DOM.evDrawerEvidenceImg.src = "";
-            DOM.evDrawerEvidenceImg.style.display = "none";
-        }
-        if (DOM.drawerBackdrop) {
-            DOM.drawerBackdrop.style.display = "none";
+        if (DOM.evModalBody) {
+            DOM.evModalBody.innerHTML = "";
         }
     };
+
+    // Aliases for backward compatibility
+    window.dattOpenEventDetailDrawer = window.dattOpenEventDetailModal;
+    window.dattCloseEventDrawer = window.dattCloseEventDetailModal;
 
     /**
      * Bind Event Center Event Listeners.
@@ -4616,15 +4991,12 @@
             });
         });
 
-        // Filter Apply
+        // Filter Apply (Minimalist Filter Bar)
         if (DOM.btnApplyEventFilters) {
             DOM.btnApplyEventFilters.addEventListener("click", () => {
-                eventCenterState.filters.camera = DOM.eventFilterCamera ? DOM.eventFilterCamera.value : "";
+                eventCenterState.filters.search = DOM.eventSearchInput ? DOM.eventSearchInput.value.trim() : "";
                 eventCenterState.filters.eventType = DOM.eventFilterType ? DOM.eventFilterType.value : "";
-                eventCenterState.filters.targetId = (DOM.eventFilterTarget ? DOM.eventFilterTarget.value : "").trim();
-                eventCenterState.filters.plate = (DOM.eventFilterPlate ? DOM.eventFilterPlate.value : "").trim();
-                eventCenterState.filters.watchlistMatch = DOM.eventFilterMatch ? DOM.eventFilterMatch.value : "";
-                eventCenterState.filters.notificationStatus = DOM.eventFilterNotification ? DOM.eventFilterNotification.value : "";
+                eventCenterState.filters.camera = DOM.eventFilterCamera ? DOM.eventFilterCamera.value : "";
                 eventCenterState.filters.fromTime = DOM.eventFilterFromTime ? DOM.eventFilterFromTime.value : "";
                 eventCenterState.filters.toTime = DOM.eventFilterToTime ? DOM.eventFilterToTime.value : "";
 
@@ -4633,25 +5005,28 @@
             });
         }
 
+        // Search Input Enter key
+        if (DOM.eventSearchInput) {
+            DOM.eventSearchInput.addEventListener("keydown", (e) => {
+                if (e.key === "Enter") {
+                    if (DOM.btnApplyEventFilters) DOM.btnApplyEventFilters.click();
+                }
+            });
+        }
+
         // Filter Clear
         if (DOM.btnClearEventFilters) {
             DOM.btnClearEventFilters.addEventListener("click", () => {
-                if (DOM.eventFilterCamera) DOM.eventFilterCamera.value = "";
+                if (DOM.eventSearchInput) DOM.eventSearchInput.value = "";
                 if (DOM.eventFilterType) DOM.eventFilterType.value = "";
-                if (DOM.eventFilterTarget) DOM.eventFilterTarget.value = "";
-                if (DOM.eventFilterPlate) DOM.eventFilterPlate.value = "";
-                if (DOM.eventFilterMatch) DOM.eventFilterMatch.value = "";
-                if (DOM.eventFilterNotification) DOM.eventFilterNotification.value = "";
+                if (DOM.eventFilterCamera) DOM.eventFilterCamera.value = "";
                 if (DOM.eventFilterFromTime) DOM.eventFilterFromTime.value = "";
                 if (DOM.eventFilterToTime) DOM.eventFilterToTime.value = "";
 
                 eventCenterState.filters = {
+                    search: "",
                     camera: "",
                     eventType: "",
-                    targetId: "",
-                    plate: "",
-                    watchlistMatch: "",
-                    notificationStatus: "",
                     fromTime: "",
                     toTime: ""
                 };
@@ -4708,12 +5083,38 @@
             });
         }
 
-        // Drawer Close
+        // Modal Close Buttons ([X] and Footer)
+        if (DOM.btnCloseEventModal) {
+            DOM.btnCloseEventModal.addEventListener("click", window.dattCloseEventDetailModal);
+        }
+        if (DOM.btnCloseEventModalFooter) {
+            DOM.btnCloseEventModalFooter.addEventListener("click", window.dattCloseEventDetailModal);
+        }
+
+        // Modal Backdrop / Overlay Click
+        if (DOM.eventDetailModal) {
+            DOM.eventDetailModal.addEventListener("click", (e) => {
+                if (e.target === DOM.eventDetailModal) {
+                    window.dattCloseEventDetailModal();
+                }
+            });
+        }
+
+        // Global ESC key listener to close modal
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") {
+                if (DOM.eventDetailModal && DOM.eventDetailModal.style.display === "flex") {
+                    window.dattCloseEventDetailModal();
+                }
+            }
+        });
+
+        // Legacy Drawer Close Fallbacks
         if (DOM.btnCloseEventDrawer) {
-            DOM.btnCloseEventDrawer.addEventListener("click", window.dattCloseEventDrawer);
+            DOM.btnCloseEventDrawer.addEventListener("click", window.dattCloseEventDetailModal);
         }
         if (DOM.btnCloseEventDrawerFooter) {
-            DOM.btnCloseEventDrawerFooter.addEventListener("click", window.dattCloseEventDrawer);
+            DOM.btnCloseEventDrawerFooter.addEventListener("click", window.dattCloseEventDetailModal);
         }
     }
 
@@ -4829,8 +5230,276 @@
             }
         } catch (e) {}
 
-        // Default: Open on Camera Selection
-        setUiState(UI_STATE.SELECT_CAMERA);
+        // Default: Open on Dashboard
+        setUiState(UI_STATE.DASHBOARD);
+    }
+
+    /* =========================================================================
+       GLOBAL TOAST NOTIFICATION & REALTIME EMAIL ALERT SYSTEM
+       ========================================================================= */
+    function showGlobalToast(title, message, severity = "info", durationMs = 5000) {
+        const container = document.getElementById("globalToastContainer");
+        if (!container) return;
+
+        const toast = document.createElement("div");
+        toast.className = `toast-item toast-${severity}`;
+
+        let iconSvg = '';
+        if (severity === "success") {
+            iconSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>';
+        } else if (severity === "warning") {
+            iconSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
+        } else if (severity === "error") {
+            iconSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>';
+        } else {
+            iconSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>';
+        }
+
+        toast.innerHTML = `
+            <div class="toast-icon-wrap">${iconSvg}</div>
+            <div class="toast-body">
+                <div class="toast-title">${escapeHtml(title)}</div>
+                <div class="toast-message">${escapeHtml(message)}</div>
+            </div>
+            <button type="button" class="toast-close-btn" aria-label="Đóng">&times;</button>
+            <div class="toast-progress"></div>
+        `;
+
+        function closeToast() {
+            if (toast.classList.contains("toast-hiding")) return;
+            toast.classList.add("toast-hiding");
+            setTimeout(() => {
+                if (toast.parentNode) toast.parentNode.removeChild(toast);
+            }, 200);
+        }
+
+        const closeBtn = toast.querySelector(".toast-close-btn");
+        if (closeBtn) closeBtn.addEventListener("click", closeToast);
+
+        const timer = setTimeout(closeToast, durationMs);
+        toast.addEventListener("mouseenter", () => clearTimeout(timer));
+        toast.addEventListener("mouseleave", () => setTimeout(closeToast, 2000));
+
+        while (container.children.length >= 3) {
+            const oldest = container.lastElementChild;
+            if (oldest) {
+                container.removeChild(oldest);
+            } else {
+                break;
+            }
+        }
+        container.prepend(toast);
+    }
+    window.showGlobalToast = showGlobalToast;
+
+    // Realtime Email Alert Outbox Polling
+    let knownAlertStatuses = new Map();
+    let isInitialAlertPoll = true;
+
+    async function pollAlertsForGlobalToast() {
+        try {
+            const resp = await fetch(apiUrl("/api/alerts?page=1&page_size=10"), { cache: "no-store" });
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (!data || !Array.isArray(data.alerts)) return;
+
+            if (isInitialAlertPoll) {
+                for (const alert of data.alerts) {
+                    knownAlertStatuses.set(alert.id, alert.status);
+                }
+                isInitialAlertPoll = false;
+                return;
+            }
+
+            for (const alert of data.alerts) {
+                const prevStatus = knownAlertStatuses.get(alert.id);
+                if (prevStatus === undefined) {
+                    knownAlertStatuses.set(alert.id, alert.status);
+                    triggerAlertToast(alert);
+                } else if (prevStatus !== alert.status) {
+                    knownAlertStatuses.set(alert.id, alert.status);
+                    triggerAlertToast(alert);
+                }
+            }
+        } catch (e) {}
+    }
+
+    function triggerAlertToast(alert) {
+        const targetDesc = alert.plate_number || alert.target_name || alert.target_id || "Đối tượng";
+        const camDesc = alert.camera_name || alert.camera_id || "Camera";
+        const typeDesc = (alert.event_type || "").replaceAll("_", " ");
+
+        if (alert.status === "SENT") {
+            showGlobalToast("Đã gửi cảnh báo qua email", `Gửi thành công tới ${alert.recipient_email || 'người nhận'} [${targetDesc} - ${camDesc}]`, "success", 5000);
+        } else if (alert.status === "PENDING") {
+            showGlobalToast("Cảnh báo email đang chờ gửi", `Chuẩn bị gửi thông báo ${typeDesc} [${targetDesc}]`, "warning", 5000);
+        } else if (alert.status === "FAILED") {
+            showGlobalToast("Gửi cảnh báo qua email thất bại", `Lỗi gửi email tới ${alert.recipient_email}: ${alert.error_message || 'SMTP thất bại'}`, "error", 5000);
+        } else if (alert.status === "SUPPRESSED") {
+            showGlobalToast("Không gửi cảnh báo (đã chặn)", `Cảnh báo ${typeDesc} bị chặn theo chính sách tần suất`, "info", 5000);
+        }
+    }
+
+    /* =========================================================================
+       SETTINGS & THEME ACCENT COLOR
+       ========================================================================= */
+    function initThemeSettings() {
+        const btnSettings = document.getElementById("btnSidebarSettings");
+        const modalSettings = document.getElementById("settingsModal");
+        const btnClose = document.getElementById("btnCloseSettingsModal");
+        const btnSave = document.getElementById("btnSaveSettingsModal");
+
+        if (btnSettings && modalSettings) {
+            btnSettings.addEventListener("click", () => {
+                modalSettings.style.display = "flex";
+                const currentTheme = document.documentElement.getAttribute("data-theme") || "blue";
+                document.querySelectorAll(".theme-swatch-btn").forEach(btn => {
+                    if (btn.getAttribute("data-color") === currentTheme) {
+                        btn.classList.add("active");
+                    } else {
+                        btn.classList.remove("active");
+                    }
+                });
+            });
+        }
+
+        const closeModal = () => {
+            if (modalSettings) modalSettings.style.display = "none";
+        };
+        if (btnClose) btnClose.addEventListener("click", closeModal);
+        if (btnSave) btnSave.addEventListener("click", closeModal);
+
+        document.querySelectorAll(".theme-swatch-btn").forEach(swatch => {
+            swatch.addEventListener("click", () => {
+                const color = swatch.getAttribute("data-color");
+                document.documentElement.setAttribute("data-theme", color);
+                try {
+                    localStorage.setItem("datt_accent_color", color);
+                } catch (e) {}
+                document.querySelectorAll(".theme-swatch-btn").forEach(b => b.classList.remove("active"));
+                swatch.classList.add("active");
+                showGlobalToast("Đã đổi màu giao diện", `Đã kích hoạt chủ đề màu ${color.toUpperCase()}`, "success", 3000);
+            });
+        });
+    }
+
+    /* =========================================================================
+       STREAM VIEW CONTROLS & FULLSCREEN MONITORING
+       ========================================================================= */
+    function initStreamControls() {
+        const btnBack = document.getElementById("btnBackFromStream");
+        if (btnBack) {
+            btnBack.addEventListener("click", () => {
+                setUiState(UI_STATE.CAMERA_MANAGEMENT);
+            });
+        }
+
+        const btnFs = document.getElementById("btnFullscreenStream");
+        const btnExitFs = document.getElementById("btnExitFullscreen");
+        const streamViewport = document.getElementById("streamViewport");
+        const fsStatusBar = document.getElementById("fullscreenStatusBar");
+
+        if (btnFs && streamViewport) {
+            btnFs.addEventListener("click", async () => {
+                try {
+                    if (!document.fullscreenElement) {
+                        await streamViewport.requestFullscreen();
+                    } else {
+                        await document.exitFullscreen();
+                    }
+                } catch (e) {
+                    console.error("Fullscreen toggle error:", e);
+                }
+            });
+        }
+
+        if (btnExitFs) {
+            btnExitFs.addEventListener("click", async () => {
+                if (document.fullscreenElement) {
+                    await document.exitFullscreen();
+                }
+            });
+        }
+
+        document.addEventListener("fullscreenchange", () => {
+            const isFs = !!document.fullscreenElement;
+            if (fsStatusBar) {
+                fsStatusBar.style.display = isFs ? "flex" : "none";
+            }
+            const toastContainer = document.getElementById("globalToastContainer");
+            if (toastContainer && streamViewport) {
+                if (isFs) {
+                    streamViewport.appendChild(toastContainer);
+                } else {
+                    document.body.appendChild(toastContainer);
+                }
+            }
+        });
+    }
+
+    /* =========================================================================
+       DASHBOARD METRICS REFRESH
+       ========================================================================= */
+    async function updateDashboardMetrics() {
+        try {
+            const respCams = await fetch(apiUrl("/api/cameras"));
+            if (respCams.ok) {
+                const data = await respCams.json();
+                if (data && Array.isArray(data.cameras)) {
+                    const total = data.cameras.length;
+                    const online = data.cameras.filter(c => c.status === "online").length;
+                    const elTotal = document.getElementById("dashTotalCams");
+                    const elActive = document.getElementById("dashActiveCams");
+                    if (elTotal) elTotal.textContent = total;
+                    if (elActive) elActive.textContent = online;
+                    const badgeCam = document.getElementById("navCameraCountBadge");
+                    if (badgeCam) badgeCam.textContent = total;
+
+                    const quickList = document.getElementById("dashCameraQuickList");
+                    if (quickList && total > 0) {
+                        quickList.innerHTML = data.cameras.slice(0, 6).map(cam => `
+                            <div style="background: var(--color-bg-hover); padding: 10px; border-radius: 6px; border: 1px solid var(--color-border); display: flex; flex-direction: column; gap: 4px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <strong style="font-size: 13px; color: var(--color-text-title);">${escapeHtml(cam.name)}</strong>
+                                    <span class="status-pill status-${cam.status === 'online' ? 'online' : 'offline'}">${cam.status === 'online' ? 'Online' : 'Offline'}</span>
+                                </div>
+                                <span style="font-size: 11px; color: var(--color-text-muted);">${escapeHtml(cam.zone || cam.location || 'Camera')}</span>
+                                <button type="button" class="btn btn-primary btn-sm" style="margin-top: 6px;" onclick="window.dattLaunchMonitoring('${escapeHtml(cam.id)}')">
+                                    <span>Xem camera</span>
+                                </button>
+                            </div>
+                        `).join("");
+                    }
+                }
+            }
+
+            const respEv = await fetch(apiUrl("/api/event-center/summary"));
+            if (respEv.ok) {
+                const evData = await respEv.json();
+                const elEv = document.getElementById("dashEventsToday");
+                if (elEv) elEv.textContent = evData.total_events || 0;
+                const badgeEv = document.getElementById("navEventCountBadge");
+                if (badgeEv) badgeEv.textContent = evData.total_events || 0;
+            }
+
+            const respFaces = await fetch(apiUrl("/api/watchlist/faces"));
+            const respVehicles = await fetch(apiUrl("/api/watchlist/vehicles"));
+            let totalWl = 0;
+            if (respFaces.ok) {
+                const fd = await respFaces.json();
+                totalWl += (fd.targets ? fd.targets.length : 0);
+                const badgeF = document.getElementById("faceHeroTotalCount");
+                if (badgeF) badgeF.textContent = fd.targets ? fd.targets.length : 0;
+            }
+            if (respVehicles.ok) {
+                const vd = await respVehicles.json();
+                totalWl += (vd.vehicles ? vd.vehicles.length : 0);
+                const badgeV = document.getElementById("vehicleHeroTotalCount");
+                if (badgeV) badgeV.textContent = vd.vehicles ? vd.vehicles.length : 0;
+            }
+            const elWl = document.getElementById("dashWatchlistTotal");
+            if (elWl) elWl.textContent = totalWl;
+        } catch (e) {}
     }
 
     /**
@@ -4946,6 +5615,21 @@
 
         loadTargets();
         loadVideoLibrary();
+        initThemeSettings();
+        initStreamControls();
+
+        // Attach listeners for unified sidebar items
+        document.querySelectorAll(".sidebar-nav-item").forEach(item => {
+            item.addEventListener("click", () => {
+                const nav = item.getAttribute("data-nav");
+                if (nav) navigateTo(nav);
+            });
+        });
+
+        // Start real-time email alert polling for Global Toast notifications
+        setInterval(pollAlertsForGlobalToast, 6000);
+        setTimeout(pollAlertsForGlobalToast, 1200);
+
         checkInitialAppState();
     }
 

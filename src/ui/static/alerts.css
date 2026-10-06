@@ -1,35 +1,60 @@
-/* Alert-only spacing; shared DATT colors, sidebar and controls stay unchanged. */
-#alertsScreen .content-header-row {
+/* Alert Center: Enterprise Design System Adaptation */
+#alertsScreen .workspace-page-header {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
-    gap: 20px;
-    margin-bottom: 24px;
+    gap: 1rem;
+    margin-bottom: 1.25rem;
 }
-#alertsScreen .page-title { font-size: 1.6rem; margin: 8px 0; }
-#alertsScreen .page-title-badge { color: var(--accent-cyan); font-size: .75rem; letter-spacing: .1em; }
-#alertsScreen .page-subtitle, #alertsFeedback { color: var(--text-muted); font-size: .85rem; }
-#alertsFeedback { margin: 0 0 14px; }
-#alertsScreen .event-filters-grid { align-items: end; }
-#alertsScreen .event-filters-grid > button { min-height: 40px; }
-#alertsScreen .data-table-wrapper { overflow-x: auto; }
-#alertsScreen .data-table { width: 100%; border-collapse: collapse; text-align: left; font-size: .83rem; }
-#alertsScreen .data-table th { color: var(--text-muted); font-size: .7rem; letter-spacing: .03em; }
-#alertsScreen .data-table th, #alertsScreen .data-table td { padding: 16px 14px; border-bottom: 1px solid var(--border-color); }
-#alertsScreen .data-table td:nth-child(3) { overflow-wrap: anywhere; max-width: 260px; }
-#alertsScreen .data-table tbody tr:hover { background: rgba(255, 255, 255, .025); }
-#alertsScreen .badge-notification { text-transform: none; white-space: nowrap; }
-#alertDetail { margin-top: 24px; background: var(--bg-card); padding: 24px; border: 1px solid var(--border-color); border-radius: var(--radius-lg); }
-#alertDetail .drawer-meta-row { padding: 9px 0; gap: 24px; border-bottom: 1px solid var(--border-color); }
-#alertDetail dt { color: var(--text-muted); flex-shrink: 0; }
-#alertDetail dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
-@media (max-width: 900px) {
-    #alertsScreen .content-header-row { flex-wrap: wrap; }
-    #alertsScreen .event-filters-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+#alertsScreen .page-main-title {
+    font-size: var(--font-size-page-title);
+    font-weight: 700;
+    color: var(--color-text-title);
 }
-@media (max-width: 540px) {
-    #alertsScreen .event-filters-grid { grid-template-columns: 1fr; }
-    #alertsScreen .page-title { font-size: 1.25rem; }
-    #alertDetail .drawer-meta-row { flex-direction: column; gap: 4px; }
-    #alertDetail dd { text-align: left; }
+
+#alertsScreen .page-main-desc {
+    font-size: var(--font-size-meta);
+    color: var(--color-text-muted);
+}
+
+#alertsScreen .data-table-wrapper {
+    overflow-x: auto;
+}
+
+#alertsScreen .enterprise-data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--font-size-ui);
+}
+
+#alertsScreen .enterprise-data-table th {
+    background-color: #F9FAFB;
+    color: var(--color-text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--color-border);
+}
+
+#alertsScreen .enterprise-data-table td {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--color-border-subtle);
+    color: var(--color-text-body);
+    vertical-align: middle;
+}
+
+#alertsScreen .enterprise-data-table tbody tr:hover {
+    background-color: var(--color-bg-hover);
+}
+
+#alertDetail {
+    margin-top: 1rem;
+    background-color: var(--color-bg-card);
+    padding: 16px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-card);
 }
