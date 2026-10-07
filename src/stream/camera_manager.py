@@ -195,9 +195,6 @@ class CameraManager:
                 time.sleep(wait_stagger)
             self._last_camera_started_at = time.time()
 
-            # Stop existing reader if one is already running
-            self._stop_reader_internal()
-
             if camera_id is None:
                 cam_info = get_default_camera(self.config_path)
             else:
@@ -205,6 +202,9 @@ class CameraManager:
 
             # Ensure preview resources are closed before AI pipeline starts
             preview_manager.stop_preview()
+
+            # Stop existing reader if one is already running
+            self._stop_reader_internal()
 
             self._status = "SWITCHING"
             self._error_reason = ""

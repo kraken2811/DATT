@@ -13,6 +13,7 @@ Validates all 9 user requirements:
 from datetime import datetime, timezone
 import io
 import os
+import gc
 from pathlib import Path
 import tempfile
 import time
@@ -22,9 +23,10 @@ import cv2
 from fastapi.testclient import TestClient
 import numpy as np
 import pytest
+from unittest.mock import patch
 
 from src.db.database import Database
-from src.db.models import FaceEvent, PlateEvent, Target, TargetEmbedding, VehicleEvent, VideoSource
+from src.db.models import FaceEvent, PlateEvent, Target, TargetEmbedding, VehicleEvent, VideoSource, VehicleWatchlist
 from src.db.repositories import (
     FaceEventRepository,
     PlateEventRepository,
@@ -70,6 +72,13 @@ class TestEndToEndBackendDatabase:
     @pytest.fixture(autouse=True)
     def setup_and_teardown(self) -> None:
         """Fixture for setting up test client and cleaning up disk artifacts."""
+        self.db_temp = tempfile.TemporaryDirectory()
+        db_url = "sqlite:///" + (Path(self.db_temp.name) / "e2e.db").as_posix()
+        db_env = patch.dict(os.environ, {"DATT_DATABASE_URL": db_url})
+        db_env.start()
+        from alembic import command
+        from alembic.config import Config
+        command.upgrade(Config("src/db/alembic.ini"), "head")
         self.client = TestClient(app)
         target_manager.clear()
         self.cleanup_files: list[Path] = []
@@ -81,6 +90,9 @@ class TestEndToEndBackendDatabase:
                     p.unlink(missing_ok=True)
                 except Exception:
                     pass
+        db_env.stop()
+        gc.collect()
+        self.db_temp.cleanup()
 
     def test_01_video_library_e2e_flow(self) -> None:
         """Requirement 1 & 7: Video Library Upload, Storage, Database Record, Listing, and Deletion."""
@@ -282,6 +294,9 @@ class TestEndToEndBackendDatabase:
 
         # Setup worker and repository
         worker = DatabaseWorker(batch_size=5)
+        with worker.db.transaction() as session:
+            session.add(VehicleWatchlist(plate_number="29X19999", vehicle_type="motorbike",
+                display_name="Integration test", owner_info="", notes="", status="active"))
 
         # Vehicle Passage DTO representing completed motorcycle track
         v_event_id = uuid4()

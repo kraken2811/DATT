@@ -1,4 +1,4 @@
-"""Optional pre-startup Colab cell: reuse public source, wheels, and model files from Drive.
+"""Pre-startup Colab cell: reuse source, pip wheels, and complete model assets from Drive.
 
 Never place .env, Colab Secrets, uploads, or biometric media in this cache.
 Cache is an optimization: if Drive is unavailable, unmounted, or empty,
@@ -10,8 +10,10 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 
 ROOT = Path('/content/DATT')
+cache_cell_started = time.perf_counter()
 remote = 'https://github.com/kraken2811/DATT.git'
 drive_mounted = False
 
@@ -29,6 +31,7 @@ if drive_mounted:
         pip_cache = CACHE / 'pip'
         pip_cache.mkdir(parents=True, exist_ok=True)
         os.environ['PIP_CACHE_DIR'] = str(pip_cache)
+        os.environ['PIP_NO_CACHE_DIR'] = 'false'
         print('PIP_CACHE=CONFIGURED')
     except Exception as exc:
         print(f'CACHE_DIR_INIT_WARNING: {exc}')
@@ -67,6 +70,8 @@ else:
     print('SOURCE_CACHE=EXISTING_RUNTIME')
 
 # Model restoration from cache
+if not ROOT.is_dir():
+    raise RuntimeError('DATT source is unavailable; cannot restore models into a deployment')
 model_dir = ROOT / 'models'
 if CACHE is not None and (CACHE / 'models').is_dir():
     try:
@@ -86,6 +91,22 @@ else:
     print('MODEL_CACHE=EMPTY; models will be fetched/verified during startup')
 
 print('DRIVE_CACHE_READY=YES')
+print('drive_cache_setup_seconds=' + str(round(time.perf_counter() - cache_cell_started, 1)))
+
+
+def restore_model_cache():
+    """Restore cached model files into the deployment, replacing missing/size-mismatched files."""
+    if CACHE is None or not (CACHE / 'models').is_dir():
+        return 0
+    restored = 0
+    for cached in (CACHE / 'models').rglob('*'):
+        if cached.is_file():
+            target = model_dir / cached.relative_to(CACHE / 'models')
+            if not target.is_file() or target.stat().st_size != cached.stat().st_size:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(cached, target)
+                restored += 1
+    return restored
 
 
 def save_model_cache():

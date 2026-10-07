@@ -79,28 +79,13 @@ class TestCameraSelectionSystem(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         html = resp.text
 
-        # Header requirements
-        self.assertIn("DATT", html)
-        self.assertIn("HỆ THỐNG GIÁM SÁT THÔNG MINH", html)
-        self.assertIn("Chọn camera để bắt đầu giám sát", html)
-
-        # Tab requirements
-        self.assertIn("Public CCTV", html)
-        self.assertIn("Direct HLS", html)
-        self.assertIn("YouTube Live", html)
-        self.assertIn("Local Video", html)
-
-        # Source banner & Change camera button in Dashboard
-        self.assertIn("active-source-banner", html)
-        self.assertIn("ĐỔI CAMERA", html)
-
-        # Selection screen and modal components
-        self.assertIn("selectionScreen", html)
-        self.assertIn("connectingScreen", html)
-        self.assertIn("errorScreen", html)
-        self.assertIn("monitoringScreen", html)
-        self.assertIn("previewModal", html)
-
+        # Production serves a client-rendered React SPA shell. Screen content is
+        # rendered by the bundle, while theme/accent defaults are in the shell.
+        self.assertIn('id="root"', html)
+        self.assertIn('data-theme="light"', html)
+        self.assertIn('data-accent="blue"', html)
+        self.assertIn('type="module"', html)
+        self.assertIn('/assets/', html)
     # -------------------------------------------------------------------------
     # 2. Caltrans Camera Catalog Parsing
     # -------------------------------------------------------------------------
@@ -240,7 +225,8 @@ class TestCameraSelectionSystem(unittest.TestCase):
 
         with patch("yt_dlp.YoutubeDL") as mock_ytdlp, \
              patch("src.stream.youtube_resolver.stream_resolver.resolve_stream_url") as mock_resolver, \
-             patch("subprocess.Popen") as mock_popen:
+             patch("subprocess.Popen") as mock_popen, \
+             patch("imageio_ffmpeg.get_ffmpeg_exe", return_value="ffmpeg"):
 
             mock_proc = MagicMock()
             mock_proc.poll.return_value = None
@@ -406,7 +392,7 @@ class TestCameraSelectionSystem(unittest.TestCase):
         mock_proc.wait = MagicMock()
         mock_proc.stdout = MagicMock()
 
-        with patch("subprocess.Popen", return_value=mock_proc):
+        with patch("subprocess.Popen", return_value=mock_proc), patch("imageio_ffmpeg.get_ffmpeg_exe", return_value="ffmpeg"):
             pm.start_preview("https://example.com/preview.m3u8")
             self.assertTrue(pm.is_active())
 

@@ -90,7 +90,7 @@ def query(session,params,ident=None):
         except ValueError: raise LookupError('EVENT_NOT_FOUND') from None
         q=q.where(events.c.event_type==kind,events.c.id==(UUID(raw).hex if session.bind.dialect.name=='sqlite' else str(UUID(raw))))
     kind=params.get('event_type')
-    if kind:
+    if kind and kind.lower() not in ('all', ''):
         from src.events.policy import MEANINGFUL_EVENTS
         if kind not in KINDS and kind not in MEANINGFUL_EVENTS: raise ValueError('INVALID_EVENT_TYPE')
         q=q.where(events.c.semantic_type==kind) if kind in MEANINGFUL_EVENTS else q.where(events.c.event_type==kind)
@@ -122,6 +122,16 @@ def query(session,params,ident=None):
         q=q.where(select(Notification.id).where(Notification.status==status,or_(
             (events.c.event_type=='face') & (cast(Notification.event_id,String)==events.c.id),
             (events.c.event_type=='plate') & (cast(Notification.plate_event_id,String)==events.c.id))).exists())
+    search=(params.get('search') or params.get('q') or '').strip()
+    if search:
+        search_like=f"%{search}%"
+        q=q.where(or_(
+            events.c.camera_id.ilike(search_like),
+            events.c.plate.ilike(search_like),
+            events.c.target_id.ilike(search_like),
+            events.c.event_type.ilike(search_like),
+            events.c.semantic_type.ilike(search_like),
+        ))
     direction=params.get('sort',params.get('order','desc'))
     if direction not in ('asc','desc','timestamp','-timestamp'): raise ValueError('INVALID_SORT')
     q=q.order_by(events.c.timestamp.asc() if direction in ('asc','timestamp') else events.c.timestamp.desc(),events.c.event_type,events.c.id)

@@ -1,4 +1,4 @@
-﻿"""UI-compatible vehicle watchlist routes backed by the deployment database."""
+"""UI-compatible vehicle watchlist routes backed by the deployment database."""
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
@@ -35,6 +35,8 @@ async def body(request):
 
 @router.get('/api/watchlist/vehicles')
 @router.get('/watchlist/vehicles')
+@router.get('/api/watchlists/vehicles')
+@router.get('/watchlists/vehicles')
 def list_vehicles(request: Request):
     return execute('list',filters=dict(request.query_params))
 

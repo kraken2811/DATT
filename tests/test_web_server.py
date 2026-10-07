@@ -40,10 +40,11 @@ class TestWebServer(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers.get("content-type", ""))
         self.assertIn("DATT", response.text)
-        self.assertIn("Camera Management", response.text)
-        self.assertIn("Live Camera Stream", response.text)
-        self.assertIn("Realtime AI Telemetry", response.text)
-        self.assertIn("Recent Occupancy Events", response.text)
+        self.assertIn('id="root"', response.text)
+        self.assertIn('data-theme="light"', response.text)
+        self.assertIn('data-accent="blue"', response.text)
+        self.assertIn('type="module"', response.text)
+        self.assertIn("/assets/", response.text)
 
     def test_static_assets_load(self) -> None:
         """Static assets /static/style.css and /static/app.js must be served."""

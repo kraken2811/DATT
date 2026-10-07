@@ -10,10 +10,14 @@ Verifies:
 
 from collections import namedtuple
 import io
+import gc
+import os
 from pathlib import Path
 from importlib.util import find_spec
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 import numpy as np
@@ -38,6 +42,13 @@ class TestFaceRegistrationFix(unittest.TestCase):
     """Test suite ensuring target face registration and matching behave correctly."""
 
     def setUp(self) -> None:
+        self.db_temp = tempfile.TemporaryDirectory()
+        db_url = "sqlite:///" + (Path(self.db_temp.name) / "targets.db").as_posix()
+        self.db_env = patch.dict(os.environ, {"DATT_DATABASE_URL": db_url})
+        self.db_env.start()
+        from alembic import command
+        from alembic.config import Config
+        command.upgrade(Config("src/db/alembic.ini"), "head")
         self.client = TestClient(app)
         target_manager.clear()
         target_matcher.reset_tracks()
@@ -45,6 +56,9 @@ class TestFaceRegistrationFix(unittest.TestCase):
     def tearDown(self) -> None:
         target_manager.clear()
         target_matcher.reset_tracks()
+        self.db_env.stop()
+        gc.collect()
+        self.db_temp.cleanup()
 
     def _create_synthetic_face_portrait(self, exif_orientation: int | None = None) -> bytes:
         """Create a JPEG byte payload with a real face crop for testing."""

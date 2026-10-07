@@ -39,12 +39,23 @@ def model_probe():
     require(face.initialize(), 'Production face detector initialization failed')
     require(face.execution_provider == 'CUDAExecutionProvider', 'Face detector CUDA provider unavailable')
     pipeline = AdaptiveFacePipeline()
-    require(pipeline.embedder.initialize(), 'Production face embedding model missing or failed to initialize')
+    if not pipeline.embedder.initialize():
+        # Keep the public blocker credential-free while distinguishing a missing
+        # file from an ONNX/runtime initialization failure in the private log.
+        model_path = getattr(pipeline.embedder, 'model_path', None)
+        if model_path is not None and not Path(model_path).is_file():
+            raise Blocker('Production face embedding model missing; expected models/face/adaface_ir50_ms1mv2.onnx. Rerun Cell 6 and upload datt-colab-models.zip')
+        raise Blocker('Production face embedding model failed to initialize; inspect the private runtime log for the AdaFace/ONNX error')
     require(pipeline.embedder.execution_provider == 'CUDAExecutionProvider', 'Face embedding CUDA provider unavailable')
     require(PlateDetector.get_instance().is_available, 'Production plate model failed to initialize')
     reader = LicensePlateReader.get_instance()
     require(reader.initialize() and reader.device == 'CUDA', 'Production OCR failed to initialize on CUDA')
-    return {'models': 'PASS', 'yolo': 'PASS', 'face': 'PASS', 'plate_ocr': 'PASS', 'onnx_cuda': True}
+    return {
+        'models': 'PASS', 'yolo': 'PASS', 'face': 'PASS', 'plate_ocr': 'PASS', 'onnx_cuda': True,
+        'yolo_provider': str(yolo.device),
+        'scrfd_provider': face.execution_provider,
+        'adaface_provider': pipeline.embedder.execution_provider,
+    }
 
 
 class Startup:
@@ -103,14 +114,19 @@ class Startup:
             from google.colab import userdata
         except ImportError:
             userdata = None
-        for name in REQUIRED + EMAIL:
+        for name in REQUIRED:
             if not os.getenv(name) and userdata is not None:
                 try:
                     value = userdata.get(name)
                     if value:
                         os.environ[name] = value
-                except (userdata.SecretNotFoundError, userdata.NotebookAccessError):
+                # Colab may time out or open a consent prompt for optional Secrets.
+                # Values already supplied by .env remain usable, and a missing optional
+                # Secret must not block persistence startup.
+                except Exception:
                     pass
+            print(name + '=' + str(bool(os.getenv(name))).lower())
+        for name in EMAIL:
             print(name + '=' + str(bool(os.getenv(name))).lower())
         require(all(os.getenv(n) for n in REQUIRED), 'Missing required configuration; set named variables in /content/DATT/.env or Colab Secrets')
         require(os.getenv('DATT_STORAGE_BACKEND') == 'supabase', 'This startup requires the configured Supabase storage backend')
@@ -148,7 +164,9 @@ class Startup:
             raise Blocker('Production model probe failed; no valid diagnostic result') from None
         require(r.returncode == 0, result.get('blocker', 'Production model initialization failed'))
         self.report.update(result)
-        print('models=PASS; YOLO=CUDA; face=CUDAExecutionProvider; plate_ocr=PASS')
+        print('models=PASS; YOLO=' + self.report['yolo_provider']
+              + '; SCRFD=' + self.report['scrfd_provider']
+              + '; AdaFace=' + self.report['adaface_provider'] + '; plate_ocr=PASS')
 
     def cell_7(self):
         db = self.cli('migrate')
@@ -244,7 +262,8 @@ class Startup:
         # Revalidate liveness instead of reporting a backend that died after Cell 10.
         self.cell_10()
         fields = ('runtime', 'gpu', 'cuda', 'source', 'commit', 'environment', 'database', 'pgvector',
-                  'migration', 'storage', 'models', 'backend', 'backend_pid', 'backend_http', 'camera_api',
+                  'migration', 'storage', 'models', 'yolo_provider', 'scrfd_provider', 'adaface_provider',
+                  'backend', 'backend_pid', 'backend_http', 'camera_api',
                   'face_watchlist_api', 'vehicle_watchlist_api', 'event_center_api', 'notification_worker', 'ui_url')
         require(all(k in self.report for k in fields) and self.report.get('smoke_tests') == 'PASS', 'Startup report is incomplete')
         print('[DATT_COLAB_STARTUP]')

@@ -62,3 +62,8 @@ backups/
 data/media-cache/
 .colab-persistence-constraints.txt
 .datt-runtime/
+screenshots/
+datt-colab-*.zip
+data/camera_registry.json
+data/vehicle_watchlist.json
+models/ppvehicle/

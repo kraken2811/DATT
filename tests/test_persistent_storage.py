@@ -183,7 +183,7 @@ def test_images_and_event_keys_survive_adapter_restart(tmp_path, monkeypatch):
     from datetime import datetime, timezone
     from uuid import uuid4
     from src.db.database import Database
-    from src.db.models import Base, VehicleEvent, PlateEvent
+    from src.db.models import Base, VehicleEvent, PlateEvent, VehicleWatchlist
     from src.events.db_worker import DatabaseWorker
     from src.events.event_dto import VehiclePassageDTO
     from src.storage import save_image
@@ -191,6 +191,9 @@ def test_images_and_event_keys_survive_adapter_restart(tmp_path, monkeypatch):
     url = "sqlite:///" + (tmp_path / "worker-test.db").as_posix()
     db = Database(url)
     Base.metadata.create_all(db.engine)
+    with db.transaction() as session:
+        session.add(VehicleWatchlist(plate_number="TEST123", vehicle_type="car",
+            display_name="Storage test", owner_info="", notes="", status="active"))
     fs = fsspec.filesystem("memory")
     with patch.object(fs, "protocol", "test-remote"), patch("fsspec.core.url_to_fs", return_value=(fs, "/images-test")):
         storage = ExternalStorageBackend("test://images", {}, tmp_path / "cache-one")

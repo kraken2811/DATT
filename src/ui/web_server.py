@@ -130,6 +130,16 @@ async def shutdown_backend_client() -> None:
 # Mount /static for CSS, JS, icons
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+REACT_DIST = STATIC_DIR / "react_dist"
+if (REACT_DIST / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=str(REACT_DIST / "assets")), name="react_assets")
+
+
+def get_index_path() -> Path:
+    if (REACT_DIST / "index.html").is_file():
+        return REACT_DIST / "index.html"
+    return STATIC_DIR / "index.html"
+
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon() -> Response:
@@ -140,25 +150,21 @@ async def favicon() -> Response:
     return Response(status_code=204)
 
 
+@app.get("/legacy", response_class=FileResponse)
+async def serve_legacy() -> Response:
+    """Serve legacy frontend for Feature Parity comparison."""
+    return FileResponse(str(STATIC_DIR / "index.html"))
+
+
 @app.get("/", response_class=FileResponse)
+@app.get("/dashboard", response_class=FileResponse)
 @app.get("/watchlist", response_class=FileResponse)
 @app.get("/alerts", response_class=FileResponse)
-async def serve_index() -> Response:
-    """Serve the single-page monitoring dashboard."""
-    index_file = STATIC_DIR / "index.html"
-    if not index_file.is_file():
-        return Response(
-            content="""<!DOCTYPE html>
-<html>
-<head><title>DATT UI Starting...</title></head>
-<body style="background:#0e1117;color:#fff;font-family:sans-serif;padding:2rem;">
-    <h2>DATT AI Vision Monitor (Phase 4.4)</h2>
-    <p>Waiting for static assets to initialize at <code>src/ui/static/index.html</code>...</p>
-</body>
-</html>""",
-            media_type="text/html",
-        )
-    return FileResponse(str(index_file))
+@app.get("/settings", response_class=FileResponse)
+@app.get("/cameras/{camera_id}", response_class=FileResponse)
+async def serve_index(request: Request) -> Response:
+    """Serve the single-page monitoring dashboard (React SPA or fallback)."""
+    return FileResponse(str(get_index_path()))
 
 
 # -----------------------------------------------------------------------------
@@ -226,16 +232,22 @@ async def get_telemetry(request: Request) -> JSONResponse:
 # Camera API
 # -----------------------------------------------------------------------------
 
+def get_index_path() -> Path:
+    if (REACT_DIST / "index.html").is_file():
+        return REACT_DIST / "index.html"
+    return STATIC_DIR / "index.html"
+
+
 @app.get("/camera-management")
 async def get_camera_management_page() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(get_index_path())
 
 
 @app.get("/cameras")
 async def get_cameras(request: Request) -> Response:
     """Fetch list of available cameras and active camera."""
     if "text/html" in request.headers.get("accept", "") and request.url.path == "/cameras":
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(get_index_path())
     b_url = get_backend_url(request).rstrip("/")
     try:
         client = get_backend_http_client()
@@ -896,43 +908,73 @@ async def preview_feed(request: Request) -> Response:
 
 @app.get("/targets")
 @app.get("/api/targets")
-async def get_targets() -> JSONResponse:
-    """Retrieve all registered targets (hydrated from PostgreSQL on restart)."""
-    if not target_manager.list_targets():
-        try:
-            from src.db.database import Database
-            from src.db.repositories import TargetRepository, TargetEmbeddingRepository
-            import numpy as np
-            db = Database()
-            with db.transaction() as session:
-                t_repo = TargetRepository(session)
-                te_repo = TargetEmbeddingRepository(session)
-                for db_t in t_repo.list(active=True):
-                    emb_arr = None
-                    src_img = db_t.image_path
-                    embs = te_repo.list(target_id=db_t.id)
-                    if embs:
-                        emb_arr = np.asarray(embs[0].embedding, dtype=np.float32)
-                        if embs[0].source_image_path:
-                            src_img = embs[0].source_image_path
-                    ref_meta = db_t.reference_metadata or {}
-                    color = ref_meta.get("clothing_color")
-                    threshold = float(ref_meta.get("threshold", 0.45))
-                    target_manager.add_target_from_db(
-                        target_id=str(db_t.id),
-                        name=db_t.name,
-                        face_embedding=emb_arr,
-                        clothing_color=color,
-                        face_threshold=threshold,
-                        source_image_path=src_img,
-                        db_id=str(db_t.id),
-                        embedding_model=embs[0].model_name if embs else 'adaface_ir50_ms1mv2',
-                    )
-        except Exception as exc:
-            logger.debug("Failed restoring targets from DB: %s", exc)
+async def get_targets(
+    request: Request,
+    q: str = Query("", description="Search term"),
+    search: str = Query("", description="Search term alias"),
+    page: int | None = Query(None, description="Page number (1-based)"),
+    page_size: int = Query(25, description="Items per page"),
+    limit: int | None = Query(None, description="Limit alias"),
+) -> JSONResponse:
+    """Retrieve registered targets with direct SQL search, sort, and pagination."""
+    from src.db.database import Database
+    from src.db.models import Target
+    from sqlalchemy import select, func, or_, cast, String
 
-    targets = [t.to_dict() for t in target_manager.list_targets()]
-    return JSONResponse(content={"status": "ok", "targets": targets}, status_code=200)
+    search_term = (search or q).strip()
+    effective_size = limit if limit is not None else page_size
+    try:
+        effective_size = max(1, min(200, int(effective_size)))
+    except (ValueError, TypeError):
+        effective_size = 25
+
+    try:
+        db = Database()
+        with db.transaction() as session:
+            query = select(Target).where(Target.active == True)
+            if search_term:
+                search_like = f"%{search_term}%"
+                query = query.where(or_(
+                    Target.name.ilike(search_like),
+                    cast(Target.id, String).ilike(search_like),
+                ))
+            query = query.order_by(Target.created_at.desc())
+
+            total = session.scalar(select(func.count()).select_from(query.order_by(None).subquery()))
+
+            if total == 0 and target_manager.list_targets():
+                targets = [t.to_dict() for t in target_manager.list_targets()]
+                return JSONResponse(content={"status": "ok", "targets": targets, "total": len(targets)}, status_code=200)
+
+            if page is not None and page > 0:
+                rows = session.scalars(query.offset((page - 1) * effective_size).limit(effective_size)).all()
+            else:
+                rows = session.scalars(query).all()
+
+            targets_list = []
+            for t in rows:
+                meta = t.reference_metadata or {}
+                targets_list.append({
+                    "id": str(t.id),
+                    "name": t.name,
+                    "clothing_color": meta.get("clothing_color"),
+                    "face_threshold": float(meta.get("threshold", 0.45)),
+                    "has_face": True,
+                    "source_image_path": t.image_path,
+                    "selected": True,
+                })
+
+            resp = {"status": "ok", "targets": targets_list, "total": total}
+            if page is not None:
+                resp["page"] = page
+                resp["page_size"] = effective_size
+            return JSONResponse(content=resp, status_code=200)
+    except Exception as exc:
+        logger.warning("Direct DB target query failed (%s), falling back to in-memory...", exc)
+        targets = [t.to_dict() for t in target_manager.list_targets()]
+        return JSONResponse(content={"status": "ok", "targets": targets, "total": len(targets)}, status_code=200)
+
+    return JSONResponse(content={"status": "ok", "targets": targets, "total": total}, status_code=200)
 
 
 @app.post("/register_target")
@@ -1331,7 +1373,7 @@ event_snapshot_cache: dict[str, str] = {}
 async def get_events(request: Request) -> Response:
     """Fetch recent occupancy events (latest 5 only) or serve SPA page on browser navigation."""
     if "text/html" in request.headers.get("accept", "") and request.url.path == "/events":
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(get_index_path())
     b_url = get_backend_url(request).rstrip("/")
     try:
         limit = int(request.query_params.get("limit", 5))

@@ -32,19 +32,30 @@ def query(session, params, ident=None):
         except ValueError:
             raise LookupError() from None
     status = params.get('status', '').lower()
-    if status:
+    if status and status != 'all':
         if status not in ('pending', 'sent', 'failed', 'suppressed'):
             raise ValueError('INVALID_STATUS')
         q = q.where(Notification.status == status)
     kind = params.get('event_type')
-    if kind:
+    if kind and kind != 'all':
         if kind not in EVENT_TYPES:
             raise ValueError('INVALID_EVENT_TYPE')
         q = q.where(Notification.event_id.is_not(None) if kind == EVENT_TYPES[0]
                     else Notification.plate_event_id.is_not(None))
     camera = params.get('camera_id')
-    if camera:
+    if camera and camera != 'all':
         q = q.where(Notification.camera_id.in_(camera_aliases(camera)))
+    search = (params.get('search') or params.get('q') or '').strip()
+    if search:
+        search_like = f"%{search}%"
+        q = q.where(or_(
+            Notification.recipient.ilike(search_like),
+            Target.name.ilike(search_like),
+            VehicleWatchlist.display_name.ilike(search_like),
+            PlateEvent.plate_text.ilike(search_like),
+            PlateEvent.normalized_plate.ilike(search_like),
+            Notification.camera_id.ilike(search_like),
+        ))
     try:
         page, size = int(params.get('page', 1)), int(params.get('page_size', 25))
     except ValueError:

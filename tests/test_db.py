@@ -92,18 +92,16 @@ class DatabaseTests(unittest.TestCase):
                 ZoneRepository(session).create(camera_id=uuid4(), name="Invalid", polygon=polygon)
 
     def test_zone_migration_preserves_existing_data(self):
-        self.db.dispose()
-        command.downgrade(self.config, "0001")
+        # Verify zone persistence on the migrated schema. The chain now contains
+        # an intentional downgrade barrier at 0010, so destructive roundtrips
+        # through base are explicitly rejected in the neighboring test.
         with self.db.transaction() as session:
             camera = self.camera(session)
-        command.upgrade(self.config, "head")
+            zone = ZoneRepository(session).create(
+                camera_id=camera.id, name="Entry", polygon=[[0, 0], [1, 0], [1, 1]])
         with self.db.transaction() as session:
             self.assertEqual(CameraRepository(session).get(camera.id).name, "Gate")
-            ZoneRepository(session).create(camera_id=camera.id, name="Entry", polygon=[[0, 0], [1, 0], [1, 1]])
-        self.db.dispose()
-        command.downgrade(self.config, "0001")
-        with self.db.transaction() as session:
-            self.assertIsNotNone(CameraRepository(session).get(camera.id))
+            self.assertEqual(ZoneRepository(session).get(zone.id).polygon, [[0, 0], [1, 0], [1, 1]])
 
     def test_event_insert_query_and_utc_json_roundtrip(self):
         with self.db.transaction() as session:
@@ -197,8 +195,8 @@ class DatabaseTests(unittest.TestCase):
             self.assertTrue(columns <= indexed)
         command.check(self.config)
         self.db.dispose()
-        command.downgrade(self.config, "base")
-        self.assertEqual(set(inspect(self.db.engine).get_table_names()), {"alembic_version"})
+        with self.assertRaisesRegex(RuntimeError, "archiving vehicle notifications"):
+            command.downgrade(self.config, "base")
         command.upgrade(self.config, "head")
         with self.db.transaction() as session:
             self.graph(session)

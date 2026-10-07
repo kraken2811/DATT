@@ -217,6 +217,7 @@ class SeattleSDOTService:
         self._catalog_timestamp: float = 0.0
         self._cached_template: str | None = None
         self._template_timestamp: float = 0.0
+        self._is_fetching: bool = False
         self._last_error: str = ""
 
     def get_wowza_template(self, force_refresh: bool = False) -> str:
@@ -277,21 +278,28 @@ class SeattleSDOTService:
 
         raise RuntimeError("Unable to retrieve Seattle Wowza HLS template and no cached template is available.")
 
+    def _background_fetch(self, whitelist: set[str] | None) -> None:
+        try:
+            self._fetch_and_cache(force_refresh=True, whitelist=whitelist)
+        finally:
+            with self._lock:
+                self._is_fetching = False
+
     def get_cameras(
         self,
         force_refresh: bool = False,
         query: str = "",
         whitelist: set[str] | None = SEATTLE_WHITELIST_CAMERAS,
     ) -> list[dict[str, Any]]:
-        """Retrieve normalized Seattle SDOT cameras, utilizing 10-minute cache with fallback."""
+        """Retrieve normalized Seattle SDOT cameras from real upstream with resilient caching."""
         with self._lock:
             cache_alive = (
                 not force_refresh
-                and self._cached_cameras
+                and bool(self._cached_cameras)
                 and (time.time() - self._catalog_timestamp) < self.catalog_ttl
             )
             if cache_alive:
-                cameras = self._cached_cameras
+                cameras = list(self._cached_cameras)
             else:
                 cameras = None
 

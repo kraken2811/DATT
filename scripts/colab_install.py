@@ -75,8 +75,8 @@ def audit_plan(report, installed):
             raise RuntimeError('Resolver attempted to install CPU ONNX Runtime')
         if name in installed and version != installed[name]:
             raise RuntimeError('Resolver attempted to replace installed package: ' + name)
-        if name in TORCH and version != TORCH[name]:
-            raise RuntimeError('Resolver attempted to replace protected Torch stack')
+        if name in TORCH:
+            raise RuntimeError('Resolver attempted to replace the CUDA-verified Torch stack')
         if not item['download_info']['url'].split('?', 1)[0].endswith('.whl'):
             raise RuntimeError('Resolver selected a source build: ' + name)
         selected[name] = version
@@ -120,10 +120,19 @@ def validate_dependencies():
                 pending.append(child)
 
 
+def cuda_torch_ready():
+    """Return whether the currently installed Torch stack passes a GPU tensor probe."""
+    probe = subprocess.run([sys.executable, '-c',
+        'import torch; x=torch.arange(4,device="cuda"); torch.cuda.synchronize(); '
+        'assert torch.cuda.is_available() and x.sum().item()==6'],
+        cwd=ROOT, capture_output=True, timeout=90)
+    return probe.returncode == 0
+
+
 def main():
     installed = active_versions()
-    if any(installed.get(n) != v for n, v in TORCH.items()):
-        raise RuntimeError('Provision the exact Torch 2.11.0 / torchvision 0.26.0 / torchaudio 2.11.0 cu126 stack first')
+    if any(n not in installed for n in TORCH) or not cuda_torch_ready():
+        raise RuntimeError('Run Cell 1 until the existing Torch/CUDA stack passes its GPU tensor probe')
     missing, incompatible = plan()
     if incompatible:
         raise RuntimeError('Installed versions conflict with repository requirements: ' + ', '.join(incompatible))
@@ -156,13 +165,13 @@ def main():
         print('dependency_stage=' + label + '; PASS', flush=True)
     validate_dependencies()
     after = active_versions()
-    if any(after.get(n) != v for n, v in TORCH.items()):
-        raise RuntimeError('Protected Torch verification failed')
+    if not cuda_torch_ready():
+        raise RuntimeError('CUDA Torch verification failed after dependency provisioning')
     result = subprocess.run([sys.executable, '-c',
         'import torch, torchvision, onnxruntime, ultralytics, insightface, easyocr, cv2, numpy; '
         'import sqlalchemy, alembic, psycopg, pgvector, fastapi, uvicorn, dotenv, httpx, yaml; '
         'from src.tracker.bytetrack_tracker import PersonTracker; PersonTracker(); '
-        'assert torch.version.cuda == "12.6" and torch.cuda.is_available(); '
+        'assert torch.cuda.is_available(); '
         'x=torch.arange(4,device="cuda"); assert (x*x).sum().item()==14; '
         'assert "CUDAExecutionProvider" in onnxruntime.get_available_providers()'],
         cwd=ROOT, capture_output=True, timeout=120)

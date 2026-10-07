@@ -70,18 +70,37 @@ def serialize(c):
 
 
 def list_records(filters=None):
-    filters=filters or {}
-    with database() as db,db.transaction() as s:
-        items=[serialize(c) for c in s.scalars(select(Camera).order_by(Camera.created_at.desc()))]
-    summary={'total':len(items),**{v:sum(c['status']==v for c in items) for v in ('online','offline','disabled')}}
-    result=items
-    for key in ('status','source_type','zone'):
-        value=filters.get(key)
-        if value and value!='all': result=[c for c in result if c[key]==value]
-    q=filters.get('search','').lower().strip()
-    if q: result=[c for c in result if q in ' '.join(str(c.get(k) or '') for k in ('id','name','zone','description')).lower()]
-    return dict(status='ok',cameras=result,total=len(result),summary=summary,
-        active_camera_id=next((c['id'] for c in items if c['active']),None))
+    filters = filters or {}
+    with database() as db, db.transaction() as s:
+        items = [serialize(c) for c in s.scalars(select(Camera).order_by(Camera.created_at.desc()))]
+    summary = {'total': len(items), **{v: sum(c['status'] == v for c in items) for v in ('online', 'offline', 'disabled')}}
+    result = items
+    for key in ('status', 'source_type', 'zone'):
+        value = filters.get(key)
+        if value and value != 'all': result = [c for c in result if c.get(key) == value]
+    q = (filters.get('search') or filters.get('q') or '').lower().strip()
+    if q: result = [c for c in result if q in ' '.join(str(c.get(k) or '') for k in ('id', 'name', 'zone', 'description')).lower()]
+    total_matching = len(result)
+
+    page = filters.get('page')
+    page_size = filters.get('page_size', filters.get('limit', 25))
+    resp = dict(status='ok', total=total_matching, summary=summary,
+        active_camera_id=next((c['id'] for c in items if c['active']), None))
+
+    if page is not None:
+        try:
+            page = max(1, int(page))
+            page_size = max(1, min(200, int(page_size)))
+        except (ValueError, TypeError):
+            page, page_size = 1, 25
+        start_idx = (page - 1) * page_size
+        resp['cameras'] = result[start_idx:start_idx + page_size]
+        resp['page'] = page
+        resp['page_size'] = page_size
+    else:
+        resp['cameras'] = result
+
+    return resp
 
 
 def mutate(action,ident=None,body=None):

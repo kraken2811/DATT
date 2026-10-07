@@ -108,6 +108,9 @@ class TestYouTubeVODRegression(unittest.TestCase):
 
     def setUp(self) -> None:
         self.dummy_mp4 = create_dummy_mp4(num_frames=10, width=320, height=240)
+        ffmpeg_path = patch("imageio_ffmpeg.get_ffmpeg_exe", return_value="ffmpeg")
+        ffmpeg_path.start()
+        self.addCleanup(ffmpeg_path.stop)
 
     def tearDown(self) -> None:
         if self.dummy_mp4.is_file():

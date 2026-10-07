@@ -1,0 +1,44 @@
+import React from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { ToastProvider } from './context/ToastContext';
+import { AppProvider } from './context/AppContext';
+import { Sidebar } from './components/Sidebar';
+import { ToastContainer } from './components/ToastContainer';
+
+// Pages
+import { DashboardPage } from './pages/DashboardPage';
+import { CameraManagementPage } from './pages/CameraManagementPage';
+import { CameraViewPage } from './pages/CameraViewPage';
+import { WatchlistPage } from './pages/WatchlistPage';
+import { EventCenterPage } from './pages/EventCenterPage';
+import { AlertCenterPage } from './pages/AlertCenterPage';
+import { SettingsPage } from './pages/SettingsPage';
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <ToastProvider>
+        <AppProvider>
+          <div className="app-layout">
+            <Sidebar />
+            <main className="main-content">
+              <Routes>
+                <Route path="/" element={<DashboardPage />} />
+                <Route path="/dashboard" element={<DashboardPage />} />
+                <Route path="/cameras" element={<CameraManagementPage />} />
+                <Route path="/cameras/:id" element={<CameraViewPage />} />
+                <Route path="/watchlist" element={<WatchlistPage />} />
+                <Route path="/events" element={<EventCenterPage />} />
+                <Route path="/alerts" element={<AlertCenterPage />} />
+                <Route path="/settings" element={<SettingsPage />} />
+                {/* Fallback to dashboard */}
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </main>
+            <ToastContainer />
+          </div>
+        </AppProvider>
+      </ToastProvider>
+    </BrowserRouter>
+  );
+}

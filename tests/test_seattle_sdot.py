@@ -275,7 +275,8 @@ class TestSeattleSDOTIntegration(unittest.TestCase):
 
         with patch("yt_dlp.YoutubeDL") as mock_ytdlp, \
              patch("src.stream.youtube_resolver.stream_resolver.resolve_stream_url") as mock_resolver, \
-             patch("subprocess.Popen") as mock_popen:
+             patch("subprocess.Popen") as mock_popen, \
+             patch("imageio_ffmpeg.get_ffmpeg_exe", return_value="ffmpeg"):
 
             mock_proc = MagicMock()
             mock_proc.poll.return_value = None

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="vi" data-theme="light" data-accent="blue">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DATT — AI Vision Command Center</title>
+    <meta name="description" content="Hệ thống giám sát thị giác máy tính và nhận diện thông minh DATT" />
+    <script>
+      (function() {
+        try {
+          var savedTheme = localStorage.getItem('datt_theme');
+          document.documentElement.dataset.theme = (savedTheme === 'dark') ? 'dark' : 'light';
+          var savedAccent = localStorage.getItem('datt_accent_color') || 'blue';
+          document.documentElement.dataset.accent = savedAccent;
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

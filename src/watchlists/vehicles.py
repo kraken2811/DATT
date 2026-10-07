@@ -1,4 +1,4 @@
-﻿"""Exact plate lookup and CRUD; independent of OCR and recognition models."""
+"""Exact plate lookup and CRUD; independent of OCR and recognition models."""
 import re
 from uuid import UUID
 from sqlalchemy import select, func
@@ -62,6 +62,15 @@ def get_item(session, ident):
     return item
 
 
+def serialize_item(item, stats=None):
+    count, last = stats.get(item.plate_number, (0, None)) if stats else (0, None)
+    def stamp(value): return value.strftime('%Y-%m-%d %H:%M:%S') if value else None
+    return dict(id=str(item.id), plate_number=item.plate_number, normalized_plate=item.plate_number,
+        vehicle_type=item.vehicle_type, vehicle_color=item.vehicle_color, name=item.display_name, display_name=item.display_name,
+        owner_info=item.owner_info, notes=item.notes, status=item.status, image_path=None,
+        created_at=stamp(item.created_at), updated_at=stamp(item.updated_at), detection_count=count, last_seen=stamp(last))
+
+
 def serialize(session, item):
     count, last = session.execute(select(func.count(PlateEvent.id),func.max(PlateEvent.created_at)).where(
         PlateEvent.normalized_plate == item.plate_number)).one()
@@ -75,16 +84,76 @@ def serialize(session, item):
 def operate(db, action, ident=None, body=None, filters=None):
     with db.transaction() as session:
         if action == 'list':
-            query = select(VehicleWatchlist).order_by(VehicleWatchlist.created_at.desc())
+            from sqlalchemy import or_
             filters = filters or {}
-            for key in ('status','vehicle_type'):
-                if filters.get(key): query = query.where(getattr(VehicleWatchlist,key)==filters[key])
-            items = list(session.scalars(query))
-            search = filters.get('search','').strip().lower()
+            query = select(VehicleWatchlist)
+
+            # Database -> Filter
+            for key in ('status', 'vehicle_type'):
+                val = filters.get(key)
+                if val and val != 'all':
+                    query = query.where(getattr(VehicleWatchlist, key) == val)
+
+            # Database -> Search
+            search = (filters.get('search') or filters.get('q') or '').strip()
             if search:
-                items = [i for i in items if search in ' '.join((i.plate_number,i.display_name,i.owner_info,i.notes)).lower() or
-                         (normalize_plate(search) and normalize_plate(search) in i.plate_number)]
-            return dict(status='ok', total=len(items), vehicles=[serialize(session,i) for i in items])
+                norm_search = normalize_plate(search)
+                search_like = f"%{search}%"
+                search_clauses = [
+                    VehicleWatchlist.display_name.ilike(search_like),
+                    VehicleWatchlist.owner_info.ilike(search_like),
+                    VehicleWatchlist.notes.ilike(search_like),
+                    VehicleWatchlist.plate_number.ilike(search_like),
+                ]
+                if norm_search:
+                    search_clauses.append(VehicleWatchlist.plate_number.ilike(f"%{norm_search}%"))
+                query = query.where(or_(*search_clauses))
+
+            # Database -> Sort
+            sort_dir = filters.get('order', filters.get('sort', 'desc')).lower()
+            query = query.order_by(VehicleWatchlist.created_at.asc() if sort_dir == 'asc' else VehicleWatchlist.created_at.desc())
+
+            total = session.scalar(select(func.count()).select_from(query.order_by(None).subquery()))
+
+            # Database -> Pagination
+            page = filters.get('page')
+            page_size = filters.get('page_size', filters.get('limit', 25))
+            try:
+                page_size = max(1, min(200, int(page_size)))
+            except (ValueError, TypeError):
+                page_size = 25
+
+            if page is not None:
+                try:
+                    page = max(1, int(page))
+                except (ValueError, TypeError):
+                    page = 1
+                items = list(session.scalars(query.offset((page - 1) * page_size).limit(page_size)))
+            else:
+                items = list(session.scalars(query))
+
+            # Batch load detection stats to eliminate N+1 queries
+            plate_numbers = [i.plate_number for i in items if i.plate_number]
+            stats_map = {}
+            if plate_numbers:
+                stat_rows = session.execute(
+                    select(
+                        PlateEvent.normalized_plate,
+                        func.count(PlateEvent.id),
+                        func.max(PlateEvent.created_at)
+                    )
+                    .where(PlateEvent.normalized_plate.in_(plate_numbers))
+                    .group_by(PlateEvent.normalized_plate)
+                ).all()
+                for plate_norm, count, last_time in stat_rows:
+                    stats_map[plate_norm] = (count, last_time)
+
+            vehicles = [serialize_item(i, stats_map) for i in items]
+            resp = dict(status='ok', total=total, vehicles=vehicles)
+            if page is not None:
+                resp['page'] = page
+                resp['page_size'] = page_size
+            return resp
         if action == 'create':
             item = VehicleWatchlist(**fields(body)); session.add(item); session.flush()
         else:

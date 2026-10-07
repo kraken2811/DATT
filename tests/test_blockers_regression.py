@@ -394,7 +394,8 @@ class TestBlockersRegression(unittest.TestCase):
         mock_proc1.stdout = None
 
         with patch("subprocess.Popen", return_value=mock_proc1):
-            reader._spawn_ffmpeg("https://mock.googlevideo.com/stream.mp4")
+            with patch("imageio_ffmpeg.get_ffmpeg_exe", return_value="ffmpeg"):
+                reader._spawn_ffmpeg("https://mock.googlevideo.com/stream.mp4")
 
         self.assertEqual(reader.process_generation, 1)
         self.assertIsNotNone(reader._process)

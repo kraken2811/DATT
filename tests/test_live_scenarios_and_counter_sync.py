@@ -75,6 +75,10 @@ class TestLiveFaceRecAndCounterSync(unittest.TestCase):
             face_threshold=0.40,
         )
 
+    def _require_cuda_face_runtime(self) -> None:
+        if getattr(face_embedder, "execution_provider", "") != "CUDAExecutionProvider":
+            self.skipTest("Live face scenarios require the CUDA ONNX provider")
+
     def tearDown(self) -> None:
         self.matcher.reset_tracks()
         self.manager.clear()
@@ -125,6 +129,7 @@ class TestLiveFaceRecAndCounterSync(unittest.TestCase):
 
     def test_scenario_1_normal_lighting_clear_face(self) -> None:
         """SCENARIO 1: Normal lighting with clear face -> high similarity FACE_MATCH."""
+        self._require_cuda_face_runtime()
         native_frame = self._compose_frame_with_face(
             canvas_h=720, canvas_w=1280,
             person_bbox=(300, 100, 500, 550),
@@ -155,6 +160,7 @@ class TestLiveFaceRecAndCounterSync(unittest.TestCase):
 
     def test_scenario_2_backlit_face_enhancement(self) -> None:
         """SCENARIO 2: Backlit condition (dark face against bright background) triggers CLAHE enhancement."""
+        self._require_cuda_face_runtime()
         # Bright background (L ~ 220), dark face (brightness 0.30 -> L ~ 45)
         native_frame = self._compose_frame_with_face(
             canvas_h=720, canvas_w=1280,
@@ -189,6 +195,7 @@ class TestLiveFaceRecAndCounterSync(unittest.TestCase):
 
     def test_scenario_3_fast_passing_person_cadence(self) -> None:
         """SCENARIO 3: Fast-passing person: evaluated every 4 frames, stops after match."""
+        self._require_cuda_face_runtime()
         native_frame = self._compose_frame_with_face(
             canvas_h=720, canvas_w=1280,
             person_bbox=(200, 100, 400, 550),
@@ -212,6 +219,7 @@ class TestLiveFaceRecAndCounterSync(unittest.TestCase):
 
     def test_scenario_4_approaching_person_quality_progression(self) -> None:
         """SCENARIO 4: Distant person approaching: 30px (WAIT) -> 75px (MATCH) -> 110px (BEST_REPLACED)."""
+        self._require_cuda_face_runtime()
         # Step A: Face too small (crop 30px -> detected face ~20px < 32px)
         far_frame = self._compose_frame_with_face(
             canvas_h=720, canvas_w=1280,
@@ -264,6 +272,7 @@ class TestLiveFaceRecAndCounterSync(unittest.TestCase):
 
     def test_scenario_5_stranger_unknown_progression(self) -> None:
         """SCENARIO 5: Stranger with clear face (>=48px) transitions: CHECKING -> UNKNOWN."""
+        self._require_cuda_face_runtime()
         # Extract a real stranger face crop from t1.jpg (natural sharpness > 40, size ~110px)
         stranger_crop = self.scene_img[266:416, 463:573]
 

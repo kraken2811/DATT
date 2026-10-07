@@ -15,11 +15,14 @@ Validates:
 """
 
 import io
+import gc
 import os
 from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import UUID
 
@@ -31,12 +34,13 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 from src.db.database import Database
-from src.db.models import Base, VideoSource, Target, TargetEmbedding, BusinessEvent, VehiclePassage
+from src.db.models import Base, VideoSource, Target, TargetEmbedding, BusinessEvent, VehiclePassage, VehicleWatchlist, VehicleEvent
 from src.db.repositories import (
     VideoSourceRepository, TargetRepository, TargetEmbeddingRepository,
     BusinessEventRepository, VehiclePassageRepository,
 )
 from src.events.event_manager import EventManager
+from src.events.db_worker import DatabaseWorker
 from src.recognition.target_matcher import target_manager
 from src.stream.camera_manager import CameraManager
 from src.stream.video_source import LocalVideoReader
@@ -59,6 +63,13 @@ class TestMediaPersistence(unittest.TestCase):
     """Test suite verifying persistence of uploaded MP4s and target registration images."""
 
     def setUp(self) -> None:
+        self.db_temp = tempfile.TemporaryDirectory()
+        db_url = "sqlite:///" + (Path(self.db_temp.name) / "media.db").as_posix()
+        self.db_env = patch.dict(os.environ, {"DATT_DATABASE_URL": db_url})
+        self.db_env.start()
+        from alembic import command
+        from alembic.config import Config
+        command.upgrade(Config("src/db/alembic.ini"), "head")
         self.client = TestClient(app)
         target_manager.clear()
         self.created_files: list[Path] = []
@@ -71,6 +82,9 @@ class TestMediaPersistence(unittest.TestCase):
                     f.unlink(missing_ok=True)
                 except Exception:
                     pass
+        self.db_env.stop()
+        gc.collect()
+        self.db_temp.cleanup()
 
     def test_01_upload_mp4_persistence_and_db_record(self) -> None:
         """Upload MP4 -> file saved in data/uploads/videos/ + video_sources DB record."""
@@ -190,7 +204,7 @@ class TestMediaPersistence(unittest.TestCase):
                 self.assertEqual(len(embeddings), 1)
                 emb_record = embeddings[0]
                 self.assertEqual(emb_record.source_image_path, rel_img_path)
-                self.assertEqual(emb_record.model_name, "arcface")
+                self.assertEqual(emb_record.model_name, "adaface_ir50_ms1mv2")
                 # Confirm embedding dimension is 512
                 emb_list = list(emb_record.embedding)
                 self.assertEqual(len(emb_list), 512)
@@ -208,8 +222,12 @@ class TestMediaPersistence(unittest.TestCase):
             )
             vs_id = vs.id
 
-        # Instantiate EventManager with clean worker
-        em = EventManager()
+        # Persist a real confirmed watchlist passage using the current flow.
+        with db.transaction() as session:
+            session.add(VehicleWatchlist(plate_number="29A12345", vehicle_type="car",
+                display_name="Media test", owner_info="", notes="", status="active"))
+        worker = DatabaseWorker()
+        em = EventManager(db_worker=worker)
 
         # 1. Process occupancy frame with video_source_id
         em.process_frame(
@@ -231,22 +249,28 @@ class TestMediaPersistence(unittest.TestCase):
             class_id = np.array([2])
             confidence = np.array([0.92])
 
-        events = em.process_vehicle_frame(
+        em.process_vehicle_frame(
             camera_id="cam_test_01",
             vehicle_tracks=MockTracks(),
+            plate_results={42: SimpleNamespace(status="CONFIRMED", confirmed_plate="29A12345",
+                plate_text="29A12345", confidence=.95, plate_crop=None)},
             video_source_id=vs_id,
         )
-        self.assertGreater(len(events), 0)
-        self.assertEqual(events[0]["type"], "VEHICLE_ENTER")
 
         # Verify internal passage received video_source_id
-        passage = em._active_passages.get(42)
+        passage = em._active_passages.get(("cam_test_01", 42))
         self.assertIsNotNone(passage)
         assert passage is not None
         self.assertEqual(passage.video_source_id, vs_id)
 
         dto = passage.to_dto()
         self.assertEqual(dto.video_source_id, vs_id)
+        em.reset()
+        worker.stop(timeout=3.0)
+        with db.transaction() as session:
+            event = session.get(VehicleEvent, passage.id)
+            self.assertIsNotNone(event)
+            self.assertEqual(event.video_source_id, vs_id)
 
 
 if __name__ == "__main__":

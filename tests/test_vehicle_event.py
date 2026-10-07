@@ -4,7 +4,10 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 import time
+import tempfile
+from unittest.mock import patch
 from uuid import UUID, uuid4
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -89,7 +92,14 @@ class TestVehicleEventPersistence:
     """Integration tests for VehicleEvent and PlateEvent PostgreSQL persistence."""
 
     def setup_method(self) -> None:
-        self.db = Database()
+        self._db_temp = tempfile.TemporaryDirectory()
+        self.db_url = "sqlite:///" + (Path(self._db_temp.name) / "vehicle.db").as_posix()
+        self._database_env = patch.dict(os.environ, {"DATT_DATABASE_URL": self.db_url})
+        self._database_env.start()
+        from alembic import command
+        from alembic.config import Config
+        command.upgrade(Config("src/db/alembic.ini"), "head")
+        self.db = Database(self.db_url)
         self.created_files: list[Path] = []
 
     def teardown_method(self) -> None:
@@ -99,6 +109,9 @@ class TestVehicleEventPersistence:
                     f.unlink(missing_ok=True)
                 except Exception:
                     pass
+        self.db.dispose()
+        self._database_env.stop()
+        self._db_temp.cleanup()
 
     def test_single_vehicle_event_per_track_and_plate_linkage(self) -> None:
         """Requirement:
@@ -114,10 +127,15 @@ class TestVehicleEventPersistence:
         test_snapshot_dir.mkdir(parents=True, exist_ok=True)
 
         worker = DatabaseWorker(
+            db_url=self.db_url,
             max_queue_size=100,
             batch_size=10,
             snapshot_dir=test_snapshot_dir,
         )
+        with self.db.transaction() as session:
+            from src.db.models import VehicleWatchlist
+            session.add(VehicleWatchlist(plate_number="51F99999", vehicle_type="car",
+                display_name="Test", owner_info="", notes="", status="active"))
 
         test_passage_id = uuid4()
         track_id = 992
@@ -165,6 +183,7 @@ class TestVehicleEventPersistence:
             last_seen_at=t_mid,
             vehicle_type="car",
             plate_text="51F-999.99",
+            plate_status="CONFIRMED",
             plate_confidence=0.94,
             is_final=False,
         )
@@ -186,6 +205,7 @@ class TestVehicleEventPersistence:
             last_seen_at=t_last,
             vehicle_type="car",
             plate_text="51F-999.99",
+            plate_status="CONFIRMED",
             plate_confidence=0.94,
             is_final=True,
         )
@@ -243,7 +263,12 @@ class TestVehicleEventPersistence:
 
         - YOLO/ByteTrack frames -> active passages -> timeout -> ONE VehicleEvent created.
         """
-        em = EventManager()
+        worker = DatabaseWorker(db_url=self.db_url)
+        with worker.db.transaction() as session:
+            from src.db.models import VehicleWatchlist
+            session.add(VehicleWatchlist(plate_number="51F99999", vehicle_type="car",
+                display_name="Test", owner_info="", notes="", status="active"))
+        em = EventManager(db_worker=worker)
         camera_id = str(uuid4())
 
         # Frame 1: Vehicle track 55 appears with red vehicle crop
@@ -260,11 +285,13 @@ class TestVehicleEventPersistence:
         em.process_vehicle_frame(
             camera_id=camera_id,
             vehicle_tracks=mock_tracks,
+            plate_results={55: SimpleNamespace(status="CONFIRMED", confirmed_plate="51F99999",
+                plate_text="51F99999", confidence=0.94, plate_crop=np.ones((30,80,3), dtype=np.uint8))},
             frame=red_frame,
         )
 
         # In-progress: check no vehicle event yet
-        passage_55 = em._active_passages.get(55)
+        passage_55 = em._active_passages.get((camera_id, 55))
         assert passage_55 is not None
         p_id = passage_55.id
 

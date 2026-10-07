@@ -453,7 +453,8 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                 }
             )
         except Exception as exc:
-            self.state.set_status("ERROR", f"Camera switch failed: {exc}")
+            if not (self.camera_manager and self.camera_manager.has_active_camera()):
+                self.state.set_status("ERROR", f"Camera switch failed: {exc}")
             self._send_json_response({"status": "error", "message": str(exc)}, code=500)
 
     def handle_video_source(self) -> None:

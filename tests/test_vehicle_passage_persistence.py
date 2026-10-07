@@ -141,10 +141,10 @@ def test_business_event_repository_idempotency(pg_session):
         assert len(events) == 1
 
 
-def test_duplicate_plate_recognized_suppression():
+def test_duplicate_plate_recognized_suppression(monkeypatch):
     """Verify that multiple frames with the same plate do NOT spam PLATE_RECOGNIZED."""
     mock_worker = MagicMock()
-    em = EventManager(db_worker=mock_worker)
+    monkeypatch.delenv("DATT_EVENT_AUDIT_ONLY", raising=False)
 
     tracks = MagicMock()
     tracks.tracker_id = [12]
@@ -152,12 +152,15 @@ def test_duplicate_plate_recognized_suppression():
     tracks.class_id = [2]
     tracks.confidence = [0.88]
 
-    plate_state = MagicMock()
+    from src.ocr.plate_tracker import PlateTrackState
+    plate_state = PlateTrackState(track_id=12)
     plate_state.plate_text = "29K1-12345"
+    plate_state.confirmed_plate = "29K1-12345"
     plate_state.status = "CONFIRMED"
     plate_state.confidence = 0.95
     plate_state.plate_crop = None
 
+    em = EventManager(db_worker=mock_worker)
     plate_results = {12: plate_state}
 
     # Frame 1: Vehicle appears, plate confirmed
@@ -167,8 +170,7 @@ def test_duplicate_plate_recognized_suppression():
         plate_results=plate_results,
     )
     ev_types_1 = [e["type"] for e in evs_frame1]
-    assert "VEHICLE_ENTER" in ev_types_1
-    assert "PLATE_RECOGNIZED" in ev_types_1
+    assert ev_types_1 == []  # normal tracks remain transient until finalization
 
     # Frames 2 to 10: Repeated observations of the exact same confirmed plate
     for _ in range(9):
@@ -177,15 +179,9 @@ def test_duplicate_plate_recognized_suppression():
             vehicle_tracks=tracks,
             plate_results=plate_results,
         )
-        ev_types_next = [e["type"] for e in evs_next]
-        assert "PLATE_RECOGNIZED" not in ev_types_next, "Must NOT spam PLATE_RECOGNIZED!"
-
-    # Exactly one business event for plate recognition was enqueued
-    plate_enqueued = [
-        call for call in mock_worker.enqueue_business_event.call_args_list
-        if call[0][0].event_type == "PLATE_RECOGNIZED"
-    ]
-    assert len(plate_enqueued) == 1
+        assert [e["type"] for e in evs_next] == []
+    assert ("cam01", 12) in em._active_passages
+    em.reset()
 
 
 def test_track_id_reuse_creates_distinct_passages(pg_session):
@@ -261,21 +257,29 @@ def test_no_synchronous_db_writes_in_realtime_frame():
 
 
 
-def test_queue_full_preserves_critical_events():
+def test_queue_full_preserves_critical_events(monkeypatch):
     """Verify queue full policy: drops low priority or evicts to preserve critical transitions."""
-    worker = DatabaseWorker(db_url="sqlite:///dummy.db", max_queue_size=2)
+    monkeypatch.delenv("DATT_EVENT_AUDIT_ONLY", raising=False)
+    import tempfile
+    from pathlib import Path
+    temp_db = tempfile.TemporaryDirectory()
+    worker = DatabaseWorker(db_url="sqlite:///" + (Path(temp_db.name) / "queue.db").as_posix(), max_queue_size=2)
+    worker.notifications.stop()
+    worker._stop_event.set()
+    worker._worker_thread.join(timeout=1)
+    worker._stop_event.clear()
     worker._persist_batch = MagicMock(return_value=True)
-    worker._worker_loop = lambda: None  # freeze worker to fill queue
+    worker._worker_loop = lambda: None  # worker already stopped before filling
 
     p1 = VehiclePassageDTO(
         id=uuid4(), session_key="k1", camera_id="c1", track_id=1,
         first_seen_at=datetime.now(timezone.utc), last_seen_at=datetime.now(timezone.utc),
-        is_final=False,
+        is_final=True,
     )
     p2 = VehiclePassageDTO(
         id=uuid4(), session_key="k2", camera_id="c1", track_id=2,
         first_seen_at=datetime.now(timezone.utc), last_seen_at=datetime.now(timezone.utc),
-        is_final=False,
+        is_final=True,
     )
     p_critical = VehiclePassageDTO(
         id=uuid4(), session_key="k3", camera_id="c1", track_id=3,
@@ -292,6 +296,7 @@ def test_queue_full_preserves_critical_events():
     assert success is True
     assert worker.queue_dropped >= 1
     worker.stop(timeout=0.1)
+    temp_db.cleanup()
 
 
 def test_db_worker_recovery_after_transient_failure(pg_session):

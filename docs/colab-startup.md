@@ -1,10 +1,10 @@
 # Repeatable Colab startup
 
 Use `notebooks/DATT_Colab_GPU.ipynb`, which contains 13 ordered executable cells.
-For repeatable runs with Google Drive caching, run the optional helper cell
+For repeatable runs with Google Drive caching, run the cache helper cell
 `notebooks/colab_drive_cache_cell.py` first, then the 13 ordered startup cells.
 The cache mounts Google Drive and stores a Git mirror, pip download cache, and
-verified model assets under `MyDrive/DATT-Colab-cache`. A fresh runtime restores
+the complete `models` tree under `MyDrive/DATT-Colab-cache`. A fresh runtime restores
 the `dev` checkout from the mirror, fetches only source changes, and copies model
 assets into `/content/DATT/models`. If the cache is empty, it clones source once
 and Cell 6 requests the production model zip once (and fetches the PP-OCRv4 plate
@@ -12,20 +12,20 @@ line recognizer). Cell 6 saves models to Drive only after the production GPU pro
 passes. Never cache `.env`, credentials, uploaded media, face images, or videos there;
 use Colab Secrets for configuration across sessions.
 
-1. Runtime preflight provisions the exact Torch/vision/audio cu126 stack from
-   the official PyTorch wheel index when the installed versions differ (including
-   fresh Colab cu130 runtimes). Matching versions are reused. It refuses package
-   replacement while native modules are loaded in the kernel or application ports
-   are occupied. If requested, restart the session (not delete the runtime), then
-   rerun Cell 1. The GPU tensor probe and version checks run in a fresh subprocess.
+1. Runtime preflight reuses the existing Torch/CUDA stack whenever a fresh-process
+   CUDA tensor probe passes, even if its version differs from the repository's
+   preferred stack. It installs the preferred cu126 stack only when the existing
+   GPU probe fails. It refuses package replacement while native modules are loaded
+   in the kernel or application ports are occupied. The GPU tensor probe runs in
+   a fresh subprocess.
    Provisioning logs are in `/content/datt-torch-install.log`; GPU probe errors
    are in `/content/datt-gpu-probe.log`. The standalone source for Cell 1 is
    `notebooks/colab_runtime_cell.py`, embedded in the notebook for fresh runtimes.
 2. Source setup reuses the deployment and reports Git HEAD when available.
 3. Dependencies resolve bounded wheel-only stages and verify native imports in
-   a subprocess. The installer preserves Torch 2.11.0+cu126, torchvision
-   0.26.0+cu126 and torchaudio 2.11.0+cu126 exactly. Constraints use active
-   metadata rather than shadowed system distributions. Each dry-run plan is
+   a subprocess. The installer preserves the CUDA-verified Torch, torchvision,
+   and torchaudio versions supplied by Cell 1. Constraints use active metadata
+   rather than shadowed system distributions. Each dry-run plan is
    audited before installing its exact missing packages without a second
    dependency resolution. InsightFace uses GPU ORT instead of installing the
    overlapping CPU distribution; the full dependency closure is validated.

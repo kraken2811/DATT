@@ -242,6 +242,7 @@ class CaltransCameraService:
         self._lock = threading.Lock()
         self._cached_cameras: list[NormalizedCamera] = []
         self._cache_timestamp: float = 0.0
+        self._is_fetching: bool = False
         self._last_error: str = ""
 
     @property
@@ -256,11 +257,11 @@ class CaltransCameraService:
         with self._lock:
             cache_alive = (
                 not force_refresh
-                and self._cached_cameras
+                and bool(self._cached_cameras)
                 and (time.time() - self._cache_timestamp) < self.cache_ttl
             )
             if cache_alive:
-                cameras = self._cached_cameras
+                cameras = list(self._cached_cameras)
             else:
                 cameras = None
 
@@ -280,6 +281,13 @@ class CaltransCameraService:
             ]
 
         return result
+
+    def _background_fetch(self) -> None:
+        try:
+            self._fetch_and_cache(force_refresh=True)
+        finally:
+            with self._lock:
+                self._is_fetching = False
 
     def _fetch_and_cache(self, force_refresh: bool = False) -> list[NormalizedCamera]:
         """Fetch latest camera records from ArcGIS endpoint or fallback."""
