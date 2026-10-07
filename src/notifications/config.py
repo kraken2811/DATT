@@ -4,17 +4,25 @@ import os
 from email.utils import parseaddr
 
 NAMES = ('DATT_EMAIL_USERNAME', 'DATT_EMAIL_PASSWORD', 'DATT_EMAIL_TO')
+ENV_NAMES = ('DATT_EMAIL_HOST', 'DATT_EMAIL_PORT', *NAMES, 'DATT_EMAIL_FROM',
+             'DATT_EMAIL_TLS', 'DATT_NOTIFICATION_COOLDOWN_SECONDS',
+             'DATT_NOTIFICATION_MAX_RETRIES', 'DATT_NOTIFICATION_RETRY_SECONDS')
 
 
 def load_colab_secrets():
     # Call in the notebook kernel before launching the backend, not in workers.
-    from google.colab import userdata
-    for name in NAMES:
+    try:
+        from google.colab import userdata
+    except ImportError:
+        return
+    for name in ENV_NAMES:
         if not os.getenv(name):
             try:
                 value = userdata.get(name)
                 if value: os.environ[name] = value
-            except (userdata.SecretNotFoundError, userdata.NotebookAccessError):
+            except Exception:
+                # Missing/inaccessible Secrets are reported by configuration
+                # validation. Provider errors must never expose their values.
                 pass
 
 

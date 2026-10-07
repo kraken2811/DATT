@@ -24,8 +24,9 @@ def require(ok, message):
     if not ok:
         raise RuntimeError(message)
 
-def get(path, port=PORT):
-    response = requests.get(f'http://127.0.0.1:{port}' + path, timeout=15)
+def get(path, port=PORT, *, html_page=False):
+    response = requests.get(f'http://127.0.0.1:{port}' + path, timeout=15,
+                            headers={'Accept': 'text/html'} if html_page else {})
     require(response.status_code == 200, 'HTTP check failed: ' + path)
     return response
 
@@ -38,18 +39,17 @@ try:
     os.chdir(ROOT)
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    with contextlib.redirect_stderr(io.StringIO()):
-        load_dotenv(ROOT / '.env', override=False, interpolate=False)
-    require(all(os.getenv(k) for k in ('DATT_DATABASE_URL', 'SUPABASE_URL',
-                'SUPABASE_SERVICE_ROLE_KEY', 'DATT_STORAGE_BUCKET')), 'Existing persistence configuration missing')
-    require(os.getenv('DATT_STORAGE_BACKEND') == 'supabase', 'Expected existing Supabase backend')
+    from scripts.colab_startup import load_configuration
+    load_configuration()
     from src.ops import process as owner
     record = owner.state()
     # Never infer process identity from a PID file or the page on port 8000 alone.
     if owner.owned(record):
         require((record['mode'], record['port'], record['ai_port']) == ('gpu', PORT, AI_PORT),
                 'Owned DATT configuration differs; inspect before stopping')
-        if owner.status()['health'] != 'PASS':
+        healthy = owner.status()['health'] == 'PASS'
+        notifications_running = healthy and get('/startup-health').json().get('notification_worker') == 'RUNNING'
+        if not notifications_running:
             report['stale_process'] = str(record['pid']) + ':unhealthy_owned_DATT'
             with owner.locked():
                 owner.stop(timeout=30)
@@ -94,16 +94,23 @@ try:
             'Health endpoint is not the owned production GPU runner')
     report['backend_http'] = health.status_code
     require(listeners() == {record['pid']}, 'Unexpected port owner')
-    page = get('/')
-    require(page.content == (ROOT / 'src/ui/static/index.html').read_bytes(), 'Served frontend differs from current repository')
+    page = get('/', html_page=True)
+    react_index = ROOT / 'src/ui/static/react_dist/index.html'
+    require(react_index.is_file(), 'React production bundle missing')
+    require(page.content == react_index.read_bytes(), 'Served frontend differs from current React build')
+    require('id="root"' in page.text, 'React application shell missing')
+    for route in ('/dashboard', '/events', '/watchlist', '/alerts', '/settings'):
+        require(get(route, html_page=True).content == react_index.read_bytes(), 'React route differs: ' + route)
+    for asset in re.findall(r'(?:src|href)="(/assets/[^\"]+)"', page.text):
+        require(get(asset).content == (react_index.parent / asset.lstrip('/')).read_bytes(),
+                'Served React asset differs: ' + asset)
     require('AI People Counter Monitor' not in page.text, 'Legacy frontend detected')
-    for label, marker, route in (
-        ('camera_management', 'cameraManagementScreen', '/api/cameras'),
-        ('vision_monitor', 'monitoringScreen', '/api/source_status'),
-        ('face_watchlist', 'paneFaceWatchlist', '/api/targets'),
-        ('vehicle_watchlist', 'paneVehicleWatchlist', '/api/watchlist/vehicles'),
-        ('event_center', 'eventCenterScreen', '/api/event_center/events')):
-        require('id="' + marker + '"' in page.text, 'Missing frontend: ' + label)
+    for label, route in (
+        ('camera_management', '/api/cameras'),
+        ('vision_monitor', '/api/source_status'),
+        ('face_watchlist', '/api/targets'),
+        ('vehicle_watchlist', '/api/watchlist/vehicles'),
+        ('event_center', '/api/event_center/events')):
         body = get(route).json()
         require(isinstance(body, dict) and body.get('status') not in ('error', 'failed'), 'API failed: ' + label)
         report[label] = 'PASS'
@@ -165,7 +172,8 @@ print(json.dumps(result))
     report['APPLICATION_URL'] = url
     report['SYSTEM_READY'] = 'YES'
 except Exception as exc:
-    print('STARTUP_BLOCKER=' + (str(exc) if type(exc) is RuntimeError else type(exc).__name__))
+    from scripts.colab_startup import Blocker
+    print('STARTUP_BLOCKER=' + (str(exc) if type(exc) in (RuntimeError, Blocker) else type(exc).__name__))
 finally:
     print('[DATT_STARTUP_FIX]')
     for key, value in report.items():

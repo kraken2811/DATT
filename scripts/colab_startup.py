@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = ('DATT_DATABASE_URL', 'DATT_STORAGE_BACKEND', 'SUPABASE_URL',
@@ -22,6 +23,48 @@ class Blocker(RuntimeError):
 def require(ok, message):
     if not ok:
         raise Blocker(message)
+
+
+def install_uploaded_env(source, destination=None):
+    """Accept an uploaded environment file without copying it onto itself."""
+    source = Path(source).resolve()
+    destination = Path(destination if destination is not None else ROOT / '.env').resolve()
+    if source != destination and not (destination.exists() and source.samefile(destination)):
+        shutil.copy2(source, destination)
+    return destination
+
+
+def load_configuration():
+    """Precedence: .env, existing environment, then granted Colab Secrets."""
+    from dotenv import load_dotenv
+    from src.notifications.config import EmailConfig, NAMES, load_colab_secrets
+    with contextlib.redirect_stderr(io.StringIO()):
+        load_dotenv(ROOT / '.env', override=True, interpolate=False)
+    try:
+        from google.colab import userdata
+    except ImportError:
+        userdata = None
+    for name in REQUIRED:
+        if not os.getenv(name) and userdata is not None:
+            try:
+                value = userdata.get(name)
+                if value:
+                    os.environ[name] = value
+            except Exception:
+                pass
+    load_colab_secrets()
+    for name in REQUIRED + EMAIL:
+        print(name + '=' + ('SET' if os.getenv(name) else 'MISSING'))
+    missing = [name for name in REQUIRED if not os.getenv(name)]
+    require(not missing, 'Missing required configuration: ' + ', '.join(missing))
+    require(os.getenv('DATT_STORAGE_BACKEND') == 'supabase', 'Expected DATT_STORAGE_BACKEND=supabase')
+    missing_email = [name for name in NAMES if not os.getenv(name)]
+    require(not missing_email, 'Missing required email configuration: ' + ', '.join(missing_email))
+    require(EmailConfig.from_env().configured,
+            'Invalid email configuration; check DATT_EMAIL_HOST, DATT_EMAIL_PORT, DATT_EMAIL_USERNAME, '
+            'DATT_EMAIL_FROM, DATT_EMAIL_TO, DATT_EMAIL_TLS and DATT_NOTIFICATION_* values')
+    os.environ['DATT_REQUIRE_PERSISTENCE'] = '1'
+    print('email_configuration=PASS; omitted optional settings use project defaults')
 
 
 def model_probe():
@@ -107,30 +150,7 @@ class Startup:
         print('dependencies=PASS; dependencies_reused=' + str(self.report['dependencies_reused']).lower())
 
     def cell_4(self):
-        from dotenv import load_dotenv
-        with contextlib.redirect_stderr(io.StringIO()):
-            load_dotenv(ROOT / '.env', override=True, interpolate=False)
-        try:
-            from google.colab import userdata
-        except ImportError:
-            userdata = None
-        for name in REQUIRED:
-            if not os.getenv(name) and userdata is not None:
-                try:
-                    value = userdata.get(name)
-                    if value:
-                        os.environ[name] = value
-                # Colab may time out or open a consent prompt for optional Secrets.
-                # Values already supplied by .env remain usable, and a missing optional
-                # Secret must not block persistence startup.
-                except Exception:
-                    pass
-            print(name + '=' + str(bool(os.getenv(name))).lower())
-        for name in EMAIL:
-            print(name + '=' + str(bool(os.getenv(name))).lower())
-        require(all(os.getenv(n) for n in REQUIRED), 'Missing required configuration; set named variables in /content/DATT/.env or Colab Secrets')
-        require(os.getenv('DATT_STORAGE_BACKEND') == 'supabase', 'This startup requires the configured Supabase storage backend')
-        os.environ['DATT_REQUIRE_PERSISTENCE'] = '1'
+        load_configuration()
         self.report['environment'] = 'PASS'
 
     def cell_5(self):
@@ -179,7 +199,15 @@ class Startup:
         status = process.status()
         if status['health'] == 'PASS':
             require(status['mode'] == 'gpu' and status['port'] == 8501, 'Healthy backend configuration differs; resolve through DATT CLI')
-            print('healthy_backend_reused=true')
+            require(process.owned(process.state()), 'Backend ownership changed; no process stopped')
+            workers = self.get('/startup-health').json()
+            if workers.get('notification_worker') != 'RUNNING':
+                from src.notifications.config import EmailConfig
+                require(EmailConfig.from_env().configured, 'Valid email configuration required before restarting backend')
+                self.cli('stop', timeout=120)
+                print('owned_backend_restarted_for_notification_configuration=true')
+            else:
+                print('healthy_backend_reused=true')
         elif process.owned(process.state()):
             self.cli('stop', timeout=120)
             print('stale_owned_backend_stopped=true')
