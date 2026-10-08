@@ -161,6 +161,7 @@ async def serve_legacy() -> Response:
 @app.get("/watchlist", response_class=FileResponse)
 @app.get("/alerts", response_class=FileResponse)
 @app.get("/settings", response_class=FileResponse)
+@app.get("/agent", response_class=FileResponse)
 @app.get("/cameras/{camera_id}", response_class=FileResponse)
 async def serve_index(request: Request) -> Response:
     """Serve the single-page monitoring dashboard (React SPA or fallback)."""
@@ -942,8 +943,10 @@ async def get_targets(
 
             total = session.scalar(select(func.count()).select_from(query.order_by(None).subquery()))
 
-            if total == 0 and target_manager.list_targets():
+            if total == 0 and target_manager.list_targets() and os.environ.get("DATT_REQUIRE_PERSISTENCE") != "1":
                 targets = [t.to_dict() for t in target_manager.list_targets()]
+                for target in targets:
+                    target["selected"] = target.pop("is_selected", True)
                 return JSONResponse(content={"status": "ok", "targets": targets, "total": len(targets)}, status_code=200)
 
             if page is not None and page > 0:
@@ -961,7 +964,7 @@ async def get_targets(
                     "face_threshold": float(meta.get("threshold", 0.45)),
                     "has_face": True,
                     "source_image_path": t.image_path,
-                    "selected": True,
+                    "selected": bool(meta.get("selected", True)),
                 })
 
             resp = {"status": "ok", "targets": targets_list, "total": total}
@@ -972,6 +975,8 @@ async def get_targets(
     except Exception as exc:
         logger.warning("Direct DB target query failed (%s), falling back to in-memory...", exc)
         targets = [t.to_dict() for t in target_manager.list_targets()]
+        for target in targets:
+            target["selected"] = target.pop("is_selected", True)
         return JSONResponse(content={"status": "ok", "targets": targets, "total": len(targets)}, status_code=200)
 
     return JSONResponse(content={"status": "ok", "targets": targets, "total": total}, status_code=200)
@@ -1309,16 +1314,25 @@ async def toggle_target_select(target_id: str, request: Request) -> JSONResponse
     except Exception:
         body = {}
     is_sel = bool(body.get("selected", True))
-    ok = target_manager.set_target_selection(target_id, is_sel)
+    try:
+        from src.recognition.target_selection import set_persisted_target_selection
+        ok = set_persisted_target_selection(target_id, is_sel)
+    except Exception as exc:
+        logger.warning("[TARGET_SELECTION] persistence update failed: %s", type(exc).__name__)
+        return JSONResponse(content={"status": "error", "message": "Target selection is unavailable"}, status_code=503)
+    if not ok:
+        return JSONResponse(content={"status": "error", "message": "Target not found"}, status_code=404)
     b_url = get_backend_url(request).rstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            await client.post(f"{b_url}/api/targets/{target_id}/select", json={"selected": is_sel})
-    except Exception:
-        pass
-    if ok:
-        return JSONResponse(content={"status": "ok", "target_id": target_id, "selected": is_sel}, status_code=200)
-    return JSONResponse(content={"status": "error", "message": "Target not found"}, status_code=404)
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(f"{b_url}/api/targets/{target_id}/select", json={"selected": is_sel})
+        if response.status_code >= 400:
+            detail = response.json().get("message", "Target selection rejected")
+            return JSONResponse(content={"status": "error", "message": detail}, status_code=response.status_code)
+    except httpx.HTTPError as exc:
+        logger.warning("[TARGET_SELECTION] backend synchronization failed: %s", type(exc).__name__)
+        return JSONResponse(content={"status": "error", "message": "Target runtime is unavailable"}, status_code=503)
+    return JSONResponse(content={"status": "ok", "target_id": target_id, "selected": is_sel}, status_code=200)
 
 
 @app.post("/targets/select")
@@ -1358,6 +1372,8 @@ from src.event_center.api import router as event_center_router
 app.include_router(event_center_router)
 from src.notifications.alerts import router as alerts_router
 app.include_router(alerts_router)
+from src.agent.api import router as agent_router
+app.include_router(agent_router)
 
 # Cache mapping event_id -> snapshot_path for fast lookup
 event_snapshot_cache: dict[str, str] = {}

@@ -299,3 +299,32 @@ class VehicleWatchlistResult(Identity, Base):
     camera_id: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
     __table_args__ = (CheckConstraint("decision IN ('MATCH','NO_MATCH')", name="vehicle_watchlist_decision"),)
+
+
+class KnowledgeDocument(Identity, Base):
+    """Catalog of ingested reference and troubleshooting documents for RAG."""
+    __tablename__ = "knowledge_documents"
+    title: Mapped[str] = mapped_column(String(255))
+    source: Mapped[str] = mapped_column(String(1024), index=True)
+    document_type: Mapped[str] = mapped_column(String(50), default="markdown", index=True)
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    doc_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON_DATA, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+
+
+class KnowledgeChunk(Identity, Base):
+    """Segmented passages and their 384D vector embeddings for semantic search."""
+    __tablename__ = "knowledge_chunks"
+    document_id: Mapped[UUID] = mapped_column(ForeignKey("knowledge_documents.id", ondelete="CASCADE"), index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[Any] = mapped_column(Vector(384), nullable=True)
+    chunk_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON_DATA, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+
+    __table_args__ = (
+        Index("ix_knowledge_chunks_doc_idx", "document_id", "chunk_index"),
+    )

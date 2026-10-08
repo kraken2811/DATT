@@ -48,9 +48,28 @@ export async function apiRequest(endpoint, options = {}) {
     return inFlightRequests.get(cacheKey);
   }
 
+  let clientSessionId = '';
+  let clientAuthToken = null;
+  try {
+    clientSessionId = localStorage.getItem('datt_agent_session_id');
+    if (!clientSessionId) {
+      clientSessionId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `sess_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      localStorage.setItem('datt_agent_session_id', clientSessionId);
+    }
+    clientAuthToken = localStorage.getItem('datt_auth_token');
+  } catch (e) {}
+
   const defaultHeaders = {
     'Accept': 'application/json',
   };
+  if (clientSessionId) {
+    defaultHeaders['X-Session-Id'] = clientSessionId;
+  }
+  if (clientAuthToken) {
+    defaultHeaders['Authorization'] = `Bearer ${clientAuthToken}`;
+  }
   if (body && typeof body === 'object' && !(body instanceof FormData)) {
     defaultHeaders['Content-Type'] = 'application/json';
   }

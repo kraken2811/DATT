@@ -1,4 +1,6 @@
 import { apiRequest, invalidateApiCache } from './client';
+export { cameraSwitchRequest } from './cameraContract.js';
+import { cameraSwitchRequest } from './cameraContract.js';
 
 export async function fetchCameras(params = {}, signal = null) {
   const query = new URLSearchParams();
@@ -24,14 +26,28 @@ export async function fetchCameraDetail(id, signal = null) {
   });
 }
 
-export async function switchCamera(payload, signal = null) {
+export async function switchCamera(camera, signal = null) {
+  const request = cameraSwitchRequest(camera);
   invalidateApiCache('/api/cameras');
   invalidateApiCache('/telemetry');
-  return apiRequest('/switch_camera', {
-    method: 'POST',
-    body: payload,
-    signal,
-  });
+  try {
+    return await apiRequest(request.endpoint, {
+      method: 'POST',
+      body: request.body,
+      signal,
+    });
+  } catch (error) {
+    if (error.name !== 'AbortError') {
+      console.warn('Camera API request failed', {
+        camera_id: request.body.camera_id || null,
+        source_type: request.body.source_type || null,
+        request_keys: Object.keys(request.body),
+        http_status: error.status || null,
+        error_message: error.message,
+      });
+    }
+    throw error;
+  }
 }
 
 export async function stopCamera(signal = null) {

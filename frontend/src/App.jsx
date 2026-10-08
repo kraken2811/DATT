@@ -13,6 +13,7 @@ import { WatchlistPage } from './pages/WatchlistPage';
 import { EventCenterPage } from './pages/EventCenterPage';
 import { AlertCenterPage } from './pages/AlertCenterPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { AgentPage } from './pages/AgentPage';
 
 export default function App() {
   return (
@@ -31,6 +32,7 @@ export default function App() {
                 <Route path="/events" element={<EventCenterPage />} />
                 <Route path="/alerts" element={<AlertCenterPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
+                <Route path="/agent" element={<AgentPage />} />
                 {/* Fallback to dashboard */}
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>

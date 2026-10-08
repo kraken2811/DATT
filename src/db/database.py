@@ -23,7 +23,7 @@ class Database:
                         val = line.split("=", 1)[1].strip().strip("'\"")
                         if val:
                             url = val
-                            break
+                            pass
         if not url:
             if os.environ.get("DATT_REQUIRE_PERSISTENCE") == "1":
                 raise RuntimeError("DATT_DATABASE_URL is required; persistent targets, embeddings, video library and events are unavailable")

@@ -47,7 +47,7 @@ if not url:
                 val = line.split("=", 1)[1].strip().strip("'\"")
                 if val:
                     url = val
-                    break
+                    pass
 url = url or config.get_main_option("sqlalchemy.url")
 target_metadata = Base.metadata
 

@@ -359,6 +359,7 @@ export function DashboardPage() {
                           name: cam.name,
                           source_url: cam.stream_url,
                           source_type: 'direct_hls',
+                          provider: cam.provider,
                         })
                       }
                     >
@@ -401,9 +402,10 @@ export function DashboardPage() {
                       className="btn btn-primary btn-sm"
                       onClick={() =>
                         switchActiveCamera({
-                          name: `Local: ${v.name}`,
-                          source_url: v.file_path,
+                          name: `Local: ${v.original_filename}`,
+                          source_url: v.storage_path,
                           source_type: 'local',
+                          video_source_id: v.id,
                           loop: true,
                         })
                       }

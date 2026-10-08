@@ -189,7 +189,15 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
             parts = path.strip("/").split("/")
             target_id = parts[parts.index("targets") + 1]
             is_sel = bool(data.get("selected", True))
-            target_manager.set_target_selection(target_id, is_sel)
+            try:
+                from src.recognition.target_selection import set_persisted_target_selection
+                updated = set_persisted_target_selection(target_id, is_sel)
+            except Exception:
+                self._send_json_response({"status": "error", "message": "Target selection is unavailable"}, code=503)
+                return
+            if not updated:
+                self._send_json_response({"status": "error", "message": "Target not found"}, code=404)
+                return
             self._send_json_response({"status": "ok", "target_id": target_id, "selected": is_sel})
         elif path in ("/targets/select", "/api/targets/select"):
             t_ids = data.get("target_ids", [])

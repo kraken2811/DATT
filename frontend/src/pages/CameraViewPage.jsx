@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Header } from '../components/Header';
 import { fetchCameraDetail } from '../api/cameras';
@@ -9,12 +9,13 @@ import { ArrowLeft, Play, Square, Maximize } from 'lucide-react';
 export function CameraViewPage() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { telemetry, activeCamera, switchActiveCamera, stopActiveCamera } = useApp();
+  const { telemetry, switchActiveCamera, stopActiveCamera } = useApp();
 
   const [camera, setCamera] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const autoSwitchIdRef = useRef(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -24,28 +25,16 @@ export function CameraViewPage() {
       setLoading(true);
       setError(null);
       try {
-        let camData = null;
-        try {
-          const resp = await fetchCameraDetail(id, abortCtrl.signal);
-          if (resp && resp.status === 'ok') {
-            camData = resp.camera;
-          }
-        } catch (_) {}
-
-        if (!camData && (id === 'camera_01' || id === 'live' || id === 'default')) {
-          camData = {
-            id: id,
-            name: activeCamera?.name || 'Local Benchmark - 1280x720 Stream',
-            zone: 'Khu vực thử nghiệm AI',
-            source_type: 'Local Benchmark',
-            source_url: 'rtsp://benchmark/live'
-          };
-        }
+        const resp = await fetchCameraDetail(id, abortCtrl.signal);
+        const camData = resp?.status === 'ok' ? resp.camera : null;
 
         if (camData) {
           if (isMounted) {
             setCamera(camData);
-            switchActiveCamera(camData);
+            if (autoSwitchIdRef.current !== camData.id) {
+              autoSwitchIdRef.current = camData.id;
+              await switchActiveCamera(camData);
+            }
           }
         } else {
           throw new Error('Camera không tồn tại hoặc đã bị xóa');

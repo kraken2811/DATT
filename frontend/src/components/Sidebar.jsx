@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Camera, ShieldAlert, Users, Bell, Settings } from 'lucide-react';
+import { LayoutDashboard, Camera, ShieldAlert, Users, Bell, Settings, Bot } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 
 export function Sidebar() {
@@ -69,6 +69,15 @@ export function Sidebar() {
         >
           <Bell size={18} />
           <span>Alert Center</span>
+        </NavLink>
+
+        <NavLink
+          to="/agent"
+          className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
+          id="navItemAgent"
+        >
+          <Bot size={18} />
+          <span>AI Assistant</span>
         </NavLink>
 
         <NavLink

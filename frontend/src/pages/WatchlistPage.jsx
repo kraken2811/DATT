@@ -154,9 +154,9 @@ export function WatchlistPage() {
 
   const handleToggleFace = async (id, currentSelected) => {
     try {
-      await toggleTargetSelection(id, !currentSelected);
+      const resp = await toggleTargetSelection(id, !currentSelected);
       setFaceTargets((prev) =>
-        prev.map((t) => (t.id === id ? { ...t, selected: !currentSelected } : t))
+        prev.map((t) => (t.id === id ? { ...t, selected: resp.selected } : t))
       );
       showToast(`Đã cập nhật trạng thái tìm kiếm`, 'info');
     } catch (err) {

@@ -66,9 +66,18 @@ export function AppProvider({ children }) {
   // Track stream generation token to prevent race conditions
   const streamTokenRef = useRef(0);
   const activeSwitchAbortRef = useRef(null);
+  const activeSwitchKeyRef = useRef(null);
+  const activeSwitchPromiseRef = useRef(null);
 
   // Switch camera with race condition prevention
   const switchActiveCamera = useCallback(async (sourcePayload) => {
+    const cameraId = sourcePayload.id || sourcePayload.camera_id;
+    const sourceType = sourcePayload.source_type || sourcePayload.type || '';
+    const source = sourcePayload.source_url || sourcePayload.url || sourcePayload.source || '';
+    const switchKey = cameraId ? `camera:${cameraId}` : `source:${sourceType}:${source}`;
+    if (activeSwitchKeyRef.current === switchKey && activeSwitchPromiseRef.current) {
+      return activeSwitchPromiseRef.current;
+    }
     const token = ++streamTokenRef.current;
 
     // 1. Abort previous in-flight switch request
@@ -79,15 +88,8 @@ export function AppProvider({ children }) {
     const abortController = new AbortController();
     activeSwitchAbortRef.current = abortController;
 
-    // 2. Clear stale telemetry / set connecting state for new camera
+    // Keep the current camera visible until the backend accepts the switch.
     const displayName = sourcePayload.name || sourcePayload.camera_name || 'Loading Camera...';
-    setActiveCamera((prev) => ({
-      ...prev,
-      name: displayName,
-      id: sourcePayload.id || sourcePayload.camera_id || prev.id,
-      source_url: sourcePayload.source_url || sourcePayload.url || prev.source_url,
-      source_type: sourcePayload.source_type || sourcePayload.type || prev.source_type,
-    }));
 
     setTelemetry((prev) => ({
       ...prev,
@@ -98,22 +100,25 @@ export function AppProvider({ children }) {
     }));
 
     try {
-      const resp = await apiSwitchCamera(
-        {
-          source: sourcePayload.source_url || sourcePayload.url || sourcePayload.source,
-          source_type: sourcePayload.source_type || sourcePayload.type,
-          name: displayName,
-          loop: sourcePayload.loop ?? true,
-        },
-        abortController.signal
-      );
+      const request = apiSwitchCamera(sourcePayload, abortController.signal);
+      activeSwitchKeyRef.current = switchKey;
+      activeSwitchPromiseRef.current = request;
+      const resp = await request;
 
       // Invalidate if a newer camera switch started
       if (token !== streamTokenRef.current) {
         return;
       }
 
-      showToast(`Switched to camera: ${displayName}`, 'success');
+      setActiveCamera((prev) => ({
+        ...prev,
+        name: resp.camera_name || displayName,
+        id: resp.camera_id || cameraId || prev.id,
+        source_url: source || prev.source_url,
+        source_type: sourceType || prev.source_type,
+      }));
+      showToast(`Switched to camera: ${resp.camera_name || displayName}`, 'success');
+      return resp;
     } catch (err) {
       if (err.name === 'AbortError' || token !== streamTokenRef.current) {
         return;
@@ -127,6 +132,10 @@ export function AppProvider({ children }) {
     } finally {
       if (activeSwitchAbortRef.current === abortController) {
         activeSwitchAbortRef.current = null;
+      }
+      if (activeSwitchKeyRef.current === switchKey) {
+        activeSwitchKeyRef.current = null;
+        activeSwitchPromiseRef.current = null;
       }
     }
   }, [showToast]);
