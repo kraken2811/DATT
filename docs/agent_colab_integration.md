@@ -68,3 +68,24 @@ No real-LLM request was executed during this repair. Existing configured credent
 - `tests/test_colab_startup.py`, `tests/test_colab_install.py`, `tests/test_colab_source.py`: schema/process/dependency and local-Git preservation regressions.
 - `src/ui/static/react_dist/index.html`, replaced hashed JavaScript asset: rebuilt production UI.
 - `docs/agent_colab_integration.md`: root-cause evidence, verification and restart guide.
+
+
+## Follow-up: standalone dependency cell fails while DATT is running
+
+A cell directly executing `scripts.colab_install` bypassed the shutdown formerly performed only by `Startup.cell_3`. The standalone installer's port guard then returned exit 1. Shutdown is now centralized in the installer: it validates CLI PID/token/creation time and actual listener ownership, gracefully stops that runner, and verifies both ports are free before installing. The same check runs before installing resolver-discovered transitive dependencies. Unknown listeners and shutdown timeouts still block installation; they are never force-killed.
+
+For an existing checkout before this fix is fetched, run this in Colab:
+
+```python
+import subprocess, sys
+from pathlib import Path
+root = Path('/content/DATT')
+result = subprocess.run([sys.executable, str(root / 'scripts/datt.py'), 'stop', '--timeout', '120'],
+                        cwd=root, capture_output=True, text=True, timeout=150)
+print(result.stdout)
+print('STOP_EXIT=', result.returncode)
+```
+
+If shutdown succeeds, update the clean checkout to `origin/dev` using the updated Cell 2, then rerun the dependency cell. If an unverified listener remains, identify its PID and launcher; the CLI intentionally cannot stop a legacy/untracked service. Do not use broad `pkill`, reset the runtime, or remove data to bypass this guard.
+
+Follow-up verification: 44 Colab installer/startup/source/runtime tests passed, including direct-installer shutdown, foreign listeners, port rechecks, timeout handling, and top-level/transitive install guards.

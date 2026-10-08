@@ -154,12 +154,6 @@ class Startup:
         self.completed = number
 
     def cell_3(self):
-        from scripts.colab_install import plan
-        from src.ops import process
-        missing, _ = plan()
-        if missing and process.owned(process.state()):
-            self.cli('stop', timeout=120)
-            print('owned_backend_stopped_for_missing_dependencies=true')
         from scripts.colab_install import main
         try:
             self.report.update(main())

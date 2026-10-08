@@ -145,6 +145,45 @@ def cuda_torch_ready():
     return probe.returncode == 0
 
 
+
+def listening_ports():
+    import socket
+    occupied = []
+    for port in (8000, 8501):
+        with socket.socket() as sock:
+            sock.settimeout(1)
+            if sock.connect_ex(('127.0.0.1', port)) == 0:
+                occupied.append(port)
+    return occupied
+
+
+def stop_owned_service_for_install():
+    """Stop only the verified CLI runner; direct installer calls use this too."""
+    ports = listening_ports()
+    if not ports:
+        return
+    from src.ops import process
+    with process.locked():
+        record = process.state()
+        if not process.owned(record):
+            raise RuntimeError('Unverified service occupies DATT port(s) ' + ','.join(map(str, ports)) +
+                               '; no process stopped. Run python scripts/datt.py status and identify the owning service before installing')
+        import psutil
+        listeners = [conn for conn in psutil.net_connections('tcp')
+                     if conn.status == 'LISTEN' and conn.laddr.port in ports]
+        if not listeners or any(conn.pid != record['pid'] for conn in listeners):
+            raise RuntimeError('DATT port listener does not belong to the verified runner; no process stopped. Identify the owning service before installing')
+        try:
+            process.stop(timeout=120)
+        except TimeoutError:
+            raise RuntimeError('Owned DATT service did not stop gracefully; no dependencies installed') from None
+        remaining = listening_ports()
+        if remaining:
+            raise RuntimeError('DATT port(s) still occupied after owned service stopped: ' + ','.join(map(str, remaining)) +
+                               '; identify the remaining listener before installing')
+    print('owned_backend_stopped_for_missing_dependencies=true', flush=True)
+
+
 def main():
     installed = active_versions()
     if any(n not in installed for n in TORCH) or not cuda_torch_ready():
@@ -154,11 +193,8 @@ def main():
         raise RuntimeError('Installed versions conflict with repository requirements: ' + ', '.join(incompatible))
     if 'onnxruntime' in installed:
         raise RuntimeError('CPU ONNX Runtime overlaps the GPU package; resolve ownership before provisioning')
-    import socket
-    for port in (8000, 8501):
-        with socket.socket() as sock:
-            if missing and sock.connect_ex(('127.0.0.1', port)) == 0:
-                raise RuntimeError('Stop the owning service before installing missing dependencies')
+    if missing:
+        stop_owned_service_for_install()
     logdir = ROOT / '.datt-runtime' / 'install'
     logdir.mkdir(parents=True, exist_ok=True)
     changed = False
@@ -187,6 +223,9 @@ def main():
                         'agent-embedding-dependencies-resolve', logdir)
                 selected.update(audit_plan(json.loads(dependency_report.read_text()), installed))
         if selected:
+            # A resolver may discover missing transitive packages even when
+            # every top-level requirement is installed. Check before mutation.
+            stop_owned_service_for_install()
             # Install precisely the reviewed resolution; do not resolve again.
             run_pip(['install', '--only-binary=:all:', '--no-deps', '-c', str(constraints),
                      *[n + '==' + v for n, v in selected.items()]], label + '-install', logdir)
