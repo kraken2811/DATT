@@ -8,13 +8,15 @@
     "build": "vite build",
     "test:agent": "node scripts/test_agent_e2e.cjs",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:agent-markdown": "node scripts/test_agent_markdown.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.475.0",
     "react": "19.0.0",
     "react-dom": "19.0.0",
-    "react-router-dom": "^7.1.5"
+    "react-router-dom": "^7.1.5",
+    "react-markdown": "10.1.0"
   },
   "devDependencies": {
     "@types/react": "^19.0.8",

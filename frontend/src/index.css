@@ -1122,3 +1122,17 @@ body {
   align-items: center;
   gap: 8px;
 }
+
+/* Agent Markdown uses the existing bubble, colors and spacing tokens. */
+.agent-markdown { overflow-wrap: anywhere; line-height: 1.65; }
+.agent-markdown p { margin: 0 0 0.75em; white-space: pre-wrap; }
+.agent-markdown ul, .agent-markdown ol { margin: 0.65em 0; padding-left: 1.5em; }
+.agent-markdown li { margin: 0.25em 0; }
+.agent-markdown li > p { margin-bottom: 0.25em; }
+.agent-markdown blockquote { margin: 0.75em 0; padding-left: 1em; border-left: 3px solid var(--border-subtle); color: var(--text-secondary); }
+.agent-markdown h1, .agent-markdown h2, .agent-markdown h3 { font-size: 1.05em; margin: 0.9em 0 0.5em; }
+.agent-markdown code { font-size: 0.9em; background: rgba(0, 0, 0, 0.15); border-radius: 4px; padding: 0.1em 0.3em; }
+.agent-markdown pre code { background: none; padding: 0; white-space: pre; }
+.agent-markdown a { color: var(--accent-primary); text-decoration: underline; }
+.agent-markdown > :last-child { margin-bottom: 0; }
+.user-message-text { white-space: pre-wrap; overflow-wrap: anywhere; }

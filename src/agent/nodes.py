@@ -17,6 +17,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.agent.config import agent_config
 from src.agent.prompts import SYSTEM_PROMPT
+from src.agent.response_formatting import current_turn, format_tool_messages
 from src.agent.state import AgentState
 from src.agent.tools import ALL_AGENT_TOOLS
 
@@ -41,10 +42,10 @@ class MockChatModel:
         tools_enabled = bool(self.tools)
 
         # 1. Check if prior message was a ToolMessage
-        if isinstance(last_msg, ToolMessage):
+        if isinstance(last_msg, ToolMessage) or (not tools_enabled and current_turn(messages)[1]):
             tool_name = getattr(last_msg, "name", "")
             # Hybrid check: If first tool was get_camera_status and user asked for documentation guide
-            user_msg = next((m.content for m in messages if isinstance(m, HumanMessage)), "")
+            user_msg = current_turn(messages)[0]
             lower_user = str(user_msg).lower()
             if (
                 tools_enabled
@@ -64,32 +65,7 @@ class MockChatModel:
                     ],
                 )
 
-            try:
-                tool_data = json.loads(last_msg.content)
-            except Exception:
-                tool_data = last_msg.content
-
-            # Check for budget exhausted notice
-            is_partial = any("Hạn mức" in str(getattr(m, "content", "")) or "budget" in str(getattr(m, "content", "")).lower() for m in messages)
-            prefix = "Dựa trên kết quả kiểm tra một phần (hạn mức thực thi hoàn tất):\n" if is_partial else "Dựa trên kết quả kiểm tra hệ thống:\n"
-
-            # Rich formatting if tool_data is analytics
-            if isinstance(tool_data, dict) and "today_calendar_day" in tool_data:
-                t_cal = tool_data["today_calendar_day"]
-                r_24 = tool_data.get("rolling_24h_interval", {})
-                return AIMessage(
-                    content=(
-                        f"{prefix}"
-                        f"• Tổng số sự kiện hôm nay (ICT UTC+7): {t_cal.get('total_events_today', 0)}\n"
-                        f"• Lượt xe hôm nay: {t_cal.get('vehicle_passages_today', 0)} (Biển số duy nhất: {t_cal.get('unique_plates_today', 0)})\n"
-                        f"• Lượt xe 24 giờ qua: {r_24.get('vehicle_passages', 0)}\n"
-                        f"• Lưu ý mật độ tức thời (live occupancy): CSDL chỉ ghi nhận dữ liệu tích lũy; live occupancy cần quan sát qua luồng video trực tiếp."
-                    )
-                )
-
-            return AIMessage(
-                content=f"{prefix}```json\n{json.dumps(tool_data, indent=2, ensure_ascii=False)}\n```"
-            )
+            return AIMessage(content=format_tool_messages(messages))
 
         lower_q = content.lower()
 

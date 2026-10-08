@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Header } from '../components/Header';
+import { AgentMessageContent } from '../components/AgentMessageContent';
 import { sendAgentMessage, resetAgentConversation, getAgentConversation } from '../api/agent';
 import { useToast } from '../context/ToastContext';
 import {
@@ -268,11 +269,7 @@ export function AgentPage() {
                       </div>
                     )}
 
-                    <div className="message-text">
-                      {msg.content.split('\n').map((line, lidx) => (
-                        <p key={lidx}>{line}</p>
-                      ))}
-                    </div>
+                    <AgentMessageContent content={msg.content} isUser={isUser} />
 
                     {msg.sources && msg.sources.length > 0 && (
                       <div className="sources-container">
