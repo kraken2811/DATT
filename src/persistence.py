@@ -6,8 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import inspect, text
-from alembic.config import Config
-from alembic.script import ScriptDirectory
+from src.db.migration_head import repository_head
 
 from src.db.database import Database
 from src.storage import get_storage, ExternalStorageBackend, SupabaseStorageBackend
@@ -43,8 +42,7 @@ def audit(*, require_external=False):
                     errors.append("pgvector_missing")
             revisions = set(conn.scalars(text("SELECT version_num FROM alembic_version")))
             result["alembic_revision"] = ",".join(sorted(revisions))
-            heads = set(ScriptDirectory.from_config(Config(str(ROOT / "src/db/alembic.ini"))).get_heads())
-            if revisions != heads:
+            if revisions != {repository_head()}:
                 errors.append("migration_head_mismatch")
             if not REQUIRED_TABLES.issubset(inspect(conn).get_table_names()):
                 errors.append("required_tables_missing")

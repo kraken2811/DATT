@@ -79,11 +79,14 @@ def main():
     # Use Alembic API so driver errors can be redacted by the outer handler.
     from alembic import command
     from alembic.config import Config
-    command.upgrade(Config(str(ROOT / "src/db/alembic.ini")), "head")
+    from src.db.migration_head import repository_head
+    config = Config(str(ROOT / "src/db/alembic.ini"))
+    head = repository_head(config)
+    command.upgrade(config, "head")
     from src.persistence import audit, print_audit
     result, errors = audit(require_external=True)
     print_audit(result, errors)
-    if errors:
+    if errors or result["alembic_revision"] != head:
         raise RuntimeError("External persistence preflight failed")
     # Existing notebook model download cell must have provisioned the models.
     for model in ("yolo11s.pt", "yolov8n-license-plate.pt"):

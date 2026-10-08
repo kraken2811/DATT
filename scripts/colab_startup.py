@@ -136,7 +136,8 @@ class Startup:
         except Exception as exc:
             self.failed = True
             self.report['SYSTEM_READY'] = 'NO'
-            message = str(exc) if isinstance(exc, Blocker) else 'Cell ' + str(number) + ': ' + type(exc).__name__ + ' (provider details withheld)'
+            from src.db.migration_head import MigrationHeadError
+            message = str(exc) if isinstance(exc, (Blocker, MigrationHeadError)) else 'Cell ' + str(number) + ': ' + type(exc).__name__ + ' (provider details withheld)'
             print('SYSTEM_READY=NO\nblocker=' + message)
             raise Blocker(message) from None
         self.completed = number
@@ -154,10 +155,8 @@ class Startup:
         self.report['environment'] = 'PASS'
 
     def cell_5(self):
-        from alembic.config import Config
-        from alembic.script import ScriptDirectory
-        heads = ScriptDirectory.from_config(Config(str(ROOT / 'src/db/alembic.ini'))).get_heads()
-        self.report['expected_head'] = ','.join(sorted(heads))
+        from src.db.migration_head import repository_head
+        self.report['expected_head'] = repository_head()
         db = self.cli('db-check', allow_failure=True)
         require(db.get('database_connected') == 'true' and db.get('database_type') == 'postgresql', 'PostgreSQL connection failed; check DATT_DATABASE_URL, DNS, TLS and database permissions')
         require(db.get('pgvector') == 'PASS', 'pgvector extension missing; provision it before startup')
@@ -189,6 +188,9 @@ class Startup:
               + '; AdaFace=' + self.report['adaface_provider'] + '; plate_ocr=PASS')
 
     def cell_7(self):
+        from src.db.migration_head import repository_head
+        require(self.report['expected_head'] == repository_head(),
+                'Repository migration head changed during startup; rerun from Cell 1')
         db = self.cli('migrate')
         require(db.get('alembic') == 'PASS' and db.get('alembic_revision') == self.report['expected_head'], 'Migration did not reach repository head')
         self.report['migration'] = db['alembic_revision']

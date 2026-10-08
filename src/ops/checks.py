@@ -18,8 +18,7 @@ def database_check():
     from sqlalchemy import inspect, text
     from src.db.database import Database
     from src.db.models import Base
-    from alembic.config import Config
-    from alembic.script import ScriptDirectory
+    from src.db.migration_head import repository_head
     db = Database()
     try:
         result['database_type'] = db.engine.dialect.name
@@ -36,9 +35,10 @@ def database_check():
             result['tables_verified'] = set(Base.metadata.tables) <= tables
             if 'alembic_version' in tables:
                 revisions = set(conn.scalars(text('SELECT version_num FROM alembic_version')))
-                heads = set(ScriptDirectory.from_config(Config(str(ROOT / 'src/db/alembic.ini'))).get_heads())
+                head = repository_head()
+                result['repository_head'] = head
                 result['alembic_revision'] = ','.join(sorted(revisions))
-                result['alembic'] = 'PASS' if revisions == heads else 'FAIL'
+                result['alembic'] = 'PASS' if revisions == {head} else 'FAIL'
     finally:
         db.dispose()
     return result
@@ -49,8 +49,14 @@ def migrate():
         return {'migration': 'FAIL', 'database_configured': False}
     from alembic import command
     from alembic.config import Config
-    command.upgrade(Config(str(ROOT / 'src/db/alembic.ini')), 'head')
-    return database_check()
+    from src.db.migration_head import repository_head
+    config = Config(str(ROOT / 'src/db/alembic.ini'))
+    head = repository_head(config)
+    command.upgrade(config, 'head')
+    result = database_check()
+    if result.get('alembic_revision') != head:
+        result['alembic'] = 'FAIL'
+    return result
 
 
 def storage_check():
