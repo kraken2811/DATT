@@ -69,10 +69,4 @@ jupyter>=1.0.0
 # ------------------------------------------------------------------------------
 # 8. AI Operations Agent & RAG Subsystem (LangGraph, pgvector, LLMs)
 # ------------------------------------------------------------------------------
-langchain-core>=0.3.0
-langgraph>=0.2.0
-langgraph-checkpoint-postgres>=2.0.0
-psycopg-pool>=3.2.0
-fastembed>=0.3.0
-langchain-google-genai>=2.0.0
-langchain-openai>=0.2.0
+-r requirements-agent.txt

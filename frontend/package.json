@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test:agent": "node scripts/test_agent_e2e.cjs",
     "lint": "oxlint",
     "preview": "vite preview"
   },

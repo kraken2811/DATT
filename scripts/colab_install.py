@@ -17,9 +17,13 @@ PINS = {'ultralytics': '8.4.171', 'supervision': '0.30.3', 'insightface': '2.0',
 STAGES = (
     ('backend', ('fastapi', 'uvicorn[standard]', 'python-multipart', 'httpx', 'python-dotenv', 'psutil', 'PyYAML')),
     ('database', ('SQLAlchemy', 'alembic', 'psycopg[binary]', 'pgvector', 'fsspec', 'requests')),
+    ('agent', ('langchain-core>=0.3.0', 'langgraph>=0.2.0',
+               'langgraph-checkpoint-postgres>=2.0.0', 'psycopg-pool>=3.2.0',
+               'langchain-google-genai>=2.0.0', 'langchain-openai>=0.2.0')),
     ('vision', ('numpy', 'opencv-python-headless', 'ultralytics', 'supervision')),
     ('onnx', ('onnx', 'onnxruntime-gpu')),
-    # InsightFace's CPU ORT dependency is intentionally supplied by GPU ORT.
+    # FastEmbed and InsightFace use the verified GPU ORT distribution.
+    ('agent-embeddings', ('fastembed>=0.3.0',)),
     ('face-dependencies', ('opencv-python', 'tqdm', 'scipy', 'scikit-image')),
     ('face', ('insightface',)),
     ('ocr', ('easyocr',)),
@@ -99,6 +103,18 @@ def stage_requests(names):
     return [name + ('==' + PINS[name] if name in PINS else '') for name in names]
 
 
+def embedding_dependencies(raw_dependencies):
+    result = []
+    for raw in raw_dependencies:
+        req = Requirement(raw)
+        if req.marker is not None and not req.marker.evaluate({'extra': ''}):
+            continue
+        if canonicalize_name(req.name) == 'onnxruntime':
+            req.name = 'onnxruntime-gpu'
+        result.append(str(req))
+    return result
+
+
 def validate_dependencies():
     """Validate the application dependency closure, including the ORT substitution."""
     pending = [Requirement(name) for _, names in STAGES for name in names]
@@ -152,11 +168,24 @@ def main():
         constraints.write_text(''.join(f'{n}=={v}\n' for n, v in sorted(installed.items())))
         report = logdir / (label + '-plan.json')
         args = ['install', '--only-binary=:all:', '-c', str(constraints), *stage_requests(names)]
-        if label == 'face':
+        if label in ('face', 'agent-embeddings'):
             args.append('--no-deps')
         print('dependency_stage=' + label + '; resolving', flush=True)
         run_pip([*args, '--dry-run', '--report', str(report)], label + '-resolve', logdir)
-        selected = audit_plan(json.loads(report.read_text()), installed)
+        resolution = json.loads(report.read_text())
+        selected = audit_plan(resolution, installed)
+        if label == 'agent-embeddings':
+            # FastEmbed requires the CPU ORT distribution by name. Supply the
+            # already verified GPU ORT instead, while resolving every other dependency.
+            raw_dependencies = (resolution['install'][0]['metadata'].get('requires_dist', [])
+                                if resolution.get('install') else metadata.requires('fastembed') or [])
+            dependencies = embedding_dependencies(raw_dependencies)
+            if dependencies:
+                dependency_report = logdir / 'agent-embedding-dependencies-plan.json'
+                run_pip(['install', '--only-binary=:all:', '-c', str(constraints),
+                         *dependencies, '--dry-run', '--report', str(dependency_report)],
+                        'agent-embedding-dependencies-resolve', logdir)
+                selected.update(audit_plan(json.loads(dependency_report.read_text()), installed))
         if selected:
             # Install precisely the reviewed resolution; do not resolve again.
             run_pip(['install', '--only-binary=:all:', '--no-deps', '-c', str(constraints),
@@ -170,6 +199,9 @@ def main():
     result = subprocess.run([sys.executable, '-c',
         'import torch, torchvision, onnxruntime, ultralytics, insightface, easyocr, cv2, numpy; '
         'import sqlalchemy, alembic, psycopg, pgvector, fastapi, uvicorn, dotenv, httpx, yaml; '
+        'import langchain_core, langgraph, langgraph.checkpoint.postgres, psycopg_pool, fastembed; '
+        'import langchain_google_genai, langchain_openai; '
+        'from src.ui.web_server import app; assert any(r.path == "/api/agent/chat" for r in app.routes); '
         'from src.tracker.bytetrack_tracker import PersonTracker; PersonTracker(); '
         'assert torch.cuda.is_available(); '
         'x=torch.arange(4,device="cuda"); assert (x*x).sum().item()==14; '

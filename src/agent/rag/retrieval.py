@@ -142,54 +142,54 @@ class KnowledgeRetriever:
                                 metadata=meta,
                             )
                         )
+                    else:
+                        # SQLite fallback: load chunks and compute cosine similarity in memory
+                        stmt = (
+                            select(
+                                KnowledgeChunk,
+                                KnowledgeDocument.title,
+                                KnowledgeDocument.document_type,
+                            )
+                            .join(KnowledgeDocument, KnowledgeChunk.document_id == KnowledgeDocument.id)
+                            .where(KnowledgeChunk.embedding.is_not(None))
+                        )
+                        if document_type:
+                            stmt = stmt.where(KnowledgeDocument.document_type == document_type)
+
+                        rows = session.execute(stmt).all()
+                        candidates = []
+                        q_arr = np.array(query_vec, dtype=np.float32)
+                        q_norm = np.linalg.norm(q_arr) or 1.0
+
+                        for chunk_row, doc_title, doc_type in rows:
+                            emb = chunk_row.embedding
+                            if not emb:
+                                continue
+                            c_arr = np.array(emb, dtype=np.float32)
+                            c_norm = np.linalg.norm(c_arr) or 1.0
+                            sim = float(np.dot(q_arr, c_arr) / (q_norm * c_norm))
+                            if sim >= threshold:
+                                meta = chunk_row.chunk_metadata or {}
+                                candidates.append(
+                                    RetrievedChunk(
+                                        chunk_id=str(chunk_row.id),
+                                        document_id=str(chunk_row.document_id),
+                                        document_name=doc_title,
+                                        content=chunk_row.content,
+                                        score=sim,
+                                        section=meta.get("section", "General"),
+                                        page=meta.get("page"),
+                                        document_type=doc_type,
+                                        metadata=meta,
+                                    )
+                                )
+                        candidates.sort(key=lambda x: x.score, reverse=True)
                     break
             except Exception as exc:
                 if attempt == 0 and ("connection" in str(exc).lower() or "closed" in str(exc).lower()):
                     logger.warning("Database connection dropped during retrieval; reconnecting: %s", exc)
                     continue
                 raise
-            else:
-                # SQLite fallback: load chunks and compute cosine similarity in memory
-                stmt = (
-                    select(
-                        KnowledgeChunk,
-                        KnowledgeDocument.title,
-                        KnowledgeDocument.document_type,
-                    )
-                    .join(KnowledgeDocument, KnowledgeChunk.document_id == KnowledgeDocument.id)
-                    .where(KnowledgeChunk.embedding.is_not(None))
-                )
-                if document_type:
-                    stmt = stmt.where(KnowledgeDocument.document_type == document_type)
-
-                rows = session.execute(stmt).all()
-                candidates = []
-                q_arr = np.array(query_vec, dtype=np.float32)
-                q_norm = np.linalg.norm(q_arr) or 1.0
-
-                for chunk_row, doc_title, doc_type in rows:
-                    emb = chunk_row.embedding
-                    if not emb:
-                        continue
-                    c_arr = np.array(emb, dtype=np.float32)
-                    c_norm = np.linalg.norm(c_arr) or 1.0
-                    sim = float(np.dot(q_arr, c_arr) / (q_norm * c_norm))
-                    if sim >= threshold:
-                        meta = chunk_row.chunk_metadata or {}
-                        candidates.append(
-                            RetrievedChunk(
-                                chunk_id=str(chunk_row.id),
-                                document_id=str(chunk_row.document_id),
-                                document_name=doc_title,
-                                content=chunk_row.content,
-                                score=sim,
-                                section=meta.get("section", "General"),
-                                page=meta.get("page"),
-                                document_type=doc_type,
-                                metadata=meta,
-                            )
-                        )
-                candidates.sort(key=lambda x: x.score, reverse=True)
 
         selected = candidates[:k]
         if not selected:

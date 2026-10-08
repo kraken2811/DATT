@@ -34,3 +34,6 @@ insightface>=0.7.3
 # After installation, remove overlapping CPU ORT and reinstall this GPU wheel;
 # see docs/insightface_cuda_audit.md. Do not upgrade ORT independently.
 onnxruntime-gpu==1.26.0
+
+# AI Assistant runtime (installed without replacing the CUDA stack).
+-r requirements-agent.txt

@@ -2,7 +2,7 @@ import React from 'react';
 import { Maximize, Activity } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 
-export function Header({ title, onToggleFullscreen, isFullscreen }) {
+export function Header({ title, onToggleFullscreen, isFullscreen, actions, status }) {
   const { telemetry, activeCamera } = useApp();
 
   const isLive = telemetry.stream_alive || telemetry.camera_status === 'RUNNING';
@@ -18,6 +18,11 @@ export function Header({ title, onToggleFullscreen, isFullscreen }) {
     statusText = 'ĐANG KẾT NỐI';
   }
 
+  if (status) {
+    statusClass = status.className;
+    statusText = status.label;
+  }
+
   return (
     <header className="app-header">
       <div className="header-left">
@@ -29,6 +34,7 @@ export function Header({ title, onToggleFullscreen, isFullscreen }) {
       </div>
 
       <div className="header-right">
+        {actions}
         {onToggleFullscreen && (
           <button
             type="button"

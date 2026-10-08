@@ -101,6 +101,17 @@ def model_probe():
     }
 
 
+AGENT_ENDPOINTS = {
+    '/api/agent/chat': {'post'},
+    '/api/agent/conversations/{thread_id}': {'get', 'delete'},
+}
+
+
+def agent_routes_present(schema):
+    paths = schema.get('paths', {})
+    return all(methods <= paths.get(path, {}).keys() for path, methods in AGENT_ENDPOINTS.items())
+
+
 class Startup:
     def __init__(self, runtime):
         self.report = dict(runtime, source='PASS', environment='NOT_CHECKED')
@@ -143,11 +154,23 @@ class Startup:
         self.completed = number
 
     def cell_3(self):
+        from scripts.colab_install import plan
+        from src.ops import process
+        missing, _ = plan()
+        if missing and process.owned(process.state()):
+            self.cli('stop', timeout=120)
+            print('owned_backend_stopped_for_missing_dependencies=true')
         from scripts.colab_install import main
         try:
             self.report.update(main())
         except RuntimeError as exc:
             raise Blocker(str(exc)) from None
+        from src.ops.subprocesses import run_bounded
+        result = run_bounded([sys.executable, '-m', 'scripts.agent_smoke'], cwd=ROOT,
+                             env=os.environ.copy(), capture_output=True, text=True, timeout=120)
+        require(result.returncode == 0, 'Isolated MockChatModel API smoke failed; run python -m scripts.agent_smoke')
+        self.report['agent_mock_api'] = 'PASS'
+        print('agent_mock_api=PASS; real_llm_calls=0')
         print('dependencies=PASS; dependencies_reused=' + str(self.report['dependencies_reused']).lower())
 
     def cell_4(self):
@@ -203,7 +226,16 @@ class Startup:
             require(status['mode'] == 'gpu' and status['port'] == 8501, 'Healthy backend configuration differs; resolve through DATT CLI')
             require(process.owned(process.state()), 'Backend ownership changed; no process stopped')
             workers = self.get('/startup-health').json()
-            if workers.get('notification_worker') != 'RUNNING':
+            health = self.get('/healthz').json()
+            revision_ok = (health.get('commit') == self.report['commit']
+                           and health.get('application_module') == 'src.ui.web_server')
+            schema_ok = agent_routes_present(self.get('/openapi.json').json())
+            print('backend_revision_match=' + str(revision_ok).lower())
+            print('backend_agent_routes_present=' + str(schema_ok).lower())
+            if not revision_ok or not schema_ok:
+                self.cli('stop', timeout=120)
+                print('owned_backend_stopped_for_stale_revision_or_routes=true')
+            elif workers.get('notification_worker') != 'RUNNING':
                 from src.notifications.config import EmailConfig
                 require(EmailConfig.from_env().configured, 'Valid email configuration required before restarting backend')
                 self.cli('stop', timeout=120)
@@ -285,6 +317,24 @@ class Startup:
             require(isinstance(body, dict) and body.get('status') not in ('error', 'failed'), 'API response reported failure: ' + path)
             self.report[label] = 'PASS'
             print(label + '=PASS')
+        require(agent_routes_present(self.get('/openapi.json').json()),
+                'Agent endpoints missing from live OpenAPI; check revision, module and API base URL')
+        health = self.get('/healthz').json()
+        require(health.get('commit') == self.report['commit'] and
+                health.get('application_module') == 'src.ui.web_server',
+                'Live backend revision/module differs from deployed source')
+        import requests
+        from uuid import uuid4
+        with requests.Session() as client:
+            from src.agent.api.auth import create_auth_token
+            client.headers['Authorization'] = 'Bearer ' + create_auth_token('colab_smoke_' + uuid4().hex)
+            history = client.get('http://127.0.0.1:8501/api/agent/conversations/colab_smoke_' + uuid4().hex, timeout=20)
+            require(history.status_code == 200 and history.json().get('messages') == [],
+                    'Agent conversation retrieval failed')
+            invalid = client.post('http://127.0.0.1:8501/api/agent/chat', json={'message': ''}, timeout=20)
+            require(invalid.status_code == 422, 'Agent chat validation failed')
+        self.report['agent_live_api'] = 'PASS'
+        print('agent_live_api=PASS; schema=POST chat,GET/DELETE conversation; real_llm_calls=0')
         self.get('/telemetry', port=8000)
         self.report['smoke_tests'] = 'PASS'
 
@@ -293,7 +343,7 @@ class Startup:
         self.cell_10()
         fields = ('runtime', 'gpu', 'cuda', 'source', 'commit', 'environment', 'database', 'pgvector',
                   'migration', 'storage', 'models', 'yolo_provider', 'scrfd_provider', 'adaface_provider',
-                  'backend', 'backend_pid', 'backend_http', 'camera_api',
+                  'backend', 'backend_pid', 'backend_http', 'agent_mock_api', 'agent_live_api', 'camera_api',
                   'face_watchlist_api', 'vehicle_watchlist_api', 'event_center_api', 'notification_worker', 'ui_url')
         require(all(k in self.report for k in fields) and self.report.get('smoke_tests') == 'PASS', 'Startup report is incomplete')
         print('[DATT_COLAB_STARTUP]')

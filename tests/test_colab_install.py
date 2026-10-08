@@ -42,3 +42,16 @@ def test_gpu_ort_substitution_checks_transitive_dependencies(monkeypatch):
     versions['numpy'] = '1.26.4'
     with pytest.raises(RuntimeError, match='numpy'):
         install.validate_dependencies()
+
+
+
+def test_fastembed_uses_gpu_ort_without_losing_other_dependencies():
+    deps = install.embedding_dependencies(['onnxruntime>=1.21', 'tokenizers>=0.15',
+                                          'unused; extra == "optional"'])
+    assert deps == ['onnxruntime-gpu>=1.21', 'tokenizers>=0.15']
+
+
+def test_agent_dependencies_are_provisioned():
+    names = {install.Requirement(name).name for _, stage in install.STAGES for name in stage}
+    assert {'langchain-core', 'langgraph', 'langgraph-checkpoint-postgres', 'psycopg-pool',
+            'fastembed', 'langchain-google-genai', 'langchain-openai'} <= names

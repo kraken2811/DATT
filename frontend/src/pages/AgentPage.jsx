@@ -43,10 +43,11 @@ const QUICK_PROMPTS = [
 ];
 
 export function AgentPage() {
-  const { addToast } = useToast();
+  const { showToast } = useToast();
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState('');
   const [loading, setLoading] = useState(false);
+  const [apiStatus, setApiStatus] = useState('connecting');
   const [threadId, setThreadId] = useState(() => {
     return localStorage.getItem('datt_agent_thread_id') || `thread_${Date.now()}`;
   });
@@ -64,6 +65,7 @@ export function AgentPage() {
       if (!threadId) return;
       try {
         const resp = await getAgentConversation(threadId);
+        if (active) setApiStatus(resp?.status === 'error' ? 'error' : 'connected');
         if (active && resp && resp.messages && resp.messages.length > 0) {
           const restored = resp.messages
             .filter((m) => m.type === 'human' || m.type === 'ai' || m.type === 'AIMessage' || m.type === 'HumanMessage')
@@ -81,6 +83,7 @@ export function AgentPage() {
           }
         }
       } catch (err) {
+        if (active) setApiStatus('error');
         console.warn('Failed to restore conversation history:', err);
       }
 
@@ -131,6 +134,7 @@ export function AgentPage() {
 
     try {
       const resp = await sendAgentMessage(text, threadId);
+      setApiStatus('connected');
       if (resp && resp.status === 'success') {
         const botMsg = {
           id: `bot_${Date.now()}`,
@@ -150,13 +154,10 @@ export function AgentPage() {
           timestamp: new Date().toLocaleTimeString(),
         };
         setMessages((prev) => [...prev, errorMsg]);
-        addToast({
-          type: 'error',
-          title: 'Lỗi AI Agent',
-          message: resp?.reply || 'Không thể nhận phản hồi từ AI Agent',
-        });
+        showToast(resp?.reply || 'Không thể nhận phản hồi từ AI Agent', 'error');
       }
     } catch (err) {
+      setApiStatus('error');
       const errorMsg = {
         id: `err_${Date.now()}`,
         role: 'assistant',
@@ -165,11 +166,7 @@ export function AgentPage() {
         timestamp: new Date().toLocaleTimeString(),
       };
       setMessages((prev) => [...prev, errorMsg]);
-      addToast({
-        type: 'error',
-        title: 'Lỗi kết nối',
-        message: err.message || 'Lỗi mạng khi kết nối AI Agent',
-      });
+      showToast(err.message || 'Lỗi mạng khi kết nối AI Agent', 'error');
     } finally {
       setLoading(false);
     }
@@ -193,23 +190,24 @@ export function AgentPage() {
         timestamp: new Date().toLocaleTimeString(),
       },
     ]);
-    addToast({
-      type: 'info',
-      title: 'Đã tạo phiên mới',
-      message: 'Bộ nhớ ngắn hạn của phiên hội thoại đã được làm mới.',
-    });
+    showToast('Bộ nhớ ngắn hạn của phiên hội thoại đã được làm mới.', 'info');
   };
 
   return (
     <div className="page-container agent-page" id="agentPage">
       <Header
         title="DATT AI Assistant"
+        status={{
+          className: apiStatus === 'connected' ? 'live' : apiStatus === 'connecting' ? 'connecting' : 'disconnected',
+          label: apiStatus === 'connected' ? 'AGENT API ONLINE' : apiStatus === 'connecting' ? 'AGENT API CONNECTING' : 'AGENT API OFFLINE',
+        }}
         subtitle="Hệ thống Điều phối Tác tử LangGraph, LangChain & Truy xuất Tri thức pgvector RAG"
         actions={
           <button
             type="button"
             className="btn btn-secondary"
             onClick={handleResetConversation}
+            disabled={loading}
             title="Tạo phiên hội thoại mới và xóa bộ nhớ tạm"
           >
             <Trash2 size={16} />

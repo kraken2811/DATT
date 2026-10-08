@@ -2,9 +2,10 @@
  * Agent API client for interacting with the LangGraph DATT AI Agent.
  */
 
-import { apiRequest } from './client';
+import { apiRequest, invalidateApiCache } from './client';
 
 export async function sendAgentMessage(message, threadId = null, userId = 'operator_ui') {
+  invalidateApiCache('/api/agent/conversations/');
   return apiRequest('/api/agent/chat', {
     method: 'POST',
     body: {
@@ -25,6 +26,7 @@ export async function getAgentConversation(threadId, userId = 'operator_ui') {
 
 export async function resetAgentConversation(threadId, userId = 'operator_ui') {
   if (!threadId) return { status: 'success' };
+  invalidateApiCache('/api/agent/conversations/');
   return apiRequest(`/api/agent/conversations/${encodeURIComponent(threadId)}?user_id=${encodeURIComponent(userId)}`, {
     method: 'DELETE',
   });

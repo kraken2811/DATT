@@ -69,15 +69,27 @@ def test_missing_only_dependency_plan(monkeypatch, tmp_path):
     assert install.plan() == (['absent>=2'], ['conflict'])
 
 
-def test_smoke_uses_only_read_only_routes(monkeypatch):
+def test_smoke_verifies_live_agent_without_llm_call(monkeypatch):
     s=session(monkeypatch)
+    import requests
+    class Session:
+        headers = {}
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def get(self, url, **kwargs):
+            return types.SimpleNamespace(status_code=200, json=lambda: {'messages': []})
+        def post(self, url, **kwargs):
+            assert kwargs['json'] == {'message': ''}
+            return types.SimpleNamespace(status_code=422)
+    monkeypatch.setattr(requests, 'Session', Session)
     paths=[]
     def get(path, **kwargs):
         paths.append(path)
-        return types.SimpleNamespace(json=lambda: {'status':'ok'})
+        data = {'paths': {'/api/agent/chat': {'post': {}}, '/api/agent/conversations/{thread_id}': {'get': {}, 'delete': {}}}} if path == '/openapi.json' else {'status': 'ok', 'commit': 'test', 'application_module': 'src.ui.web_server'}
+        return types.SimpleNamespace(json=lambda: data)
     monkeypatch.setattr(s,'get',get)
     s.cell_12()
-    assert len(paths)==7
+    assert len(paths)==9
     assert all('switch' not in p and 'start' not in p and 'stop' not in p for p in paths)
     assert s.report['smoke_tests']=='PASS'
 
@@ -184,7 +196,9 @@ def test_owned_backend_reuses_or_restarts_for_email(monkeypatch, worker, expecte
     monkeypatch.setattr(process, 'status', lambda: {'health': 'PASS', 'mode': 'gpu', 'port': 8501})
     monkeypatch.setattr(process, 'state', lambda: state[0])
     monkeypatch.setattr(process, 'owned', lambda r: r is record)
-    monkeypatch.setattr(s, 'get', lambda path: types.SimpleNamespace(json=lambda: {'notification_worker': worker}))
+    monkeypatch.setattr(s, 'get', lambda path: types.SimpleNamespace(json=lambda: {
+        'notification_worker': worker, 'commit': 'test', 'application_module': 'src.ui.web_server',
+        'paths': {'/api/agent/chat': {'post': {}}, '/api/agent/conversations/{thread_id}': {'get': {}, 'delete': {}}}}))
     monkeypatch.setattr(EmailConfig, 'from_env', classmethod(lambda cls: types.SimpleNamespace(configured=True)))
     monkeypatch.setattr(psutil, 'net_connections', lambda kind: [])
     calls = []
@@ -195,3 +209,39 @@ def test_owned_backend_reuses_or_restarts_for_email(monkeypatch, worker, expecte
     s.cell_8()
     assert len(calls) == expected_stops
     assert all(args == ('stop',) for args in calls)
+
+
+@pytest.mark.parametrize('commit,module,paths', [
+    ('old', 'src.ui.web_server', True), ('test', 'wrong.app', True),
+    ('test', 'src.ui.web_server', False), (None, None, False),
+])
+def test_healthy_owned_stale_backend_is_stopped(monkeypatch, commit, module, paths):
+    from src.ops import process
+    import psutil
+    s = session(monkeypatch)
+    monkeypatch.setattr(process, 'status', lambda: {'health': 'PASS', 'mode': 'gpu', 'port': 8501})
+    monkeypatch.setattr(process, 'state', lambda: {'pid': 42})
+    monkeypatch.setattr(process, 'owned', lambda record: True)
+    monkeypatch.setattr(psutil, 'net_connections', lambda kind: [])
+    schema = {'/api/agent/chat': {'post': {}}, '/api/agent/conversations/{thread_id}': {'get': {}, 'delete': {}}}
+    monkeypatch.setattr(s, 'get', lambda path: types.SimpleNamespace(json=lambda: {
+        'notification_worker': 'RUNNING', 'commit': commit, 'application_module': module,
+        'paths': schema if paths else {}}))
+    calls = []
+    monkeypatch.setattr(s, 'cli', lambda *a, **k: calls.append(a))
+    s.cell_8()
+    assert calls == [('stop',)]
+
+
+def test_agent_openapi_requires_all_methods():
+    from scripts.colab_startup import agent_routes_present
+    schema = {'paths': {'/api/agent/chat': {'post': {}},
+                       '/api/agent/conversations/{thread_id}': {'get': {}, 'delete': {}}}}
+    assert agent_routes_present(schema)
+    del schema['paths']['/api/agent/conversations/{thread_id}']['delete']
+    assert not agent_routes_present(schema)
+
+
+def test_mock_agent_api_smoke():
+    from scripts.agent_smoke import run_smoke
+    assert run_smoke() == {'agent_mock_api': 'PASS', 'real_llm_calls': 0}

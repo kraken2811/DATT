@@ -7,7 +7,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SUITE = (
     'event_policy', 'camera_capture', 'snapshot_proxy', 'vehicle_watchlists',
-    'notifications', 'alerts', 'colab_install', 'colab_runtime_cell', 'colab_startup',
+    'notifications', 'alerts', 'colab_install', 'colab_runtime_cell', 'colab_startup', 'colab_source',
     'database_pool_lifecycle', 'select_source_proxy', 'supabase_storage',
     'cli', 'web_server', 'youtube_vod_workflow',
     'vehicle_color_flow', 'plate_consensus', 'async_plate_scheduling',
@@ -26,7 +26,9 @@ def main():
             DATT_DATABASE_URL='sqlite:///' + Path(temp, 'tests.db').as_posix(),
             DATT_REQUIRE_PERSISTENCE='0', DATT_STORAGE_BACKEND='local',
             DATT_STORAGE_ROOT=temp, DATT_RUNTIME_DIR=str(Path(temp, 'runtime')),
-            DATT_EVENT_AUDIT_ONLY='1',
+            DATT_EVENT_AUDIT_ONLY='1', DATT_AGENT_LLM_PROVIDER='mock',
+            AGENT_LLM_PROVIDER='mock', DATT_AGENT_EMBEDDING_PROVIDER='mock',
+            DATT_AGENT_LLM_FALLBACK_PROVIDER='', DATT_AGENT_LLM_FALLBACK_MODEL='',
         )
         # Camera API/source-selection tests need the existing schema, not an
         # empty database. Never create tables in the project's configured DB.
@@ -35,6 +37,9 @@ def main():
         db = Database()
         Base.metadata.create_all(db.engine)
         db.dispose()
+        # Checkpoint discovery otherwise falls back to reading the production .env.
+        from src.agent.memory import checkpoint
+        checkpoint.get_postgres_connection_string = lambda: None
         import pytest
         try:
             return pytest.main([

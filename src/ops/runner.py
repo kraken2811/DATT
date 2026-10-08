@@ -3,6 +3,7 @@ import argparse
 import os
 import re
 import sys
+import subprocess
 import threading
 import time
 
@@ -46,11 +47,16 @@ def main():
     sys.stdout, sys.stderr = SafeOutput(sys.stdout), SafeOutput(sys.stderr)
     try:
         from src.ui.web_server import app
+        revision = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True,
+                                  timeout=10).stdout.strip() or 'unavailable'
+        from src.agent.config import agent_config
         app.state.backend_url = f'http://127.0.0.1:{args.ai_port}'
 
         @app.get('/healthz')
         def health():
-            return {'status': 'ok', 'mode': args.mode, 'instance': args.token}
+            return {'status': 'ok', 'mode': args.mode, 'instance': args.token,
+                    'commit': revision, 'application_module': 'src.ui.web_server',
+                    'agent_llm_provider': agent_config.llm_provider}
 
         @app.get('/startup-health')
         def startup_health():

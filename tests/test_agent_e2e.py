@@ -34,8 +34,29 @@ class TestAgentEndToEnd:
         assert "get_camera_status" in data["tools_called"]
         assert "get_knowledge" not in data["tools_called"]
 
-    def test_e2e_knowledge_rag_query(self, api_client):
+    def test_e2e_knowledge_rag_query(self, api_client, tmp_path, monkeypatch):
         """User asks for troubleshooting documentation: Agent must invoke get_knowledge."""
+        from src.agent.config import agent_config
+        from src.agent.rag.ingestion import IngestionService
+        from src.agent.rag.embeddings import MockEmbeddingService
+        from src.agent.rag import retrieval
+        from src.db.database import Database
+        from src.db.models import Base
+        monkeypatch.setattr(agent_config, 'database_url', 'sqlite:///' + (tmp_path / 'rag.db').as_posix())
+        embedder = MockEmbeddingService()
+        # Source plumbing is under test; deterministic vectors cover the mock
+        # model's reformulated troubleshooting query without downloading models.
+        monkeypatch.setattr(embedder, '_generate', lambda text: [1.0] + [0.0] * 383)
+        monkeypatch.setattr(retrieval, 'get_embedding_service', lambda: embedder)
+        db = Database(url=agent_config.database_url)
+        Base.metadata.create_all(db.engine)
+        with IngestionService(db=db, embedding_service=embedder) as ingest:
+            result = ingest.ingest_text(title='Offline camera test guide', text="Hướng dẫn tài liệu khắc phục sự cố camera khi bị offline")
+            assert result.status == 'created'
+        with retrieval.KnowledgeRetriever(db=db, embedding_service=embedder) as retriever:
+            direct = retriever.retrieve(query="Hướng dẫn tài liệu khắc phục sự cố camera khi bị offline")
+            assert direct['results'], direct
+        db.dispose()
         resp = api_client.post(
             "/api/agent/chat",
             json={

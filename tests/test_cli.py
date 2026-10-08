@@ -23,6 +23,9 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setenv('DATT_STORAGE_ROOT', str(tmp_path / 'media'))
     monkeypatch.setenv('DATT_RUNTIME_DIR', str(tmp_path / 'runtime'))
     monkeypatch.setenv('DATT_REQUIRE_PERSISTENCE', '0')
+    monkeypatch.setenv('DATT_AGENT_LLM_PROVIDER', 'mock')
+    monkeypatch.setenv('DATT_AGENT_LLM_FALLBACK_PROVIDER', '')
+    monkeypatch.setenv('DATT_AGENT_LLM_FALLBACK_MODEL', '')
     monkeypatch.setattr(cli, 'load_configuration', lambda: None)
     return tmp_path
 
@@ -162,6 +165,27 @@ def test_api_backend_already_running_restart_and_e2e(isolated, capsys):
             first = process.start(port=port, timeout=30)
             again = process.start(port=port, timeout=30)
         assert first['pid'] == again['pid'] and first['health'] == 'PASS'
+        import requests
+        from scripts.colab_startup import agent_routes_present
+        base = f'http://127.0.0.1:{port}'
+        with requests.Session() as client:
+            health = client.get(base + '/healthz', timeout=10).json()
+            expected = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
+                                      capture_output=True, text=True, check=True).stdout.strip()
+            assert health['commit'] == expected
+            assert health['application_module'] == 'src.ui.web_server'
+            assert health['agent_llm_provider'] == 'mock'
+            assert agent_routes_present(client.get(base + '/openapi.json', timeout=10).json())
+            chat = client.post(base + '/api/agent/chat', json={'message': 'Hello'}, timeout=10)
+            assert chat.status_code == 200 and chat.json()['status'] == 'success'
+            thread = chat.json()['thread_id']
+            second = client.post(base + '/api/agent/chat', json={'message': 'Hello', 'thread_id': thread}, timeout=10)
+            assert second.status_code == 200 and second.json()['status'] == 'success'
+            conversation = base + '/api/agent/conversations/' + thread
+            assert client.get(conversation, timeout=10).json()['message_count'] == 4
+            assert client.post(base + '/api/agent/chat', json={'message': ''}, timeout=10).status_code == 422
+            assert client.delete(conversation, timeout=10).json()['cleared']
+            assert client.get(conversation, timeout=10).json()['messages'] == []
         assert cli.main(['e2e', '--allow-local', '--port', str(port), '--timeout', '30']) == 0
         assert process.state()['pid'] != first['pid']
         assert 'PERSISTENCE_STATUS=PASS' in capsys.readouterr().out
