@@ -275,3 +275,279 @@ def get_event_statistics(
         return {"status": "error", "message": f"Failed to calculate event statistics: {exc}"}
     finally:
         db.dispose()
+
+
+def parse_time_bounds(
+    time_range: str | None = None,
+    from_time: str | None = None,
+    to_time: str | None = None,
+) -> tuple[datetime, datetime, str]:
+    """Parse time bounds in ICT (UTC+7) timezone.
+
+    Returns:
+        (start_utc, end_utc, label_ict)
+    """
+    now_utc = datetime.now(timezone.utc)
+    now_ict = now_utc.astimezone(LOCAL_TZ)
+
+    tr = (time_range or "").lower().strip()
+    if tr in ("today", "hom_nay", "hom nay"):
+        start_ict = now_ict.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_ict = now_ict
+        label = "Hôm nay (từ 00:00 ICT đến hiện tại)"
+    elif tr in ("yesterday", "hom_qua", "hom qua"):
+        today_0 = now_ict.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_ict = today_0 - timedelta(days=1)
+        end_ict = today_0 - timedelta(microseconds=1)
+        label = f"Hôm qua ({start_ict.strftime('%d/%m/%Y')} ICT)"
+    elif tr in ("7_days", "7_ngay", "7 ngay", "7 days", "tuan_qua", "tuan qua"):
+        start_ict = now_ict - timedelta(days=7)
+        end_ict = now_ict
+        label = "7 ngày gần đây"
+    elif tr in ("this_week", "tuan_nay", "tuan nay"):
+        start_ict = (now_ict - timedelta(days=now_ict.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_ict = now_ict
+        label = "Tuần này"
+    elif tr in ("last_week", "tuan_truoc", "tuan truoc"):
+        start_this_week = (now_ict - timedelta(days=now_ict.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_ict = start_this_week - timedelta(days=7)
+        end_ict = start_this_week - timedelta(microseconds=1)
+        label = f"Tuần trước ({start_ict.strftime('%d/%m/%Y')} - {end_ict.strftime('%d/%m/%Y')})"
+    elif from_time:
+        start_dt = parse_iso_time(from_time, now_utc - timedelta(days=1))
+        end_dt = parse_iso_time(to_time, now_utc)
+        return start_dt, end_dt, f"Từ {start_dt.isoformat()} đến {end_dt.isoformat()}"
+    else:
+        start_ict = now_ict - timedelta(hours=24)
+        end_ict = now_ict
+        label = "24 giờ qua (rolling 24h)"
+
+    start_utc = start_ict.astimezone(timezone.utc)
+    end_utc = end_ict.astimezone(timezone.utc)
+    return start_utc, end_utc, label
+
+
+@tool
+def get_traffic_analytics(
+    camera_id: str | None = None,
+    time_range: str | None = None,
+    from_time: str | None = None,
+    to_time: str | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    group_by: str = "camera",
+    compare_with: str | None = None,
+) -> dict[str, Any]:
+    """Retrieve detailed vehicle traffic analytics, peak hours, and period-over-period comparisons.
+
+    Distinguishes:
+    1. VehiclePassage sessions (distinct physical passages through a camera) vs raw detection frames.
+    2. Grouping by camera, hour of day, day, or vehicle classification.
+    3. Peak traffic hours and busiest camera identification strictly from recorded data.
+    4. Comparisons with baseline periods (e.g. today vs yesterday, this week vs last week),
+       safely handling zero baseline without mathematical division errors.
+    5. Notice: Cumulative historical passages do not represent live instantaneous occupancy.
+
+    Args:
+        camera_id: Optional camera ID or registry key (e.g. 'camera_01', 'CAM01') to filter by.
+        time_range: Preset interval: 'today', 'yesterday', '7_days', 'this_week', 'last_week', or 'custom'.
+        from_time: Optional start ISO timestamp / date string.
+        to_time: Optional end ISO timestamp / date string.
+        start_time: Optional alias for from_time.
+        end_time: Optional alias for to_time.
+        group_by: Aggregation dimension: 'camera', 'hour', 'day', 'type' (vehicle type), or 'camera_and_type'.
+        compare_with: Optional comparison baseline: 'yesterday' or 'last_week'.
+
+    Returns:
+        Structured traffic analysis containing total passages, unique plates, grouped breakdowns,
+        peak hours, and period comparisons.
+    """
+    eff_start = from_time or start_time
+    eff_end = to_time or end_time
+    start_utc, end_utc, time_label = parse_time_bounds(time_range, eff_start, eff_end)
+
+    db = agent_config.get_database()
+    try:
+        with db.transaction() as session:
+            # 1. Total passages in requested interval
+            base_q = select(func.count(VehiclePassage.id)).where(
+                VehiclePassage.first_seen_at >= start_utc,
+                VehiclePassage.first_seen_at <= end_utc,
+            )
+            if camera_id and camera_id.strip():
+                base_q = base_q.where(VehiclePassage.camera_id == camera_id.strip())
+            total_passages = session.scalar(base_q) or 0
+
+            # 2. Unique plates in requested interval
+            unique_plates_q = select(func.count(func.distinct(VehiclePassage.plate_text))).where(
+                VehiclePassage.first_seen_at >= start_utc,
+                VehiclePassage.first_seen_at <= end_utc,
+                VehiclePassage.plate_text.is_not(None),
+                VehiclePassage.plate_text != "",
+            )
+            if camera_id and camera_id.strip():
+                unique_plates_q = unique_plates_q.where(VehiclePassage.camera_id == camera_id.strip())
+            unique_plates = session.scalar(unique_plates_q) or 0
+
+            # 3. Vehicle type breakdown
+            type_q = (
+                select(VehiclePassage.vehicle_type, func.count(VehiclePassage.id))
+                .where(
+                    VehiclePassage.first_seen_at >= start_utc,
+                    VehiclePassage.first_seen_at <= end_utc,
+                )
+            )
+            if camera_id and camera_id.strip():
+                type_q = type_q.where(VehiclePassage.camera_id == camera_id.strip())
+            type_counts = {str(r[0] or "unknown"): int(r[1]) for r in session.execute(type_q.group_by(VehiclePassage.vehicle_type)).all()}
+
+            # 4. Dialect-aware grouped data
+            is_pg = session.bind.dialect.name == "postgresql"
+            grouped_data: list[dict[str, Any]] = []
+            busiest_item: dict[str, Any] | None = None
+
+            grp = group_by.lower().strip()
+            if grp in ("camera", "cameras"):
+                cam_q = (
+                    select(VehiclePassage.camera_id, func.count(VehiclePassage.id))
+                    .where(
+                        VehiclePassage.first_seen_at >= start_utc,
+                        VehiclePassage.first_seen_at <= end_utc,
+                    )
+                    .group_by(VehiclePassage.camera_id)
+                    .order_by(func.count(VehiclePassage.id).desc())
+                )
+                cam_rows = session.execute(cam_q).all()
+                for cid, cnt in cam_rows:
+                    grouped_data.append({"camera_id": str(cid), "passage_count": int(cnt)})
+                if grouped_data:
+                    busiest_item = {
+                        "dimension": "camera",
+                        "camera_id": grouped_data[0]["camera_id"],
+                        "passage_count": grouped_data[0]["passage_count"],
+                    }
+
+            elif grp in ("hour", "peak_hour", "peak_hours"):
+                if is_pg:
+                    hour_expr = func.to_char(func.timezone("Asia/Ho_Chi_Minh", VehiclePassage.first_seen_at), "HH24")
+                else:
+                    hour_expr = func.strftime("%H", func.datetime(VehiclePassage.first_seen_at, "+7 hours"))
+
+                hq = (
+                    select(hour_expr, func.count(VehiclePassage.id))
+                    .where(
+                        VehiclePassage.first_seen_at >= start_utc,
+                        VehiclePassage.first_seen_at <= end_utc,
+                    )
+                )
+                if camera_id and camera_id.strip():
+                    hq = hq.where(VehiclePassage.camera_id == camera_id.strip())
+                hq = hq.group_by(hour_expr).order_by(func.count(VehiclePassage.id).desc())
+
+                h_rows = session.execute(hq).all()
+                for hr, cnt in h_rows:
+                    h_str = f"{int(hr):02d}:00 - {int(hr)+1:02d}:00" if hr is not None else "chưa rõ"
+                    grouped_data.append({"hour_slot": h_str, "hour_24": str(hr), "passage_count": int(cnt)})
+                if grouped_data:
+                    busiest_item = {
+                        "dimension": "hour",
+                        "peak_hour": grouped_data[0]["hour_slot"],
+                        "passage_count": grouped_data[0]["passage_count"],
+                    }
+
+            elif grp in ("day", "daily"):
+                if is_pg:
+                    day_expr = func.to_char(func.timezone("Asia/Ho_Chi_Minh", VehiclePassage.first_seen_at), "YYYY-MM-DD")
+                else:
+                    day_expr = func.strftime("%Y-%m-%d", func.datetime(VehiclePassage.first_seen_at, "+7 hours"))
+
+                dq = (
+                    select(day_expr, func.count(VehiclePassage.id))
+                    .where(
+                        VehiclePassage.first_seen_at >= start_utc,
+                        VehiclePassage.first_seen_at <= end_utc,
+                    )
+                )
+                if camera_id and camera_id.strip():
+                    dq = dq.where(VehiclePassage.camera_id == camera_id.strip())
+                dq = dq.group_by(day_expr).order_by(day_expr.asc())
+
+                d_rows = session.execute(dq).all()
+                for d_val, cnt in d_rows:
+                    grouped_data.append({"date": str(d_val), "passage_count": int(cnt)})
+
+            elif grp in ("camera_and_type", "type_by_camera"):
+                cq = (
+                    select(VehiclePassage.camera_id, VehiclePassage.vehicle_type, func.count(VehiclePassage.id))
+                    .where(
+                        VehiclePassage.first_seen_at >= start_utc,
+                        VehiclePassage.first_seen_at <= end_utc,
+                    )
+                    .group_by(VehiclePassage.camera_id, VehiclePassage.vehicle_type)
+                    .order_by(VehiclePassage.camera_id.asc(), func.count(VehiclePassage.id).desc())
+                )
+                for cid, vtype, cnt in session.execute(cq).all():
+                    grouped_data.append({
+                        "camera_id": str(cid),
+                        "vehicle_type": str(vtype or "unknown"),
+                        "passage_count": int(cnt),
+                    })
+            else:
+                grouped_data = [{"vehicle_type": k, "passage_count": v} for k, v in type_counts.items()]
+
+            # 5. Period-over-period comparison
+            comparison: dict[str, Any] | None = None
+            if compare_with:
+                cw = compare_with.lower().strip()
+                shift_delta = timedelta(days=1) if cw in ("yesterday", "previous_day") else timedelta(days=7)
+                baseline_start = start_utc - shift_delta
+                baseline_end = end_utc - shift_delta
+
+                comp_q = select(func.count(VehiclePassage.id)).where(
+                    VehiclePassage.first_seen_at >= baseline_start,
+                    VehiclePassage.first_seen_at <= baseline_end,
+                )
+                if camera_id and camera_id.strip():
+                    comp_q = comp_q.where(VehiclePassage.camera_id == camera_id.strip())
+                baseline_total = session.scalar(comp_q) or 0
+
+                diff = total_passages - baseline_total
+                if baseline_total > 0:
+                    pct_change = round((diff / baseline_total) * 100, 1)
+                    trend = "tăng" if diff > 0 else ("giảm" if diff < 0 else "không đổi")
+                else:
+                    pct_change = None
+                    trend = "không có dữ liệu mốc đối chứng (baseline = 0)"
+
+                comparison = {
+                    "baseline_period": f"{cw} (lùi {shift_delta.days} ngày)",
+                    "baseline_total_passages": baseline_total,
+                    "current_total_passages": total_passages,
+                    "difference": diff,
+                    "percent_change": pct_change,
+                    "trend_description": trend,
+                    "zero_baseline": baseline_total == 0,
+                }
+
+            return {
+                "status": "success",
+                "time_range": time_label,
+                "timezone": "ICT (UTC+7)",
+                "interval_utc": {"start": start_utc.isoformat(), "end": end_utc.isoformat()},
+                "camera_filter": camera_id or "all_cameras",
+                "total_vehicle_passages": total_passages,
+                "unique_plates_count": unique_plates,
+                "vehicle_type_breakdown": type_counts,
+                "group_by": group_by,
+                "grouped_analytics": grouped_data,
+                "busiest_period": busiest_item,
+                "comparison": comparison,
+                "distinction_note": (
+                    "Số liệu 'lượt xe' (VehiclePassage) ghi nhận từng phiên xe di chuyển qua camera; "
+                    "không đo lường số xe hiện diện tĩnh (occupancy) tại một thời điểm."
+                ),
+            }
+    except Exception as exc:
+        return {"status": "error", "message": f"Failed to compute traffic analytics: {exc}"}
+    finally:
+        db.dispose()

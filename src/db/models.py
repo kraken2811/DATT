@@ -328,3 +328,21 @@ class KnowledgeChunk(Identity, Base):
     __table_args__ = (
         Index("ix_knowledge_chunks_doc_idx", "document_id", "chunk_index"),
     )
+
+
+class AgentConversation(Identity, Base):
+    """Registry of persistent user conversations for DATT AI Agent."""
+    __tablename__ = "agent_conversations"
+
+    thread_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(String(255), index=True)
+    title: Mapped[str] = mapped_column(String(255), default="Cuộc trò chuyện mới")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+    last_message_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+
+    __table_args__ = (
+        Index("ix_agent_conversations_user_updated", "user_id", "updated_at"),
+        Index("ix_agent_conversations_user_last_msg", "user_id", "last_message_at"),
+    )

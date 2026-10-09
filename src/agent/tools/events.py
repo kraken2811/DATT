@@ -1,11 +1,56 @@
 """Event search and inspection tools for DATT AI Agent."""
 
 from typing import Any
+from uuid import UUID
 from langchain_core.tools import tool
+from sqlalchemy import or_, select
+import yaml
 
 from src.agent.config import agent_config
-from src.db.database import Database
+from src.config.camera_config import DEFAULT_CONFIG_PATH
+from src.db.models import Camera
 from src.event_center.service import query as query_events
+
+
+def _camera_details(session, events):
+    """Add current camera configuration without changing recorded event facts."""
+    identifiers = {str(e["camera_id"]) for e in events if e.get("camera_id")}
+    uuids = []
+    for ident in identifiers:
+        try:
+            uuids.append(UUID(ident))
+        except ValueError:
+            pass
+    cameras = session.scalars(select(Camera).where(or_(Camera.id.in_(uuids), Camera.registry_key.in_(identifiers)))).all() if identifiers else []
+    lookup = {}
+    for camera in cameras:
+        for key in (str(camera.id), camera.id.hex, camera.registry_key):
+            if key:
+                lookup[key] = camera
+    # Static registry entries can predate database-managed cameras. Read only
+    # display metadata; never expose stream URLs or infer location from a name.
+    configured = {}
+    if identifiers - lookup.keys():
+        try:
+            data = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("cameras"), dict):
+                configured = data["cameras"]
+        except (OSError, yaml.YAMLError):
+            pass
+    for event in events:
+        ident = str(event.get("camera_id"))
+        camera = lookup.get(ident)
+        if camera is None:
+            try:
+                camera = lookup.get(str(UUID(ident)))
+            except ValueError:
+                pass
+        static = configured.get(ident)
+        static = static if isinstance(static, dict) else {}
+        event["camera_name"] = camera.name if camera else static.get("name")
+        event["camera_location"] = camera.location if camera else static.get("location")
+        event["camera_metadata_basis"] = "current_camera_configuration" if camera or static else "unavailable"
+    return events
 
 
 @tool
@@ -31,13 +76,13 @@ def get_event(event_id: str) -> dict[str, Any]:
                     try:
                         res = query_events(session, {}, ident=f"{prefix}:{clean_id}")
                         if res:
-                            return {"status": "success", "event": res}
+                            return {"status": "success", "event": _camera_details(session, [res])[0]}
                     except Exception:
                         continue
                 return {"status": "not_found", "message": f"Event '{clean_id}' not found"}
 
             res = query_events(session, {}, ident=clean_id)
-            return {"status": "success", "event": res}
+            return {"status": "success", "event": _camera_details(session, [res])[0]}
     except LookupError:
         return {"status": "not_found", "message": f"Event '{clean_id}' not found"}
     except Exception as exc:
@@ -108,11 +153,12 @@ def search_events(
     try:
         with db.transaction() as session:
             result = query_events(session, params)
+            events = _camera_details(session, result.get("events", []))
             return {
                 "status": "success",
                 "total": result.get("total", len(result.get("events", []))),
-                "count": len(result.get("events", [])),
-                "events": result.get("events", []),
+                "count": len(events),
+                "events": events,
             }
     except Exception as exc:
         return {"status": "error", "message": f"Event search failed: {exc}"}

@@ -35,10 +35,32 @@ LABELS = {
     'score': 'Điểm truy xuất', 'query': 'Nội dung tra cứu', 'count': 'Số bản ghi trả về', 'total': 'Tổng kết quả',
     'notes': 'Ghi chú', 'reason': 'Lý do', 'message': 'Thông báo', 'evidence_key': 'Mã bằng chứng',
     'vehicle_watchlist': 'Danh sách phương tiện', 'face_watchlist': 'Danh sách khuôn mặt', 'events': 'Sự kiện', 'event': 'Sự kiện',
+    'camera_name': 'Tên camera', 'camera_location': 'Vị trí camera theo cấu hình hiện tại',
+    'camera_metadata_basis': 'Cơ sở thông tin camera', 'face_total_matches': 'Tổng danh tính khuôn mặt phù hợp', 'face_has_more': 'Còn danh tính chưa hiển thị',
+    'from_time': 'Từ', 'to_time': 'Đến',
+    'time_range': 'Khoảng thời gian', 'camera_filter': 'Bộ lọc camera', 'grouped_analytics': 'Chi tiết phân nhóm',
+    'busiest_period': 'Thời điểm/camera cao điểm', 'hour_slot': 'Khung giờ', 'peak_hour': 'Giờ cao điểm',
+    'comparison': 'So sánh đối chứng', 'baseline_period': 'Mốc so sánh', 'baseline_total_passages': 'Lưu lượng mốc so sánh',
+    'current_total_passages': 'Lưu lượng kỳ hiện tại', 'difference': 'Chênh lệch', 'percent_change': 'Tỷ lệ thay đổi (%)',
+    'trend_description': 'Xu hướng', 'zero_baseline': 'Mốc đối chứng bằng 0', 'distinction_note': 'Lưu ý về số liệu',
+    'alerts': 'Danh sách cảnh báo', 'total_alerts': 'Tổng số cảnh báo', 'status_breakdown': 'Phân bố theo trạng thái',
+    'camera_breakdown': 'Phân bố theo camera', 'notifications': 'Danh sách thông báo', 'total_notifications': 'Tổng số thông báo',
+    'recipient_masked': 'Người nhận (đã ẩn)', 'retry_count': 'Số lần thử lại', 'last_error': 'Lỗi gần nhất',
+    'delivery_status': 'Trạng thái gửi', 'delivery_note': 'Lưu ý gửi',
 }
-HEADINGS = {'get_camera': 'Thông tin camera', 'get_camera_status': 'Trạng thái camera',
-            'get_event': 'Chi tiết sự kiện', 'search_events': 'Kết quả tra cứu sự kiện',
-            'get_event_statistics': 'Thống kê hệ thống', 'search_watchlist': 'Danh sách theo dõi', 'get_knowledge': 'Tài liệu liên quan'}
+HEADINGS = {
+    'get_camera': 'Thông tin camera',
+    'get_camera_status': 'Trạng thái camera',
+    'get_event': 'Chi tiết sự kiện',
+    'search_events': 'Kết quả tra cứu sự kiện',
+    'get_event_statistics': 'Thống kê hệ thống',
+    'search_watchlist': 'Danh sách theo dõi',
+    'get_knowledge': 'Tài liệu liên quan',
+    'get_traffic_analytics': 'Phân tích lưu lượng giao thông',
+    'get_alerts': 'Trung tâm cảnh báo',
+    'get_notifications_status': 'Trạng thái thông báo email',
+    'generate_operational_report': 'Báo cáo vận hành hệ thống',
+}
 
 
 def safe_result(value):
@@ -133,6 +155,8 @@ def format_result(name, data, args=None):
         if payload:
             sections.append('\n'.join(facts(payload)))
         return '\n\n'.join(sections)
+    if name == 'generate_operational_report' and 'report_markdown' in payload:
+        return str(payload['report_markdown'])
     intro = 'Đây là dữ liệu hệ thống trả về.'
     if name == 'search_events':
         records = payload.get('events')
@@ -160,6 +184,24 @@ def format_result(name, data, args=None):
         for alias, canonical in (('busiest_cameras_by_traffic', 'busiest_cameras'), ('most_crowded_camera', 'highest_traffic_camera')):
             if alias in payload and canonical in payload and payload[alias] == payload[canonical]:
                 payload.pop(alias)
+    elif name == 'get_traffic_analytics':
+        intro = f"Phân tích lưu lượng giao thông ({text(payload.get('time_range'))}): Tổng số lượt xe là {text(payload.get('total_vehicle_passages'))}."
+    elif name == 'get_alerts':
+        alerts = payload.get('alerts')
+        if alerts == []:
+            intro = 'Không có cảnh báo nào trong khoảng thời gian hoặc điều kiện tra cứu này.'
+        elif isinstance(alerts, list):
+            intro = f"Hệ thống ghi nhận {len(alerts)} cảnh báo (tổng số: {text(payload.get('total_alerts', len(alerts)))})."
+        else:
+            intro = 'Dữ liệu cảnh báo chưa khả dụng.'
+    elif name == 'get_notifications_status':
+        notifs = payload.get('notifications')
+        if notifs == []:
+            intro = 'Không có thông báo email nào được ghi nhận cho điều kiện tra cứu này.'
+        elif isinstance(notifs, list):
+            intro = f"Hệ thống ghi nhận {len(notifs)} lượt gửi thông báo (tổng số: {text(payload.get('total_notifications', len(notifs)))})."
+        else:
+            intro = 'Dữ liệu thông báo chưa khả dụng.'
     answer = intro + '\n\n' + '\n'.join(facts(payload) or ['Chưa có dữ liệu chi tiết để xác minh.'])
     if name == 'get_event_statistics':
         answer += '\n\nSố người/xe đang hiện diện tức thời không thể suy ra từ số liệu lịch sử; cần dữ liệu luồng video trực tiếp.'
@@ -179,11 +221,16 @@ def current_turn(messages):
     return user_text, results
 
 
-def format_tool_messages(messages):
-    user_text, results = current_turn(messages)
+def wants_json(user_text):
     explicit_json = bool(re.search(r'(?:trả|xuất|hiển thị|cho|return|output|show|give).{0,50}\bjson\b|^\s*json\s*(?:please|nhé|đi)?\s*$', user_text, re.I))
     if re.search(r'(?:không|đừng|no|without|not).{0,30}\bjson\b', user_text, re.I):
         explicit_json = False
+    return explicit_json
+
+
+def format_tool_messages(messages):
+    user_text, results = current_turn(messages)
+    explicit_json = wants_json(user_text)
     parsed, sections = [], []
     for message, args in results:
         try:

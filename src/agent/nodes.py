@@ -16,10 +16,18 @@ from langchain_core.messages import (
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.agent.config import agent_config
+from src.agent.face_history import respond as respond_face_history
 from src.agent.prompts import SYSTEM_PROMPT
 from src.agent.response_formatting import current_turn, format_tool_messages
 from src.agent.state import AgentState
 from src.agent.tools import ALL_AGENT_TOOLS
+from src.agent.vehicle_history import (
+    extract_plate,
+    find_prior_vehicle_context,
+    vehicle_filters,
+    respond as respond_vehicle_history,
+)
+from src.watchlists.vehicles import normalize_plate
 
 logger = logging.getLogger("datt.agent.nodes")
 
@@ -43,6 +51,18 @@ class MockChatModel:
 
         # 1. Check if prior message was a ToolMessage
         if isinstance(last_msg, ToolMessage) or (not tools_enabled and current_turn(messages)[1]):
+            _, results = current_turn(messages)
+            has_ops_tools = any(
+                getattr(m, "name", "") in ("get_alerts", "get_notifications_status", "get_traffic_analytics", "generate_operational_report")
+                for m, _ in results
+            )
+            if not has_ops_tools:
+                face_response = respond_face_history(messages, self.tools)
+                if face_response is not None:
+                    return face_response
+                vehicle_response = respond_vehicle_history(messages, self.tools)
+                if vehicle_response is not None:
+                    return vehicle_response
             tool_name = getattr(last_msg, "name", "")
             # Hybrid check: If first tool was get_camera_status and user asked for documentation guide
             user_msg = current_turn(messages)[0]
@@ -96,6 +116,112 @@ class MockChatModel:
                         return AIMessage(content=f"Mã ca trực (secret marker) của bạn là: {match.group(0)}")
             return AIMessage(content="Tôi không có thông tin về secret marker hoặc mã ca trực nào trong phiên hội thoại này.")
 
+        # Operational Report generation
+        if (
+            "báo cáo" in lower_q
+            or "tổng hợp hoạt động" in lower_q
+            or "tóm tắt hoạt động" in lower_q
+            or "report" in lower_q
+        ):
+            if "generate_operational_report" in self.tools:
+                period = "today"
+                if "7 ngày" in lower_q or "tuần" in lower_q:
+                    period = "7_days"
+                elif "24" in lower_q or "24h" in lower_q or "24 giờ" in lower_q:
+                    period = "24h"
+                elif "hôm qua" in lower_q:
+                    period = "yesterday"
+
+                cam_id = None
+                for word in content.split():
+                    clean_w = word.strip(".,:;!?\"'")
+                    if clean_w.upper().startswith("CAM") or clean_w.lower().startswith("camera"):
+                        cam_id = clean_w
+                        break
+
+                args = {"period": period}
+                if cam_id:
+                    args["camera_id"] = cam_id
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "generate_operational_report",
+                            "args": args,
+                            "id": f"call_{uuid.uuid4().hex[:8]}",
+                        }
+                    ],
+                )
+
+        # Multi-tool query (traffic + alerts + emails)
+        is_multi_tool = (
+            ("lượt xe" in lower_q or "lưu lượng" in lower_q or "xe" in lower_q)
+            and ("cảnh báo" in lower_q or "alert" in lower_q)
+            and ("email" in lower_q or "gửi" in lower_q or "thông báo" in lower_q)
+        )
+        if is_multi_tool:
+            cam_id = "camera_01"
+            for word in content.split():
+                clean_w = word.strip(".,:;!?\"'")
+                if clean_w.upper().startswith("CAM") or clean_w.lower().startswith("camera"):
+                    cam_id = clean_w
+                    break
+            tr = "today" if ("hôm nay" in lower_q or "hom nay" in lower_q) else ("yesterday" if "hôm qua" in lower_q else None)
+            calls = []
+            if "get_traffic_analytics" in self.tools:
+                args = {"camera_id": cam_id}
+                if tr:
+                    args["time_range"] = tr
+                calls.append({"name": "get_traffic_analytics", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"})
+            elif "get_event_statistics" in self.tools:
+                calls.append({"name": "get_event_statistics", "args": {"camera_id": cam_id}, "id": f"call_{uuid.uuid4().hex[:8]}"})
+
+            if "get_alerts" in self.tools:
+                args = {"camera_id": cam_id}
+                calls.append({"name": "get_alerts", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"})
+
+            if "get_notifications_status" in self.tools:
+                args = {"camera_id": cam_id}
+                calls.append({"name": "get_notifications_status", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"})
+
+            if calls:
+                return AIMessage(content="", tool_calls=calls)
+
+        # Combined Vehicle History + Watchlist Alert
+        plate_in_q = extract_plate(content)
+        if plate_in_q and ("cảnh báo" in lower_q or "alert" in lower_q) and any(w in lower_q for w in ("xuất hiện", "ở đâu", "lịch sử", "hôm qua", "hôm nay")):
+            norm_p = normalize_plate(plate_in_q)
+            calls = []
+            if "search_events" in self.tools:
+                filters = vehicle_filters(content)
+                calls.append({"name": "search_events", "args": {"plate": norm_p, "limit": 50, **filters}, "id": f"call_{uuid.uuid4().hex[:8]}"})
+            if "get_alerts" in self.tools:
+                calls.append({"name": "get_alerts", "args": {"plate_number": norm_p}, "id": f"call_{uuid.uuid4().hex[:8]}"})
+            if calls:
+                return AIMessage(content="", tool_calls=calls)
+
+        # Contextual Follow-up Alert / Notification
+        if any(w in lower_q for w in ("cảnh báo", "email", "thông báo")) and any(w in lower_q for w in ("có không", "gửi chưa", "thành công", "thất bại", "vậy có", "phát sinh", "không?")):
+            prior_p, prior_n = find_prior_vehicle_context(messages)
+            if prior_p:
+                if any(w in lower_q for w in ("email", "thông báo")) and "get_notifications_status" in self.tools:
+                    return AIMessage(
+                        content="",
+                        tool_calls=[{"name": "get_notifications_status", "args": {"plate_number": prior_p}, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+                    )
+                if "get_alerts" in self.tools:
+                    return AIMessage(
+                        content="",
+                        tool_calls=[{"name": "get_alerts", "args": {"plate_number": prior_p}, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+                    )
+
+        face_response = respond_face_history(messages, self.tools)
+        if face_response is not None:
+            return face_response
+        vehicle_response = respond_vehicle_history(messages, self.tools)
+        if vehicle_response is not None:
+            return vehicle_response
+
         # If tools are disabled (budget exhausted or unbound), synthesize directly
         if not tools_enabled:
             return AIMessage(
@@ -141,6 +267,123 @@ class MockChatModel:
                 ],
             )
 
+        # Traffic Analytics, Peak hours, Comparisons, and Categorized Counts
+        is_traffic_analytics = (
+            "khung giờ" in lower_q
+            or "cao điểm" in lower_q
+            or "so sánh" in lower_q
+            or "tăng hay giảm" in lower_q
+            or ("camera nào" in lower_q and ("nhiều lượt xe" in lower_q or "đông xe" in lower_q))
+            or ("tổng hợp" in lower_q and ("xe máy" in lower_q or "ô tô" in lower_q or "xe tải" in lower_q))
+            or ("lưu lượng" in lower_q and ("tuần này" in lower_q or "tuần qua" in lower_q or "7 ngày" in lower_q or "hôm nay" in lower_q or "hôm qua" in lower_q or "so với" in lower_q))
+            or ("lượt xe" in lower_q and ("tuần này" in lower_q or "tuần qua" in lower_q or "7 ngày" in lower_q or "hôm nay" in lower_q or "hôm qua" in lower_q))
+        )
+        if is_traffic_analytics and "get_traffic_analytics" in self.tools:
+            cam_id = None
+            for word in content.split():
+                clean_w = word.strip(".,:;!?\"'")
+                if clean_w.upper().startswith("CAM") or clean_w.lower().startswith("camera"):
+                    cam_id = clean_w
+                    break
+
+            grp = "camera"
+            if "khung giờ" in lower_q or "cao điểm" in lower_q or "giờ" in lower_q:
+                grp = "hour"
+            elif any(w in lower_q for w in ("xe máy", "ô tô", "xe tải", "loại xe")):
+                grp = "camera_and_type" if ("từng camera" in lower_q or "theo camera" in lower_q) else "type"
+            elif "ngày" in lower_q and "theo ngày" in lower_q:
+                grp = "day"
+
+            tr = None
+            if "7 ngày" in lower_q or "tuan qua" in lower_q or "tuần qua" in lower_q:
+                tr = "7_days"
+            elif "tuần này" in lower_q or "tuan nay" in lower_q:
+                tr = "this_week"
+            elif "tuần trước" in lower_q or "tuan truoc" in lower_q:
+                tr = "last_week"
+            elif "hôm nay" in lower_q or "hom nay" in lower_q:
+                tr = "today"
+            elif "hôm qua" in lower_q or "hom qua" in lower_q:
+                tr = "yesterday"
+
+            cw = None
+            if "hôm qua" in lower_q and ("so sánh" in lower_q or "hôm nay" in lower_q):
+                cw = "yesterday"
+                tr = "today"
+            elif "tuần trước" in lower_q or "tăng hay giảm" in lower_q:
+                cw = "last_week"
+                tr = "this_week"
+
+            args = {"group_by": grp}
+            if cam_id:
+                args["camera_id"] = cam_id
+            if tr:
+                args["time_range"] = tr
+            if cw:
+                args["compare_with"] = cw
+
+            return AIMessage(
+                content="",
+                tool_calls=[{"name": "get_traffic_analytics", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+            )
+
+        # Alert Center inspection
+        if "cảnh báo" in lower_q or "alert" in lower_q:
+            if "get_alerts" in self.tools:
+                st = None
+                if "chưa" in lower_q and ("xử lý" in lower_q or "gửi" in lower_q):
+                    st = "pending"
+                elif "thất bại" in lower_q or "lỗi" in lower_q:
+                    st = "failed"
+                elif "thành công" in lower_q:
+                    st = "sent"
+
+                cam_id = None
+                for word in content.split():
+                    clean_w = word.strip(".,:;!?\"'")
+                    if clean_w.upper().startswith("CAM") or clean_w.lower().startswith("camera"):
+                        cam_id = clean_w
+                        break
+
+                p_num = extract_plate(content)
+                args = {"limit": 20}
+                if st:
+                    args["status"] = st
+                if cam_id:
+                    args["camera_id"] = cam_id
+                if p_num:
+                    args["plate_number"] = normalize_plate(p_num)
+                if "watchlist" in lower_q:
+                    args["event_type"] = "all"
+
+                return AIMessage(
+                    content="",
+                    tool_calls=[{"name": "get_alerts", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+                )
+
+        # Email Notification delivery status
+        if ("email" in lower_q or "thông báo" in lower_q) and any(w in lower_q for w in ("gửi", "pending", "thử lại", "retry", "lỗi", "thất bại", "trạng thái")):
+            if "get_notifications_status" in self.tools:
+                st = None
+                if "chưa" in lower_q or "pending" in lower_q:
+                    st = "pending"
+                elif "lỗi" in lower_q or "thất bại" in lower_q:
+                    st = "failed"
+                elif "thành công" in lower_q or "đã gửi" in lower_q:
+                    st = "sent"
+
+                p_num = extract_plate(content)
+                args = {"limit": 20}
+                if st:
+                    args["status"] = st
+                if p_num:
+                    args["plate_number"] = normalize_plate(p_num)
+
+                return AIMessage(
+                    content="",
+                    tool_calls=[{"name": "get_notifications_status", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+                )
+
         # B. Event counts today / Statistics / Busiest / most crowded camera
         if (
             "bao nhiêu sự kiện" in lower_q
@@ -168,7 +411,7 @@ class MockChatModel:
             if "biển số" in lower_q or "30a-" in lower_q:
                 import re
                 match = re.search(r"[0-9]{2}[A-Za-z]-[0-9]{4,5}", content)
-                target = match.group(0) if match else "30A-12345"
+                target = match.group(0) if match else None
             args = {"target": target, "limit": 10} if target else {"limit": 10}
             return AIMessage(
                 content="",
@@ -231,7 +474,10 @@ class MockChatModel:
                 ],
             )
 
-        # Default conversational greeting
+        # Only greetings receive the welcome; operational questions ask for detail.
+        import re
+        if content.strip() and not re.fullmatch(r"(?:xin chào|chào(?: bạn)?|hello|hi|hey)[\s.!?]*", lower_q.strip()):
+            return AIMessage(content="Bạn có thể nêu rõ tên hoặc ID người, camera, biển số hay khoảng thời gian cần tra cứu để tôi kiểm tra dữ liệu chính xác hơn.")
         return AIMessage(
             content="Xin chào! Tôi là Trợ lý Vận hành Hệ thống DATT. Tôi có thể hỗ trợ bạn kiểm tra camera, tra cứu sự kiện, danh sách theo dõi, thống kê phương tiện hoặc tra cứu tài liệu hướng dẫn khắc phục sự cố."
         )

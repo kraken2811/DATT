@@ -1,6 +1,7 @@
 """LangGraph StateGraph orchestration for DATT Single AI Agent."""
 
 import logging
+import uuid
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -82,8 +83,9 @@ def run_agent_message(
     config = make_thread_config(thread_id, user_id=user_id)
     eff_auth = is_authenticated if is_authenticated is not None else (not user_id.startswith("unauth_"))
 
+    user_message = HumanMessage(content=content, id=uuid.uuid4().hex)
     initial_input = {
-        "messages": [HumanMessage(content=content)],
+        "messages": [user_message],
         "thread_id": thread_id,
         "user_id": user_id,
         "is_authenticated": eff_auth,
@@ -108,6 +110,9 @@ def run_agent_message(
 
     # Extract conversation outputs
     messages = final_state.get("messages", [])
+    # Checkpoints retain prior turns; response metadata belongs to this input only.
+    start = next((i + 1 for i, msg in enumerate(messages) if msg.id == user_message.id), len(messages))
+    messages = messages[start:]
     reply_content = ""
     tools_called = []
     sources = []
@@ -128,7 +133,8 @@ def run_agent_message(
                 reply_content = str(msg.content)
         elif isinstance(msg, ToolMessage):
             tool_name = getattr(msg, "name", "tool")
-            tools_called.append(tool_name)
+            if tool_name not in tools_called:
+                tools_called.append(tool_name)
             if tool_name == "get_knowledge":
                 try:
                     import json
