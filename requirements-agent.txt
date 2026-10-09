@@ -7,3 +7,4 @@ pgvector>=0.3.6
 fastembed>=0.3.0
 langchain-google-genai>=2.0.0
 langchain-openai>=0.2.0
+langchain-text-splitters>=0.3.0

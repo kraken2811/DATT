@@ -53,7 +53,7 @@ def test_fastembed_uses_gpu_ort_without_losing_other_dependencies():
 
 def test_agent_dependencies_are_provisioned():
     names = {install.Requirement(name).name for _, stage in install.STAGES for name in stage}
-    assert {'langchain-core', 'langgraph', 'langgraph-checkpoint-postgres', 'psycopg-pool',
+    assert {'langchain-core', 'langchain-text-splitters', 'langgraph', 'langgraph-checkpoint-postgres', 'psycopg-pool',
             'fastembed', 'langchain-google-genai', 'langchain-openai'} <= names
 
 
@@ -140,3 +140,21 @@ def test_verified_runner_is_not_stopped_for_another_process_listener(monkeypatch
     with pytest.raises(RuntimeError, match='does not belong'):
         install.stop_owned_service_for_install()
     assert calls == []
+
+
+def test_direct_script_can_import_checkout_modules(tmp_path):
+    import subprocess
+    import sys
+    code = (
+        "import runpy, sys; from pathlib import Path; "
+        "root = Path(sys.argv[1]).resolve().parents[1]; "
+        "sys.path = [p for p in sys.path if p and Path(p).resolve() != root]; "
+        "ns = runpy.run_path(sys.argv[1], run_name='installer_probe'); "
+        "from src.ops import process; "
+        "assert process.__file__ is not None"
+    )
+    result = subprocess.run(
+        [sys.executable, '-c', code, str(install.ROOT / 'scripts/colab_install.py')],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr

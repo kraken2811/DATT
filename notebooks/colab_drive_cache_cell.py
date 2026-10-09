@@ -40,34 +40,49 @@ else:
     CACHE = None
     print('DRIVE_CACHE=DISABLED (running in standalone mode)')
 
-# Source restoration / fallback
-if not ROOT.exists():
-    restored = False
-    if CACHE is not None:
-        mirror = CACHE / 'dev.git'
-        try:
-            if not mirror.exists():
-                subprocess.run(['git', 'clone', '--mirror', remote, str(mirror)], check=True, timeout=180)
-                print('SOURCE_CACHE=CREATED')
-            else:
-                subprocess.run(['git', '-C', str(mirror), 'remote', 'update', '--prune'], check=True, timeout=120)
-                print('SOURCE_CACHE=UPDATED')
-            subprocess.run(['git', 'clone', '--branch', 'dev', str(mirror), str(ROOT)], check=True, timeout=120)
-            subprocess.run(['git', '-C', str(ROOT), 'remote', 'set-url', 'origin', remote], check=True)
-            print('SOURCE_CACHE=RESTORED')
-            restored = True
-        except Exception as exc:
-            print(f'SOURCE_CACHE_WARNING: Mirror clone failed ({exc}); falling back to direct clone.')
-            if ROOT.exists():
-                shutil.rmtree(ROOT, ignore_errors=True)
-    if not restored and not ROOT.exists():
-        try:
-            subprocess.run(['git', 'clone', '--branch', 'dev', remote, str(ROOT)], check=True, timeout=180)
-            print('SOURCE_DIRECT_CLONE=RESTORED')
-        except Exception as exc:
-            print(f'SOURCE_CLONE_ERROR: {exc}')
-else:
-    print('SOURCE_CACHE=EXISTING_RUNTIME')
+# Git packfiles must live on Colab's local disk, not Drive's mounted filesystem.
+def refresh_source(root, remote):
+    root = Path(root)
+    def git(*args):
+        result = subprocess.run(['git', *args], cwd=root, capture_output=True, text=True, timeout=180)
+        if result.returncode:
+            raise RuntimeError('Source update failed; inspect Git privately. Existing files preserved.')
+        return result.stdout.strip()
+
+    if not root.exists():
+        result = subprocess.run(['git', 'clone', '--branch', 'dev', remote, str(root)],
+                                capture_output=True, text=True, timeout=180)
+        if result.returncode:
+            raise RuntimeError('Direct source clone failed. Partial checkout preserved for inspection.')
+        print('SOURCE_DIRECT_CLONE=RESTORED')
+    else:
+        if not (root / '.git').is_dir():
+            raise RuntimeError('Existing source directory is not a Git checkout; no files replaced.')
+        if git('status', '--porcelain', '--untracked-files=no'):
+            raise RuntimeError('Tracked local changes exist; commit/stash before updating. No changes discarded.')
+        git('fetch', remote, 'refs/heads/dev:refs/remotes/origin/dev')
+        local = git('rev-parse', 'HEAD')
+        target = git('rev-parse', 'origin/dev')
+        ancestor = subprocess.run(['git', 'merge-base', '--is-ancestor', local, target], cwd=root,
+                                  capture_output=True, text=True, timeout=30)
+        if ancestor.returncode:
+            raise RuntimeError('Checkout diverges from dev; no reset performed.')
+        if local != target:
+            stop = subprocess.run([sys.executable, str(root / 'scripts/datt.py'), 'stop', '--timeout', '120'],
+                                  cwd=root, capture_output=True, text=True, timeout=150)
+            if stop.returncode:
+                raise RuntimeError('Owned service could not stop safely; source unchanged.')
+            git('switch', 'dev')
+            git('merge', '--ff-only', 'origin/dev')
+        elif git('branch', '--show-current') != 'dev':
+            git('switch', 'dev')
+        print('SOURCE_DIRECT_REFRESH=PASS')
+    git('remote', 'set-url', 'origin', remote)
+    revision = git('rev-parse', 'HEAD')
+    print('SOURCE_COMMIT=' + revision)
+    return revision
+
+refresh_source(ROOT, remote)
 
 # Model restoration from cache
 if not ROOT.is_dir():
@@ -144,3 +159,7 @@ def save_model_cache():
         print(f'MODEL_CACHE_SAVED={count}')
     except Exception as exc:
         print(f'MODEL_CACHE_SAVE_WARNING: {exc}')
+
+# Names consumed by the compact production-startup cell.
+MODEL_DIR = model_dir
+MODEL_CACHE = CACHE / "models" if CACHE is not None else Path("/content/datt-model-cache")

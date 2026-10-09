@@ -9,6 +9,9 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
 ROOT = Path(__file__).resolve().parents[1]
+# Direct script execution places scripts/, rather than the checkout, on sys.path.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 TORCH = {'torch': '2.11.0+cu126', 'torchvision': '0.26.0+cu126', 'torchaudio': '2.11.0+cu126'}
 # Wheel-backed versions checked on Python 3.13. Keep the existing ByteTrack API.
 PINS = {'ultralytics': '8.4.171', 'supervision': '0.30.3', 'insightface': '2.0',
@@ -17,7 +20,7 @@ PINS = {'ultralytics': '8.4.171', 'supervision': '0.30.3', 'insightface': '2.0',
 STAGES = (
     ('backend', ('fastapi', 'uvicorn[standard]', 'python-multipart', 'httpx', 'python-dotenv', 'psutil', 'PyYAML')),
     ('database', ('SQLAlchemy', 'alembic', 'psycopg[binary]', 'pgvector', 'fsspec', 'requests')),
-    ('agent', ('langchain-core>=0.3.0', 'langgraph>=0.2.0',
+    ('agent', ('langchain-core>=0.3.0', 'langchain-text-splitters>=0.3.0', 'langgraph>=0.2.0',
                'langgraph-checkpoint-postgres>=2.0.0', 'psycopg-pool>=3.2.0',
                'langchain-google-genai>=2.0.0', 'langchain-openai>=0.2.0')),
     ('vision', ('numpy', 'opencv-python-headless', 'ultralytics', 'supervision')),
@@ -238,9 +241,9 @@ def main():
     result = subprocess.run([sys.executable, '-c',
         'import torch, torchvision, onnxruntime, ultralytics, insightface, easyocr, cv2, numpy; '
         'import sqlalchemy, alembic, psycopg, pgvector, fastapi, uvicorn, dotenv, httpx, yaml; '
-        'import langchain_core, langgraph, langgraph.checkpoint.postgres, psycopg_pool, fastembed; '
+        'import langchain_core, langchain_text_splitters, langgraph, langgraph.checkpoint.postgres, psycopg_pool, fastembed; '
         'import langchain_google_genai, langchain_openai; '
-        'from src.ui.web_server import app; assert any(r.path == "/api/agent/chat" for r in app.routes); '
+        'from src.ui.web_server import app; assert "post" in app.openapi()["paths"].get("/api/agent/chat", {}); '
         'from src.tracker.bytetrack_tracker import PersonTracker; PersonTracker(); '
         'assert torch.cuda.is_available(); '
         'x=torch.arange(4,device="cuda"); assert (x*x).sum().item()==14; '
