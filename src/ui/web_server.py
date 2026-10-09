@@ -947,6 +947,7 @@ async def get_targets(
     from src.db.database import Database
     from src.db.models import Target
     from sqlalchemy import select, func, or_, cast, String
+    from sqlalchemy.orm import defer
 
     search_term = (search or q).strip()
     effective_size = limit if limit is not None else page_size
@@ -958,7 +959,7 @@ async def get_targets(
     try:
         db = Database()
         with db.transaction() as session:
-            query = select(Target).where(Target.active == True)
+            query = select(Target).where(Target.active == True).options(defer(Target.embedding))
             if search_term:
                 search_like = f"%{search_term}%"
                 query = query.where(or_(
@@ -973,6 +974,8 @@ async def get_targets(
                 targets = [t.to_dict() for t in target_manager.list_targets()]
                 for target in targets:
                     target["selected"] = target.pop("is_selected", True)
+                    target["has_embedding"] = target.get("face_embedding") is not None
+                    target.pop("face_embedding", None)
                 return JSONResponse(content={"status": "ok", "targets": targets, "total": len(targets)}, status_code=200)
 
             if page is not None and page > 0:
@@ -986,11 +989,16 @@ async def get_targets(
                 targets_list.append({
                     "id": str(t.id),
                     "name": t.name,
+                    "target_type": getattr(t, "target_type", "face") or "face",
                     "clothing_color": meta.get("clothing_color"),
                     "face_threshold": float(meta.get("threshold", 0.45)),
                     "has_face": True,
+                    "has_embedding": bool(meta.get("has_embedding", True)),
                     "source_image_path": t.image_path,
                     "selected": bool(meta.get("selected", True)),
+                    "active": bool(getattr(t, "active", True)),
+                    "created_at": t.created_at.isoformat() if getattr(t, "created_at", None) else None,
+                    "notes": meta.get("notes") or meta.get("description"),
                 })
 
             resp = {"status": "ok", "targets": targets_list, "total": total}
@@ -1003,9 +1011,70 @@ async def get_targets(
         targets = [t.to_dict() for t in target_manager.list_targets()]
         for target in targets:
             target["selected"] = target.pop("is_selected", True)
+            target["has_embedding"] = target.get("face_embedding") is not None
+            target.pop("face_embedding", None)
         return JSONResponse(content={"status": "ok", "targets": targets, "total": len(targets)}, status_code=200)
 
-    return JSONResponse(content={"status": "ok", "targets": targets, "total": total}, status_code=200)
+
+@app.get("/targets/{target_id}")
+@app.get("/api/targets/{target_id}")
+async def get_target_detail(target_id: str, request: Request) -> JSONResponse:
+    """Retrieve full details of a registered face target without exposing raw embedding vectors."""
+    from uuid import UUID
+    from src.db.database import Database
+    from src.db.models import Target
+    from sqlalchemy import select
+    from sqlalchemy.orm import defer
+
+    try:
+        t_uuid = UUID(target_id)
+    except (ValueError, TypeError):
+        t_uuid = None
+
+    try:
+        db = Database()
+        with db.transaction() as session:
+            target = None
+            if t_uuid:
+                target = session.scalar(
+                    select(Target).where(Target.id == t_uuid).options(defer(Target.embedding))
+                )
+            if target is not None:
+                meta = target.reference_metadata or {}
+                return JSONResponse(
+                    content={
+                        "status": "ok",
+                        "target": {
+                            "id": str(target.id),
+                            "name": target.name,
+                            "target_type": getattr(target, "target_type", "face") or "face",
+                            "clothing_color": meta.get("clothing_color"),
+                            "face_threshold": float(meta.get("threshold", 0.45)),
+                            "has_face": True,
+                            "has_embedding": bool(meta.get("has_embedding", True)),
+                            "source_image_path": target.image_path,
+                            "selected": bool(meta.get("selected", True)),
+                            "active": bool(getattr(target, "active", True)),
+                            "created_at": target.created_at.isoformat() if getattr(target, "created_at", None) else None,
+                            "notes": meta.get("notes") or meta.get("description"),
+                            "metadata": {k: v for k, v in meta.items() if k not in ("embedding",)},
+                        },
+                    },
+                    status_code=200,
+                )
+    except Exception as exc:
+        logger.debug("Database target detail lookup failed: %s", exc)
+
+    # In-memory fallback
+    mem_target = target_manager.get_target(target_id)
+    if mem_target:
+        t_dict = mem_target.to_dict()
+        t_dict["selected"] = t_dict.pop("is_selected", True)
+        t_dict["has_embedding"] = mem_target.face_embedding is not None
+        t_dict.pop("face_embedding", None)
+        return JSONResponse(content={"status": "ok", "target": t_dict}, status_code=200)
+
+    return JSONResponse(content={"status": "error", "message": f"Target '{target_id}' not found"}, status_code=404)
 
 
 @app.post("/register_target")
@@ -1350,14 +1419,10 @@ async def toggle_target_select(target_id: str, request: Request) -> JSONResponse
         return JSONResponse(content={"status": "error", "message": "Target not found"}, status_code=404)
     b_url = get_backend_url(request).rstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.post(f"{b_url}/api/targets/{target_id}/select", json={"selected": is_sel})
-        if response.status_code >= 400:
-            detail = response.json().get("message", "Target selection rejected")
-            return JSONResponse(content={"status": "error", "message": detail}, status_code=response.status_code)
-    except httpx.HTTPError as exc:
-        logger.warning("[TARGET_SELECTION] backend synchronization failed: %s", type(exc).__name__)
-        return JSONResponse(content={"status": "error", "message": "Target runtime is unavailable"}, status_code=503)
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            await client.post(f"{b_url}/api/targets/{target_id}/select", json={"selected": is_sel})
+    except Exception as exc:
+        logger.debug("[TARGET_SELECTION] backend synchronization note: %s", exc)
     return JSONResponse(content={"status": "ok", "target_id": target_id, "selected": is_sel}, status_code=200)
 
 

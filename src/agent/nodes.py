@@ -44,6 +44,18 @@ def operational_filters(question):
     return dates
 
 
+def find_prior_face_context(messages: list[BaseMessage]) -> tuple[str | None, str | None, str | None]:
+    """Find resolved target_id, latest_event_id, and name from recent face history exchange."""
+    for m in reversed(messages[:-1]):
+        if isinstance(m, AIMessage):
+            tid = m.additional_kwargs.get("face_history_target_id")
+            eid = m.additional_kwargs.get("face_history_latest_event_id")
+            name = m.additional_kwargs.get("face_history_name")
+            if tid or eid:
+                return str(tid) if tid else None, str(eid) if eid else None, str(name) if name else None
+    return None, None, None
+
+
 class MockChatModel:
     """Deterministic rule-based mock chat model for tests and offline environments."""
 
@@ -64,11 +76,13 @@ class MockChatModel:
         # 1. Check if prior message was a ToolMessage
         if isinstance(last_msg, ToolMessage) or (not tools_enabled and current_turn(messages)[1]):
             _, results = current_turn(messages)
+            turn_start = max((i for i, m in enumerate(messages) if isinstance(m, HumanMessage) and not str(m.content).startswith('[Hệ thống: Hạn mức')), default=-1)
+            is_face_routed = any(isinstance(m, AIMessage) and m.additional_kwargs.get('face_history') for m in messages[turn_start + 1:])
             has_ops_tools = any(
                 getattr(m, "name", "") in ("get_alerts", "get_notifications_status", "get_traffic_analytics", "generate_operational_report")
                 for m, _ in results
             )
-            if not has_ops_tools:
+            if is_face_routed or not has_ops_tools:
                 face_response = respond_face_history(messages, self.tools)
                 if face_response is not None:
                     return face_response
@@ -168,7 +182,7 @@ class MockChatModel:
         is_multi_tool = (
             ("lượt xe" in lower_q or "lưu lượng" in lower_q or "xe" in lower_q)
             and ("cảnh báo" in lower_q or "alert" in lower_q)
-            and ("email" in lower_q or "gửi" in lower_q or "thông báo" in lower_q)
+            and ("email" in lower_q or "mail" in lower_q or "gửi" in lower_q or "thông báo" in lower_q)
         )
         if is_multi_tool:
             cam_id = op_filters.get("camera_id")
@@ -207,10 +221,10 @@ class MockChatModel:
                 return AIMessage(content="", tool_calls=calls)
 
         # Contextual Follow-up Alert / Notification
-        if any(w in lower_q for w in ("cảnh báo", "email", "thông báo")) and any(w in lower_q for w in ("có không", "gửi chưa", "thành công", "thất bại", "vậy có", "phát sinh", "không?")):
+        if any(w in lower_q for w in ("cảnh báo", "email", "mail", "thông báo")) and any(w in lower_q for w in ("có không", "gửi chưa", "thành công", "thất bại", "vậy có", "phát sinh", "không?")):
             prior_p, prior_n = find_prior_vehicle_context(messages)
             if prior_p:
-                if any(w in lower_q for w in ("email", "thông báo")) and "get_notifications_status" in self.tools:
+                if any(w in lower_q for w in ("email", "mail", "thông báo")) and "get_notifications_status" in self.tools:
                     return AIMessage(
                         content="",
                         tool_calls=[{"name": "get_notifications_status", "args": {"plate_number": prior_p, **op_filters}, "id": f"call_{uuid.uuid4().hex[:8]}"}],
@@ -219,6 +233,23 @@ class MockChatModel:
                     return AIMessage(
                         content="",
                         tool_calls=[{"name": "get_alerts", "args": {"plate_number": prior_p, **op_filters}, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+                    )
+            prior_tid, prior_eid, prior_name = find_prior_face_context(messages)
+            if prior_tid or prior_eid:
+                args = {"limit": 10, **op_filters}
+                if prior_eid:
+                    args["event_id"] = prior_eid
+                if prior_tid:
+                    args["target_id"] = prior_tid
+                if any(w in lower_q for w in ("email", "mail", "thông báo")) and "get_notifications_status" in self.tools:
+                    return AIMessage(
+                        content="",
+                        tool_calls=[{"name": "get_notifications_status", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+                    )
+                if "get_alerts" in self.tools:
+                    return AIMessage(
+                        content="",
+                        tool_calls=[{"name": "get_alerts", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"}],
                     )
 
         face_response = respond_face_history(messages, self.tools)
@@ -329,7 +360,7 @@ class MockChatModel:
             )
 
         # Alert Center inspection
-        if ("cảnh báo" in lower_q or "alert" in lower_q) and not any(w in lower_q for w in ("email", "thông báo")):
+        if ("cảnh báo" in lower_q or "alert" in lower_q) and not any(w in lower_q for w in ("email", "mail", "thông báo")):
             if "get_alerts" in self.tools:
                 st = None
                 if "chưa" in lower_q and ("xử lý" in lower_q or "gửi" in lower_q):
@@ -358,7 +389,7 @@ class MockChatModel:
                 )
 
         # Email Notification delivery status
-        if ("email" in lower_q or "thông báo" in lower_q) and any(w in lower_q for w in ("gửi", "pending", "thử lại", "retry", "lỗi", "thất bại", "trạng thái")):
+        if ("email" in lower_q or "mail" in lower_q or "thông báo" in lower_q) and any(w in lower_q for w in ("gửi", "pending", "thử lại", "retry", "lỗi", "thất bại", "trạng thái")):
             if "get_notifications_status" in self.tools:
                 st = None
                 if "chưa" in lower_q or "pending" in lower_q:

@@ -45,6 +45,13 @@ export function getTargetImageUrl(targetId) {
   return `/api/targets/${encodeURIComponent(targetId)}/image`;
 }
 
+export async function fetchTargetDetail(targetId, signal = null) {
+  return apiRequest(`/api/targets/${encodeURIComponent(targetId)}`, {
+    signal,
+    cacheTtlMs: 5000,
+  });
+}
+
 // ==========================================
 // Vehicle Watchlist
 // ==========================================

@@ -14,6 +14,10 @@ import {
 } from '../api/watchlists';
 import { useToast } from '../context/ToastContext';
 import { LoadingSpinner, EmptyState, ErrorState } from '../components/StatusStates';
+import { AuthenticatedImage } from '../components/AuthenticatedImage';
+import { FaceDetailModal } from '../components/FaceDetailModal';
+import { VehicleDetailModal } from '../components/VehicleDetailModal';
+import { DeleteConfirmModal } from '../components/DeleteConfirmModal';
 import {
   Users,
   Car,
@@ -141,14 +145,46 @@ export function WatchlistPage() {
     }
   };
 
-  const handleDeleteFace = async (id, name) => {
-    if (!window.confirm(`Bạn có chắc chắn muốn xóa đối tượng "${name}"?`)) return;
+  // Delete Confirmation Modal State
+  const [deleteTargetInfo, setDeleteTargetInfo] = useState(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  // Detail Modals State
+  const [selectedFaceTarget, setSelectedFaceTarget] = useState(null);
+  const [selectedVehicle, setSelectedVehicle] = useState(null);
+
+  const handleDeleteFaceRequest = (id, name) => {
+    setDeleteTargetInfo({ type: 'face', id, name });
+  };
+
+  const handleDeleteVehicleRequest = (id, plate) => {
+    setDeleteTargetInfo({ type: 'vehicle', id, name: plate });
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTargetInfo) return;
+    setIsDeleting(true);
     try {
-      await deleteTarget(id);
-      showToast(`Đã xóa đối tượng: ${name}`, 'success');
-      loadFaceTargets();
+      if (deleteTargetInfo.type === 'face') {
+        await deleteTarget(deleteTargetInfo.id);
+        showToast(`Đã xóa đối tượng: ${deleteTargetInfo.name}`, 'success');
+        if (selectedFaceTarget?.id === deleteTargetInfo.id) {
+          setSelectedFaceTarget(null);
+        }
+        loadFaceTargets();
+      } else {
+        await deleteVehicle(deleteTargetInfo.id);
+        showToast(`Đã xóa phương tiện: ${deleteTargetInfo.name}`, 'success');
+        if (selectedVehicle?.id === deleteTargetInfo.id) {
+          setSelectedVehicle(null);
+        }
+        loadVehicles();
+      }
+      setDeleteTargetInfo(null);
     } catch (err) {
       showToast(`Lỗi xóa: ${err.message}`, 'error');
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -158,10 +194,41 @@ export function WatchlistPage() {
       setFaceTargets((prev) =>
         prev.map((t) => (t.id === id ? { ...t, selected: resp.selected } : t))
       );
-      showToast(`Đã cập nhật trạng thái tìm kiếm`, 'info');
+      if (selectedFaceTarget?.id === id) {
+        setSelectedFaceTarget((prev) => (prev ? { ...prev, selected: resp.selected } : null));
+      }
+      showToast('Đã cập nhật trạng thái tìm kiếm', 'info');
     } catch (err) {
       showToast(`Lỗi: ${err.message}`, 'error');
     }
+  };
+
+  const getWatchlistStatus = () => {
+    const currentLoading = activeTab === 'face' ? faceLoading : vehicleLoading;
+    const currentError = activeTab === 'face' ? faceError : vehicleError;
+
+    if (currentError) {
+      const errStr = String(currentError).toLowerCase();
+      if (errStr.includes('401') || errStr.includes('xác thực') || errStr.includes('unauthorized')) {
+        return { className: 'disconnected', label: 'CẦN XÁC THỰC' };
+      }
+      if (errStr.includes('403') || errStr.includes('forbidden') || errStr.includes('quyền')) {
+        return { className: 'disconnected', label: 'CHƯA CÓ QUYỀN' };
+      }
+      if (errStr.includes('500') || errStr.includes('503') || errStr.includes('database')) {
+        return { className: 'disconnected', label: 'LỖI MÁY CHỦ' };
+      }
+      if (errStr.includes('network') || errStr.includes('failed to fetch')) {
+        return { className: 'disconnected', label: 'MẤT KẾT NỐI' };
+      }
+      return { className: 'disconnected', label: 'KHÔNG THỂ TRUY XUẤT' };
+    }
+
+    if (currentLoading) {
+      return { className: 'connecting', label: 'ĐANG TẢI...' };
+    }
+
+    return { className: 'live', label: 'ĐÃ KẾT NỐI' };
   };
 
   // ==========================================
@@ -312,7 +379,10 @@ export function WatchlistPage() {
 
   return (
     <>
-      <Header title="Danh sách Theo dõi (Watchlist)" />
+      <Header
+        title="Danh sách Theo dõi (Watchlist)"
+        status={getWatchlistStatus()}
+      />
 
       <div className="page-container" id="watchlistPage">
         {/* Navigation Tabs Header */}
@@ -384,7 +454,7 @@ export function WatchlistPage() {
                 </div>
 
                 <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                  Tổng cộng: <strong>{faceTotal}</strong> đối tượng
+                  Tổng cộng: <strong>{faceLoading ? '—' : faceTotal}</strong> đối tượng
                 </div>
               </div>
             </div>
@@ -419,7 +489,7 @@ export function WatchlistPage() {
                       }}
                     >
                       <div style={{ display: 'flex', gap: '14px', alignItems: 'center' }}>
-                        <img
+                        <AuthenticatedImage
                           src={getTargetImageUrl(t.id)}
                           alt={t.name}
                           style={{
@@ -430,17 +500,27 @@ export function WatchlistPage() {
                             border: '2px solid var(--border-card)',
                             background: '#000',
                           }}
-                          onError={(e) => {
-                            e.currentTarget.src =
-                              'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="%2364748b" stroke-width="2"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 1 0-16 0"/></svg>';
-                          }}
                         />
 
                         <div style={{ flex: 1, overflow: 'hidden' }}>
-                          <h4 style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--text-primary)', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
-                            {t.name}
-                          </h4>
-                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                            <h4 style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--text-primary)', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap', margin: 0 }}>
+                              {t.name}
+                            </h4>
+                            <span
+                              className="tag-badge"
+                              style={{
+                                background: t.selected ? 'rgba(16, 185, 129, 0.15)' : 'var(--bg-hover)',
+                                color: t.selected ? '#10b981' : 'var(--text-muted)',
+                                fontSize: '0.68rem',
+                                padding: '1px 5px',
+                                flexShrink: 0,
+                              }}
+                            >
+                              {t.selected ? 'THEO DÕI' : 'TẮT'}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
                             ID: {t.id ? t.id.slice(0, 8) : 'N/A'}...
                           </div>
                           {t.clothing_color && (
@@ -454,21 +534,24 @@ export function WatchlistPage() {
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid var(--border-subtle)', paddingTop: '10px' }}>
                         <button
                           type="button"
-                          className={`btn btn-sm ${t.selected ? 'btn-primary' : 'btn-secondary'}`}
-                          style={{ fontSize: '0.75rem', padding: '4px 10px' }}
-                          onClick={() => handleToggleFace(t.id, t.selected)}
+                          className="btn btn-secondary btn-sm"
+                          style={{ fontSize: '0.8rem', padding: '6px 12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                          onClick={() => setSelectedFaceTarget(t)}
+                          id={`btnViewDetailFace-${t.id}`}
                         >
-                          {t.selected ? 'Đang kích hoạt' : 'Tắt tìm kiếm'}
+                          <Eye size={16} />
+                          <span>Xem chi tiết</span>
                         </button>
 
                         <button
                           type="button"
-                          className="btn btn-danger btn-icon btn-sm"
-                          onClick={() => handleDeleteFace(t.id, t.name)}
-                          title="Xóa đối tượng"
-                          aria-label="Xóa đối tượng"
+                          className="btn btn-danger btn-icon"
+                          onClick={() => handleDeleteFaceRequest(t.id, t.name)}
+                          title={`Xóa đối tượng ${t.name}`}
+                          aria-label={`Xóa đối tượng ${t.name}`}
+                          id={`btnDeleteFace-${t.id}`}
                         >
-                          <Trash2 size={14} />
+                          <Trash2 size={18} />
                         </button>
                       </div>
                     </div>
@@ -557,6 +640,10 @@ export function WatchlistPage() {
                   <option value="active">Đang hoạt động (Active)</option>
                   <option value="disabled">Đã vô hiệu (Disabled)</option>
                 </select>
+
+                <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                  Tổng cộng: <strong>{vehicleLoading ? '—' : vehicleTotal}</strong> phương tiện
+                </div>
               </div>
             </div>
 
@@ -632,24 +719,36 @@ export function WatchlistPage() {
                           </span>
                         </td>
                         <td style={{ textAlign: 'center' }}>
-                          <div style={{ display: 'flex', gap: '6px', justifyContent: 'center' }}>
+                          <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', alignItems: 'center' }}>
                             <button
                               type="button"
-                              className="btn btn-secondary btn-icon btn-sm"
-                              onClick={() => openEditVehicleModal(veh)}
-                              title="Sửa thông tin"
-                              aria-label="Sửa thông tin phương tiện"
+                              className="btn btn-secondary btn-icon"
+                              onClick={() => setSelectedVehicle(veh)}
+                              title={`Xem chi tiết phương tiện ${veh.plate_number}`}
+                              aria-label={`Xem chi tiết phương tiện ${veh.plate_number}`}
+                              id={`btnViewDetailVehicle-${veh.id}`}
                             >
-                              <Edit size={14} />
+                              <Eye size={18} />
                             </button>
                             <button
                               type="button"
-                              className="btn btn-danger btn-icon btn-sm"
-                              onClick={() => handleDeleteVehicle(veh.id, veh.plate_number)}
-                              title="Xóa phương tiện"
-                              aria-label="Xóa phương tiện"
+                              className="btn btn-secondary btn-icon"
+                              onClick={() => openEditVehicleModal(veh)}
+                              title={`Sửa thông tin phương tiện ${veh.plate_number}`}
+                              aria-label={`Sửa thông tin phương tiện ${veh.plate_number}`}
+                              id={`btnEditVehicle-${veh.id}`}
                             >
-                              <Trash2 size={14} />
+                              <Edit size={18} />
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-danger btn-icon"
+                              onClick={() => handleDeleteVehicleRequest(veh.id, veh.plate_number)}
+                              title={`Xóa phương tiện ${veh.plate_number}`}
+                              aria-label={`Xóa phương tiện ${veh.plate_number}`}
+                              id={`btnDeleteVehicle-${veh.id}`}
+                            >
+                              <Trash2 size={18} />
                             </button>
                           </div>
                         </td>
@@ -921,6 +1020,33 @@ export function WatchlistPage() {
             </div>
           </div>
         )}
+        {/* Modal: Face Detail */}
+        <FaceDetailModal
+          target={selectedFaceTarget}
+          isOpen={Boolean(selectedFaceTarget)}
+          onClose={() => setSelectedFaceTarget(null)}
+          onToggleActive={handleToggleFace}
+          onDeleteRequest={handleDeleteFaceRequest}
+        />
+
+        {/* Modal: Vehicle Detail */}
+        <VehicleDetailModal
+          vehicle={selectedVehicle}
+          isOpen={Boolean(selectedVehicle)}
+          onClose={() => setSelectedVehicle(null)}
+          onEdit={openEditVehicleModal}
+          onDeleteRequest={handleDeleteVehicleRequest}
+        />
+
+        {/* Modal: Delete Confirmation */}
+        <DeleteConfirmModal
+          isOpen={Boolean(deleteTargetInfo)}
+          title={`Xác nhận xóa ${deleteTargetInfo?.type === 'face' ? 'đối tượng khuôn mặt' : 'phương tiện'}`}
+          message={`Bạn có chắc chắn muốn xóa "${deleteTargetInfo?.name}" khỏi Danh sách Theo dõi? Thao tác này không thể hoàn tác.`}
+          onConfirm={handleConfirmDelete}
+          onClose={() => setDeleteTargetInfo(null)}
+          isDeleting={isDeleting}
+        />
       </div>
     </>
   );

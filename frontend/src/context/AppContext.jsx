@@ -10,6 +10,7 @@ export function AppProvider({ children }) {
   const { showToast } = useToast();
   const [connectionRevision, setConnectionRevision] = useState(0);
   const [authenticationStatus, setAuthenticationStatus] = useState(null);
+  const [apiStatus, setApiStatus] = useState('connecting');
 
   // Theme Mode persistence ('light' | 'dark', default 'light')
   const [themeMode, setThemeMode] = useState(() => {
@@ -200,6 +201,7 @@ export function AppProvider({ children }) {
       try {
         const data = await fetchTelemetry(abortController.signal);
         if (isMounted && data) {
+          setApiStatus('connected');
           setTelemetry((prev) => ({
             ...prev,
             ...data,
@@ -214,7 +216,12 @@ export function AppProvider({ children }) {
       } catch (err) {
         if (err.name !== 'AbortError' && isMounted) {
           authDenied = err.status === 401 || err.status === 403;
-          if (authDenied) setAuthenticationStatus(err.status);
+          if (authDenied) {
+            setAuthenticationStatus(err.status);
+            setApiStatus('auth_required');
+          } else {
+            setApiStatus('disconnected');
+          }
           setTelemetry((prev) => ({
             ...prev,
             status: authDenied ? 'AUTH_REQUIRED' : 'DISCONNECTED',
@@ -253,6 +260,8 @@ export function AppProvider({ children }) {
         telemetry,
         connectionRevision,
         authenticationStatus,
+        apiStatus,
+        setApiStatus,
         activeCamera,
         switchActiveCamera,
         stopActiveCamera,

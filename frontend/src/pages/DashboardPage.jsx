@@ -127,6 +127,7 @@ export function DashboardPage() {
         title={activeCamera.name || 'AI Vision Monitor'}
         onToggleFullscreen={toggleFullscreen}
         isFullscreen={isFullscreen}
+        isCameraContext={true}
       />
 
       <div className="page-container" id="dashboardPage">

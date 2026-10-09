@@ -43,6 +43,7 @@ def persistence_db(tmp_path, monkeypatch):
     monkeypatch.setattr(nodes, 'get_llm', lambda: nodes.MockChatModel())
     monkeypatch.setenv('DATT_STRICT_AUTH', '0')
     monkeypatch.setenv('DATT_REQUIRE_OPERATIONAL_AUTH', '0')
+    monkeypatch.setenv('DATT_AGENT_AUTH_SECRET', 'test_secret_key_at_least_32_characters_long_12345')
     yield db
     db.dispose()
 

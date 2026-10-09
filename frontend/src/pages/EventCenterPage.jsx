@@ -101,9 +101,35 @@ export function EventCenterPage() {
 
   const totalPages = Math.ceil(total / pageSize) || 1;
 
+  const getEventCenterStatus = () => {
+    if (error) {
+      const errStr = String(error).toLowerCase();
+      if (errStr.includes('401') || errStr.includes('xác thực') || errStr.includes('unauthorized')) {
+        return { className: 'disconnected', label: 'CẦN XÁC THỰC' };
+      }
+      if (errStr.includes('403') || errStr.includes('forbidden') || errStr.includes('quyền')) {
+        return { className: 'disconnected', label: 'CHƯA CÓ QUYỀN' };
+      }
+      if (errStr.includes('500') || errStr.includes('503') || errStr.includes('database')) {
+        return { className: 'disconnected', label: 'LỖI MÁY CHỦ' };
+      }
+      if (errStr.includes('network') || errStr.includes('failed to fetch')) {
+        return { className: 'disconnected', label: 'MẤT KẾT NỐI' };
+      }
+      return { className: 'disconnected', label: 'KHÔNG THỂ TRUY XUẤT' };
+    }
+    if (loading) {
+      return { className: 'connecting', label: 'ĐANG TẢI...' };
+    }
+    return { className: 'live', label: 'ĐÃ KẾT NỐI' };
+  };
+
   return (
     <>
-      <Header title="Trung tâm Sự kiện (Event Center)" />
+      <Header
+        title="Trung tâm Sự kiện (Event Center)"
+        status={getEventCenterStatus()}
+      />
 
       <div className="page-container" id="eventCenterPage">
         {/* Filter and Search Bar */}
@@ -280,7 +306,8 @@ export function EventCenterPage() {
                         )}
                         {typeof evt.confidence === 'number' && (
                           <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                            Độ tin cậy: {(evt.confidence * 100).toFixed(0)}%
+                            {evt.event_type === 'face' ? 'Độ tương đồng: ' : 'Độ tin cậy: '}
+                            {(evt.confidence * 100).toFixed(0)}%
                           </div>
                         )}
                       </td>
@@ -425,7 +452,9 @@ export function EventCenterPage() {
                       )}
                       {typeof eventDetail.confidence === 'number' && (
                         <div>
-                          <span style={{ color: 'var(--text-muted)' }}>Độ tương đồng / tin cậy:</span>
+                          <span style={{ color: 'var(--text-muted)' }}>
+                            {eventDetail.event_type === 'face' ? 'Độ tương đồng khuôn mặt (similarity):' : 'Độ tin cậy nhận diện (confidence):'}
+                          </span>
                           <div style={{ fontWeight: 600 }}>{(eventDetail.confidence * 100).toFixed(1)}%</div>
                         </div>
                       )}

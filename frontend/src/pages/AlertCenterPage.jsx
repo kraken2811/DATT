@@ -97,9 +97,35 @@ export function AlertCenterPage() {
 
   const totalPages = Math.ceil(total / pageSize) || 1;
 
+  const getAlertCenterStatus = () => {
+    if (error) {
+      const errStr = String(error).toLowerCase();
+      if (errStr.includes('401') || errStr.includes('xác thực') || errStr.includes('unauthorized')) {
+        return { className: 'disconnected', label: 'CẦN XÁC THỰC' };
+      }
+      if (errStr.includes('403') || errStr.includes('forbidden') || errStr.includes('quyền')) {
+        return { className: 'disconnected', label: 'CHƯA CÓ QUYỀN' };
+      }
+      if (errStr.includes('500') || errStr.includes('503') || errStr.includes('database')) {
+        return { className: 'disconnected', label: 'LỖI MÁY CHỦ' };
+      }
+      if (errStr.includes('network') || errStr.includes('failed to fetch')) {
+        return { className: 'disconnected', label: 'MẤT KẾT NỐI' };
+      }
+      return { className: 'disconnected', label: 'KHÔNG THỂ TRUY XUẤT' };
+    }
+    if (loading) {
+      return { className: 'connecting', label: 'ĐANG TẢI...' };
+    }
+    return { className: 'live', label: 'ĐÃ KẾT NỐI' };
+  };
+
   return (
     <>
-      <Header title="Trung tâm Cảnh báo (Alert Center)" />
+      <Header
+        title="Trung tâm Cảnh báo (Alert Center)"
+        status={getAlertCenterStatus()}
+      />
 
       <div className="page-container" id="alertCenterPage">
         {/* Filter Bar */}

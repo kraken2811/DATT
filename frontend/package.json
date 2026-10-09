@@ -12,6 +12,7 @@
     "preview": "vite preview",
     "test:agent-markdown": "node scripts/test_agent_markdown.mjs",
     "test:auth": "node --test test/auth-contract.test.js",
+    "test:watchlist": "node --test test/watchlist-contract.test.js",
     "test:auth-browser": "node scripts/test_auth_e2e.cjs"
   },
   "dependencies": {

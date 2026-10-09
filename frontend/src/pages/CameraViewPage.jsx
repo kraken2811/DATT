@@ -67,6 +67,7 @@ export function CameraViewPage() {
         title={camera ? camera.name : 'Chi tiết Camera'}
         onToggleFullscreen={toggleFullscreen}
         isFullscreen={isFullscreen}
+        isCameraContext={true}
       />
 
       <div className="page-container" id="cameraViewPage">
