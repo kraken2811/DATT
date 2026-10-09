@@ -3,7 +3,7 @@ import { Maximize, Activity } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 
 export function Header({ title, onToggleFullscreen, isFullscreen, actions, status }) {
-  const { telemetry, activeCamera } = useApp();
+  const { telemetry, activeCamera, authenticationStatus } = useApp();
 
   const isLive = telemetry.stream_alive || telemetry.camera_status === 'RUNNING';
   const isConnecting = telemetry.camera_status === 'CONNECTING';
@@ -21,6 +21,10 @@ export function Header({ title, onToggleFullscreen, isFullscreen, actions, statu
   if (status) {
     statusClass = status.className;
     statusText = status.label;
+  }
+  if (authenticationStatus) {
+    statusClass = 'disconnected';
+    statusText = authenticationStatus === 403 ? 'CHƯA CÓ QUYỀN' : 'CẦN XÁC THỰC';
   }
 
   return (

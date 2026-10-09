@@ -7,9 +7,12 @@
     "dev": "vite",
     "build": "vite build",
     "test:agent": "node scripts/test_agent_e2e.cjs",
+    "test:layout": "node scripts/test_layout_responsive.cjs",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test:agent-markdown": "node scripts/test_agent_markdown.mjs"
+    "test:agent-markdown": "node scripts/test_agent_markdown.mjs",
+    "test:auth": "node --test test/auth-contract.test.js",
+    "test:auth-browser": "node scripts/test_auth_e2e.cjs"
   },
   "dependencies": {
     "lucide-react": "^0.475.0",

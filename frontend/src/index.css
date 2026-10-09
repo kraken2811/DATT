@@ -151,6 +151,7 @@ body {
 
 .main-content {
   flex: 1;
+  min-width: 0;
   margin-left: var(--sidebar-width);
   display: flex;
   flex-direction: column;
@@ -181,7 +182,7 @@ body {
   backdrop-filter: blur(12px);
 }
 
-.sidebar-header {
+.app-sidebar .sidebar-header {
   height: var(--header-height);
   display: flex;
   align-items: center;
@@ -801,35 +802,55 @@ body {
    AI ASSISTANT (AGENT) STYLES
    ============================================================================== */
 
+.page-container.agent-page,
 .agent-page {
-  height: calc(100vh - 32px);
+  height: 100vh;
+  max-height: 100vh;
   display: flex;
   flex-direction: column;
+  padding: 0;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.agent-page .app-header {
+  flex-shrink: 0;
+  padding: 0 32px;
 }
 
 .agent-main-container {
   flex: 1;
   display: flex;
-  gap: 16px;
+  gap: 0;
   min-height: 0;
+  min-width: 0;
   position: relative;
   overflow: hidden;
+  margin: 16px 32px 24px 32px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
 }
 
 /* Persistent Conversation History Sidebar */
 .agent-history-sidebar {
   width: 280px;
   min-width: 260px;
-  max-width: 300px;
+  max-width: 280px;
   background-color: var(--bg-card);
-  border: 1px solid var(--border-card);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-card);
+  border: none;
+  border-right: 1px solid var(--border-subtle);
+  border-radius: 0;
+  box-shadow: none;
   display: flex;
   flex-direction: column;
-  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: width 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
   overflow: hidden;
   z-index: 10;
+  flex-shrink: 0;
+  height: 100%;
 }
 
 .agent-history-sidebar.collapsed {
@@ -839,17 +860,21 @@ body {
   padding: 0;
   margin: 0;
   border: none;
+  border-right: none;
   opacity: 0;
   pointer-events: none;
 }
 
-.sidebar-header {
-  padding: 14px 16px;
+.agent-history-sidebar .sidebar-header {
+  height: 52px;
+  box-sizing: border-box;
+  padding: 0 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--border-subtle);
   background: rgba(255, 255, 255, 0.02);
+  flex-shrink: 0;
 }
 
 .sidebar-title {
@@ -1146,12 +1171,15 @@ body {
 
 /* Chat thread header */
 .chat-thread-header {
-  padding: 10px 18px;
+  height: 52px;
+  box-sizing: border-box;
+  padding: 0 18px;
   background: rgba(255, 255, 255, 0.02);
   border-bottom: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-shrink: 0;
 }
 
 .sidebar-open-btn {
@@ -1291,6 +1319,14 @@ body {
 
 /* Mobile responsive drawer */
 @media (max-width: 860px) {
+  .agent-page .app-header {
+    padding: 0 16px;
+  }
+
+  .agent-main-container {
+    margin: 12px 16px 16px 16px;
+  }
+
   .agent-history-sidebar {
     position: absolute;
     top: 0;
@@ -1298,13 +1334,17 @@ body {
     left: 0;
     z-index: 40;
     width: 280px;
+    border-right: 1px solid var(--border-card);
     box-shadow: var(--shadow-modal);
+    border-radius: var(--radius-lg) 0 0 var(--radius-lg);
   }
 
   .agent-history-sidebar.collapsed {
     transform: translateX(-100%);
     width: 280px;
     opacity: 0;
+    pointer-events: none;
+    border-right: none;
   }
 
   .sidebar-backdrop {
@@ -1317,16 +1357,57 @@ body {
   }
 }
 
+@media (max-width: 640px) {
+  .agent-page .header-title {
+    font-size: 0.95rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .agent-page .header-status-badge {
+    font-size: 0.68rem;
+    padding: 2px 6px;
+    white-space: nowrap;
+  }
+
+  .agent-page .header-actions-group .btn span {
+    display: none;
+  }
+
+  .agent-page .chat-messages-container {
+    padding: 14px;
+    gap: 14px;
+  }
+
+  .agent-page .chat-input-bar {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+
+  .agent-page .chat-text-input {
+    padding: 9px 14px;
+    font-size: 0.84rem;
+  }
+
+  .agent-page .btn-send {
+    padding: 8px 14px;
+    font-size: 0.84rem;
+  }
+}
+
 .agent-chat-layout {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   background-color: var(--bg-card);
-  border: 1px solid var(--border-card);
-  border-radius: var(--radius-lg);
+  border: none;
+  border-radius: 0;
   overflow: hidden;
-  box-shadow: var(--shadow-card);
+  box-shadow: none;
   min-height: 0;
+  height: 100%;
 }
 
 /* Quick Prompts Bar */

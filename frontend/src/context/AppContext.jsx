@@ -1,12 +1,15 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { fetchTelemetry } from '../api/telemetry';
-import { switchCamera as apiSwitchCamera, stopCamera as apiStopCamera, fetchCameras } from '../api/cameras';
+import { switchCamera as apiSwitchCamera, stopCamera as apiStopCamera } from '../api/cameras';
 import { useToast } from './ToastContext';
+import { CONNECTION_CHANGED, AUTH_REJECTED } from '../api/connection';
 
 const AppContext = createContext(null);
 
 export function AppProvider({ children }) {
   const { showToast } = useToast();
+  const [connectionRevision, setConnectionRevision] = useState(0);
+  const [authenticationStatus, setAuthenticationStatus] = useState(null);
 
   // Theme Mode persistence ('light' | 'dark', default 'light')
   const [themeMode, setThemeMode] = useState(() => {
@@ -46,12 +49,12 @@ export function AppProvider({ children }) {
     status: 'CONNECTING',
     camera_status: 'CONNECTING',
     stream_alive: false,
-    people_count: 0,
-    car_count: 0,
-    stream_fps: 0,
-    processing_fps: 0,
-    yolo_latency_ms: 0,
-    pipeline_latency_ms: 0,
+    people_count: null,
+    car_count: null,
+    stream_fps: null,
+    processing_fps: null,
+    yolo_latency_ms: null,
+    pipeline_latency_ms: null,
     camera_name: 'Connecting...',
     error_message: null,
   });
@@ -62,6 +65,29 @@ export function AppProvider({ children }) {
     source_url: '',
     source_type: 'rtsp',
   });
+
+  useEffect(() => {
+    const changed = () => {
+      setAuthenticationStatus(null);
+      setTelemetry(prev => ({ ...prev, people_count: null, car_count: null,
+        stream_fps: null, processing_fps: null, pipeline_latency_ms: null,
+        stream_alive: false, camera_status: 'CONNECTING', status: 'CONNECTING' }));
+      setActiveCamera({ id: 'default', name: 'Initializing Camera...', source_url: '', source_type: 'rtsp' });
+      setConnectionRevision(value => value + 1);
+    };
+    const rejected = event => setAuthenticationStatus(event.detail.status);
+    const storageChanged = event => {
+      if (!event.key || ['datt_backend_url', 'datt_auth_token', 'datt_auth_token_scope', 'datt_agent_session_id'].includes(event.key)) changed();
+    };
+    window.addEventListener(CONNECTION_CHANGED, changed);
+    window.addEventListener(AUTH_REJECTED, rejected);
+    window.addEventListener('storage', storageChanged);
+    return () => {
+      window.removeEventListener(CONNECTION_CHANGED, changed);
+      window.removeEventListener(AUTH_REJECTED, rejected);
+      window.removeEventListener('storage', storageChanged);
+    };
+  }, []);
 
   // Track stream generation token to prevent race conditions
   const streamTokenRef = useRef(0);
@@ -161,10 +187,12 @@ export function AppProvider({ children }) {
     }
   }, [showToast]);
 
-  // Telemetry Poller (1-second frequency with StrictMode protection and cleanup)
+  // Sequential polling: pause after authentication denial until credentials change.
   useEffect(() => {
     let isMounted = true;
     let abortController = null;
+    let timer = null;
+    let authDenied = false;
 
     const poll = async () => {
       if (!isMounted) return;
@@ -176,7 +204,7 @@ export function AppProvider({ children }) {
             ...prev,
             ...data,
           }));
-          if (data.camera_name && data.camera_name !== 'Disconnected') {
+          if (!data.is_fallback && data.camera_name && data.camera_name !== 'Disconnected') {
             setActiveCamera((prev) => ({
               ...prev,
               name: data.camera_name,
@@ -185,28 +213,33 @@ export function AppProvider({ children }) {
         }
       } catch (err) {
         if (err.name !== 'AbortError' && isMounted) {
-          // Keep previous data but indicate disconnected
+          authDenied = err.status === 401 || err.status === 403;
+          if (authDenied) setAuthenticationStatus(err.status);
           setTelemetry((prev) => ({
             ...prev,
-            status: 'DISCONNECTED',
-            camera_status: 'DISCONNECTED',
+            status: authDenied ? 'AUTH_REQUIRED' : 'DISCONNECTED',
+            camera_status: authDenied ? 'AUTH_REQUIRED' : 'DISCONNECTED',
             stream_alive: false,
+            people_count: null, car_count: null, stream_fps: null,
+            processing_fps: null, pipeline_latency_ms: null,
+            error_message: authDenied ? 'Cần xác thực trong Cài đặt.' : err.message,
           }));
         }
+      } finally {
+        if (isMounted && !authDenied) timer = setTimeout(poll, 1000);
       }
     };
 
     poll();
-    const interval = setInterval(poll, 1000);
 
     return () => {
       isMounted = false;
-      clearInterval(interval);
+      clearTimeout(timer);
       if (abortController) {
         abortController.abort();
       }
     };
-  }, []);
+  }, [connectionRevision]);
 
   return (
     <AppContext.Provider
@@ -218,6 +251,8 @@ export function AppProvider({ children }) {
         accentColor,
         setAccentColor,
         telemetry,
+        connectionRevision,
+        authenticationStatus,
         activeCamera,
         switchActiveCamera,
         stopActiveCamera,

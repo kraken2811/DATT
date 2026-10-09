@@ -1,4 +1,4 @@
-import { apiRequest } from './client';
+import { apiRequest } from './client.js';
 
 export async function fetchTelemetry(signal = null) {
   try {
@@ -8,17 +8,18 @@ export async function fetchTelemetry(signal = null) {
     });
   } catch (error) {
     if (error.name === 'AbortError') throw error;
+    if (error.status === 401 || error.status === 403) throw error;
     // Disconnected fallback telemetry
     return {
       status: 'DISCONNECTED',
       camera_status: 'DISCONNECTED',
       stream_alive: false,
-      people_count: 0,
-      car_count: 0,
-      stream_fps: 0,
-      processing_fps: 0,
-      yolo_latency_ms: 0,
-      pipeline_latency_ms: 0,
+      people_count: null,
+      car_count: null,
+      stream_fps: null,
+      processing_fps: null,
+      yolo_latency_ms: null,
+      pipeline_latency_ms: null,
       camera_name: 'Disconnected',
       error_message: error.message || 'Cannot reach AI telemetry service',
       is_fallback: true,

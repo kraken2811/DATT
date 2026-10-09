@@ -3,15 +3,35 @@
  * Prevents redundant fetches, React StrictMode double-invocations, and slow tab switches.
  */
 
+import { readConnection, AUTH_REJECTED } from './connection.js';
+export { getBackendBaseUrl } from './connection.js';
+
 const inFlightRequests = new Map();
 const memoryCache = new Map();
+let connectionRevision = 0;
+let previousIdentity = null;
+let previousToken = null;
+let previousSession = null;
 
-export function getBackendBaseUrl() {
+function currentConnection() {
+  const connection = readConnection();
+  let sessionId = '';
   try {
-    const saved = localStorage.getItem('datt_backend_url');
-    if (saved && saved.trim()) return saved.trim().replace(/\/$/, '');
-  } catch (e) {}
-  return '';
+    sessionId = localStorage.getItem('datt_agent_session_id');
+    if (!sessionId) {
+      sessionId = globalThis.crypto?.randomUUID?.() || `sess_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      localStorage.setItem('datt_agent_session_id', sessionId);
+    }
+  } catch { /* No persistent browser session available. */ }
+  if (connection.identity !== previousIdentity || connection.token !== previousToken || sessionId !== previousSession) {
+    previousIdentity = connection.identity;
+    previousToken = connection.token;
+    previousSession = sessionId;
+    connectionRevision += 1;
+    memoryCache.clear();
+    inFlightRequests.clear();
+  }
+  return { ...connection, sessionId, revision: connectionRevision };
 }
 
 /**
@@ -28,15 +48,20 @@ export async function apiRequest(endpoint, options = {}) {
     signal = null,
     cacheTtlMs = 0,
     forceRefresh = false,
+    responseType = 'auto',
+    reportAuthFailure = true,
   } = options;
 
-  const baseUrl = getBackendBaseUrl();
+  const connection = currentConnection();
+  const { baseUrl } = connection;
   const url = `${baseUrl}${endpoint}`;
   const isGet = method.toUpperCase() === 'GET';
-  const cacheKey = `${method}:${url}`;
+  const explicitAuth = new Headers(headers).has('Authorization') || new Headers(headers).has('X-Session-Id');
+  const canReuse = isGet && responseType === 'auto' && !explicitAuth;
+  const cacheKey = `${connection.revision}:${method}:${url}`;
 
   // Check cache for GET requests
-  if (isGet && cacheTtlMs > 0 && !forceRefresh) {
+  if (canReuse && cacheTtlMs > 0 && !forceRefresh) {
     const cached = memoryCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < cacheTtlMs) {
       return cached.data;
@@ -44,41 +69,31 @@ export async function apiRequest(endpoint, options = {}) {
   }
 
   // Deduplicate in-flight GET requests
-  if (isGet && inFlightRequests.has(cacheKey) && !signal) {
+  if (canReuse && inFlightRequests.has(cacheKey) && !signal) {
     return inFlightRequests.get(cacheKey);
   }
-
-  let clientSessionId = '';
-  let clientAuthToken = null;
-  try {
-    clientSessionId = localStorage.getItem('datt_agent_session_id');
-    if (!clientSessionId) {
-      clientSessionId = (typeof crypto !== 'undefined' && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : `sess_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-      localStorage.setItem('datt_agent_session_id', clientSessionId);
-    }
-    clientAuthToken = localStorage.getItem('datt_auth_token');
-  } catch (e) {}
 
   const defaultHeaders = {
     'Accept': 'application/json',
   };
-  if (clientSessionId) {
-    defaultHeaders['X-Session-Id'] = clientSessionId;
+  if (connection.sessionId) {
+    defaultHeaders['X-Session-Id'] = connection.sessionId;
   }
-  if (clientAuthToken) {
-    defaultHeaders['Authorization'] = `Bearer ${clientAuthToken}`;
+  if (connection.token) {
+    defaultHeaders['Authorization'] = `Bearer ${connection.token}`;
   }
   if (body && typeof body === 'object' && !(body instanceof FormData)) {
     defaultHeaders['Content-Type'] = 'application/json';
   }
 
+  const requestHeaders = new Headers(defaultHeaders);
+  new Headers(headers).forEach((value, name) => requestHeaders.set(name, value));
+
   const fetchPromise = (async () => {
     try {
       const response = await fetch(url, {
         method,
-        headers: { ...defaultHeaders, ...headers },
+        headers: requestHeaders,
         body: body instanceof FormData ? body : (body && typeof body === 'object' ? JSON.stringify(body) : body),
         signal,
       });
@@ -88,12 +103,20 @@ export async function apiRequest(endpoint, options = {}) {
         try {
           const errJson = await response.json();
           errMessage = errJson.message || errJson.detail || errJson.error || errMessage;
-        } catch (e) {}
+        } catch {}
         const error = new Error(errMessage);
         error.status = response.status;
+        if ((response.status === 401 || response.status === 403) && reportAuthFailure
+            && currentConnection().revision === connection.revision) {
+          globalThis.window?.dispatchEvent(new CustomEvent(AUTH_REJECTED, { detail: { status: response.status } }));
+        }
         throw error;
       }
 
+      if (currentConnection().revision !== connection.revision) {
+        throw new DOMException('Connection changed', 'AbortError');
+      }
+      if (responseType === 'response') return response;
       const contentType = response.headers.get('content-type') || '';
       let data = null;
       if (contentType.includes('application/json')) {
@@ -102,7 +125,10 @@ export async function apiRequest(endpoint, options = {}) {
         data = await response.text();
       }
 
-      if (isGet && cacheTtlMs > 0) {
+      if (currentConnection().revision !== connection.revision) {
+        throw new DOMException('Connection changed', 'AbortError');
+      }
+      if (canReuse && cacheTtlMs > 0) {
         memoryCache.set(cacheKey, {
           data,
           timestamp: Date.now(),
@@ -111,13 +137,13 @@ export async function apiRequest(endpoint, options = {}) {
 
       return data;
     } finally {
-      if (isGet) {
+      if (canReuse) {
         inFlightRequests.delete(cacheKey);
       }
     }
   })();
 
-  if (isGet && !signal) {
+  if (canReuse && !signal) {
     inFlightRequests.set(cacheKey, fetchPromise);
   }
 

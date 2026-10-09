@@ -1,7 +1,8 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { ToastProvider } from './context/ToastContext';
-import { AppProvider } from './context/AppContext';
+import { AppProvider, useApp } from './context/AppContext';
+import { AuthenticationNotice } from './components/AuthenticationNotice';
 import { Sidebar } from './components/Sidebar';
 import { ToastContainer } from './components/ToastContainer';
 
@@ -23,7 +24,21 @@ export default function App() {
           <div className="app-layout">
             <Sidebar />
             <main className="main-content">
-              <Routes>
+              <AuthenticationNotice />
+              <AppRoutes />
+            </main>
+            <ToastContainer />
+          </div>
+        </AppProvider>
+      </ToastProvider>
+    </BrowserRouter>
+  );
+}
+
+function AppRoutes() {
+  const { connectionRevision } = useApp();
+  return (
+              <Routes key={connectionRevision}>
                 <Route path="/" element={<DashboardPage />} />
                 <Route path="/dashboard" element={<DashboardPage />} />
                 <Route path="/cameras" element={<CameraManagementPage />} />
@@ -36,11 +51,5 @@ export default function App() {
                 {/* Fallback to dashboard */}
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
-            </main>
-            <ToastContainer />
-          </div>
-        </AppProvider>
-      </ToastProvider>
-    </BrowserRouter>
   );
 }

@@ -3,7 +3,9 @@ import { Header } from '../components/Header';
 import { useApp } from '../context/AppContext';
 import { useToast } from '../context/ToastContext';
 import { apiRequest, getBackendBaseUrl } from '../api/client';
-import { Settings, Server, Palette, Cpu, Check, RefreshCw, Sun, Moon } from 'lucide-react';
+import { setBackendBaseUrl, readConnection, clearAuthToken } from '../api/connection';
+import { verifyAndSaveAuthToken } from '../api/auth';
+import { Server, Palette, Cpu, Check, RefreshCw, Sun, Moon } from 'lucide-react';
 
 export function SettingsPage() {
   const { accentColor, setAccentColor, theme, setTheme } = useApp();
@@ -12,6 +14,10 @@ export function SettingsPage() {
   const [backendUrl, setBackendUrl] = useState(() => getBackendBaseUrl() || window.location.origin);
   const [deviceInfo, setDeviceInfo] = useState(null);
   const [loadingDevices, setLoadingDevices] = useState(false);
+  const [authToken, setAuthToken] = useState('');
+  const [checkingAuth, setCheckingAuth] = useState(false);
+  const [authMessage, setAuthMessage] = useState('');
+  const [deviceError, setDeviceError] = useState('');
 
   const themes = [
     { id: 'blue', color: '#3b82f6', label: 'Electric Blue' },
@@ -24,20 +30,39 @@ export function SettingsPage() {
   const handleSaveBackendUrl = (e) => {
     e.preventDefault();
     try {
-      localStorage.setItem('datt_backend_url', backendUrl.trim());
+      setBackendBaseUrl(backendUrl.trim());
       showToast('Đã lưu cấu hình địa chỉ máy chủ backend!', 'success');
     } catch (err) {
       showToast('Không thể lưu cấu hình', 'error');
     }
   };
 
+  const handleAuthentication = async (event) => {
+    event.preventDefault();
+    setCheckingAuth(true);
+    setAuthMessage('');
+    try {
+      const user = await verifyAndSaveAuthToken(authToken);
+      showToast(`Đã xác thực tài khoản ${user}.`, 'success');
+    } catch (error) {
+      setAuthMessage(error.status === 401 || error.status === 403
+        ? 'Token không hợp lệ hoặc tài khoản chưa có quyền. Token chưa được lưu.'
+        : 'Không thể xác nhận tài khoản. Kiểm tra kết nối backend rồi thử lại.');
+    } finally {
+      setAuthToken('');
+      setCheckingAuth(false);
+    }
+  };
+
   const loadDevices = async () => {
     setLoadingDevices(true);
+    setDeviceError('');
     try {
       const resp = await apiRequest('/api/runtime_devices?instrument=true');
       setDeviceInfo(resp);
     } catch (err) {
-      console.error('Device audit error:', err);
+      setDeviceError(err.status === 401 || err.status === 403
+        ? 'Cần xác thực để xem thông tin thiết bị.' : 'Không tải được thông tin thiết bị.');
     } finally {
       setLoadingDevices(false);
     }
@@ -83,6 +108,31 @@ export function SettingsPage() {
               </div>
             </div>
           </form>
+        </div>
+
+        <div className="card" style={{ marginBottom: '24px' }} id="settingsAuthentication">
+          <h3 style={{ fontSize: '1.05rem', fontWeight: 600, marginBottom: '12px' }}>Xác thực tài khoản</h3>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '12px' }}>
+            Nhập Bearer token của tài khoản đã được cấp quyền trên backend đang chọn.
+            Không nhập khóa ký DATT_AGENT_AUTH_SECRET hoặc API key Gemini.
+          </p>
+          <form onSubmit={handleAuthentication}>
+            <label htmlFor="inputAuthToken">Bearer token</label>
+            <input id="inputAuthToken" type="password" className="input-field" autoComplete="off"
+              value={authToken} onChange={event => setAuthToken(event.target.value)} required disabled={checkingAuth} />
+            <div style={{ display: 'flex', gap: '10px', marginTop: '12px' }}>
+              <button type="submit" id="btnAuthenticate" className="btn btn-primary btn-sm" disabled={checkingAuth}>
+                {checkingAuth ? 'Đang xác thực…' : 'Xác thực'}
+              </button>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => { clearAuthToken(); setAuthToken(''); }}>
+                Xóa token trên trình duyệt này
+              </button>
+            </div>
+          </form>
+          {authMessage && <p role="alert" style={{ marginTop: '12px' }}>{authMessage}</p>}
+          <p style={{ color: 'var(--text-muted)', marginTop: '12px' }}>
+            {(() => { try { return readConnection().token ? 'Token đã lưu cho backend này.' : 'Chưa có token cho backend này.'; } catch { return 'Địa chỉ backend chưa hợp lệ.'; } })()}
+          </p>
         </div>
 
         {/* Appearance - Theme Mode Setting */}
@@ -218,7 +268,7 @@ export function SettingsPage() {
             </div>
           ) : (
             <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-              Đang tải thông tin thiết bị phần cứng...
+              {deviceError || 'Đang tải thông tin thiết bị phần cứng...'}
             </div>
           )}
         </div>

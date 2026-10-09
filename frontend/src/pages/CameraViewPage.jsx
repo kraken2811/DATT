@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Header } from '../components/Header';
+import { AuthenticatedVideo } from '../components/AuthenticatedVideo';
 import { fetchCameraDetail } from '../api/cameras';
 import { useApp } from '../context/AppContext';
 import { LoadingSpinner, ErrorState } from '../components/StatusStates';
@@ -94,14 +95,7 @@ export function CameraViewPage() {
               className={`stream-wrapper ${isFullscreen ? 'fullscreen' : ''}`}
               id="cameraViewStreamWrapper"
             >
-              <img
-                src={`/video_feed?t=${id}`}
-                alt={camera?.name || 'Camera Feed'}
-                className="stream-img"
-                onError={(e) => {
-                  e.currentTarget.src = `/camera_snapshot?t=${Date.now()}`;
-                }}
-              />
+              <AuthenticatedVideo cameraId={id} label={camera?.name || 'Camera Feed'} />
 
               <div className="stream-overlay-top">
                 <div className="stream-badges">

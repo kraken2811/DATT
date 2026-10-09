@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { Header } from '../components/Header';
+import { AuthenticatedVideo } from '../components/AuthenticatedVideo';
 import { fetchCameras, fetchPublicCameras, fetchVideoSources } from '../api/cameras';
 import { fetchEvents } from '../api/events';
 import {
@@ -119,8 +120,6 @@ export function DashboardPage() {
     };
   }, [activeTab, cctvProvider, searchQuery]);
 
-  // Video feed stream URL with cache-busting token
-  const videoFeedUrl = `/video_feed?t=${activeCamera.id}`;
 
   return (
     <>
@@ -139,7 +138,7 @@ export function DashboardPage() {
               <Users size={16} />
             </div>
             <div className="stat-value" id="statPeopleCount">
-              {telemetry.people_count ?? 0}
+              {telemetry.people_count ?? '—'}
             </div>
           </div>
 
@@ -149,7 +148,7 @@ export function DashboardPage() {
               <Car size={16} />
             </div>
             <div className="stat-value" id="statVehicleCount">
-              {telemetry.car_count ?? 0}
+              {telemetry.car_count ?? '—'}
             </div>
           </div>
 
@@ -161,7 +160,7 @@ export function DashboardPage() {
             <div className="stat-value" id="statFpsValue">
               {typeof telemetry.stream_fps === 'number'
                 ? telemetry.stream_fps.toFixed(1)
-                : '0.0'}
+                : '—'}
               <span className="stat-unit">fps</span>
             </div>
           </div>
@@ -186,16 +185,7 @@ export function DashboardPage() {
           className={`stream-wrapper ${isFullscreen ? 'fullscreen' : ''}`}
           id="mainStreamWrapper"
         >
-          <img
-            src={videoFeedUrl}
-            alt="AI Video Stream"
-            className="stream-img"
-            id="mainVideoStream"
-            onError={(e) => {
-              // Graceful fallback to snapshot endpoint
-              e.currentTarget.src = `/camera_snapshot?t=${Date.now()}`;
-            }}
-          />
+          <AuthenticatedVideo cameraId={activeCamera.id} id="mainVideoStream" label="AI Video Stream" />
 
           <div className="stream-overlay-top">
             <div className="stream-badges">
