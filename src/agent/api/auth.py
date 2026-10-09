@@ -8,21 +8,47 @@ import hashlib
 import hmac
 import logging
 import os
+import secrets
 from typing import Tuple
 
 from fastapi import HTTPException, Request
+from src.agent.security import production_auth_required
 
 logger = logging.getLogger("datt.agent.auth")
 
 # Optional environment secrets for proxy or token verification
 TRUSTED_PROXY_SECRET = os.getenv("DATT_TRUSTED_PROXY_SECRET")
-AUTH_SECRET = os.getenv("DATT_AGENT_AUTH_SECRET") or os.getenv("DATT_SECRET_KEY") or "datt_secure_internal_secret_key"
+AUTH_SECRET = os.getenv("DATT_AGENT_AUTH_SECRET") or os.getenv("DATT_SECRET_KEY")
+_DEVELOPMENT_SECRET = secrets.token_urlsafe(32)
+
+
+def configured_auth_secret() -> str:
+    """A deployment must configure its signing key; explicit disposable development may use an ephemeral key."""
+    secret = os.getenv('DATT_AGENT_AUTH_SECRET') or os.getenv('DATT_SECRET_KEY') or AUTH_SECRET
+    if secret == 'datt_secure_internal_secret_key':
+        secret = None  # The old public fallback is never a valid signing key.
+    if secret:
+        if production_auth_required() and len(secret) < 32:
+            raise RuntimeError('Production signing key must contain at least 32 characters')
+        return secret
+    if not production_auth_required() and os.getenv('DATT_REQUIRE_PERSISTENCE') == '0':
+        return _DEVELOPMENT_SECRET
+    raise RuntimeError('Agent authentication signing key is not configured')
+
+
+def validate_auth_configuration() -> None:
+    if production_auth_required():
+        configured_auth_secret()
+        if os.getenv('DATT_STRICT_AUTH') != '1':
+            raise RuntimeError('Production Agent requires DATT_STRICT_AUTH=1')
 
 
 def create_auth_token(user_id: str, secret: str | None = None) -> str:
     """Generate a cryptographically signed HMAC Bearer token for an authenticated user."""
-    eff_secret = (secret or AUTH_SECRET).encode("utf-8")
+    eff_secret = (secret or configured_auth_secret()).encode("utf-8")
     clean_user = user_id.strip()
+    if not clean_user or ':' in clean_user:
+        raise ValueError('A nonempty user ID without a colon is required')
     sig = hmac.new(eff_secret, clean_user.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{clean_user}:{sig}"
 
@@ -54,7 +80,8 @@ def resolve_authenticated_user(
     # 1. Reverse Proxy header validation
     proxy_secret = request.headers.get("X-Proxy-Secret")
     if proxy_secret:
-        if not TRUSTED_PROXY_SECRET or not hmac.compare_digest(proxy_secret, TRUSTED_PROXY_SECRET):
+        trusted_secret = os.getenv('DATT_TRUSTED_PROXY_SECRET') or TRUSTED_PROXY_SECRET
+        if not trusted_secret or not hmac.compare_digest(proxy_secret, trusted_secret):
             raise HTTPException(status_code=403, detail="Forbidden: Invalid reverse proxy secret.")
         proxy_user = request.headers.get("X-User-Id")
         if not proxy_user or not proxy_user.strip():
@@ -76,8 +103,14 @@ def resolve_authenticated_user(
                 detail="Unauthorized: Malformed Bearer token format (expected 'user:signature').",
             )
         user_part, sig_part = token.rsplit(":", 1)
+        if not user_part.strip() or user_part != user_part.strip() or ':' in user_part:
+            raise HTTPException(status_code=401, detail='Unauthorized: Invalid token user identity.')
+        try:
+            signing_secret = configured_auth_secret()
+        except RuntimeError:
+            raise HTTPException(status_code=503, detail='Authentication service is not configured.') from None
         expected_sig = hmac.new(
-            AUTH_SECRET.encode("utf-8"),
+            signing_secret.encode("utf-8"),
             user_part.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
@@ -100,7 +133,7 @@ def resolve_authenticated_user(
             detail="Forbidden: Cannot claim privileged identity without authentication credentials.",
         )
 
-    if os.getenv("DATT_STRICT_AUTH") == "1":
+    if os.getenv("DATT_STRICT_AUTH") == "1" or production_auth_required():
         raise HTTPException(
             status_code=401,
             detail="Unauthorized: Valid authentication token is required.",

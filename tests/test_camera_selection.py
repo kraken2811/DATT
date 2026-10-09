@@ -391,6 +391,13 @@ class TestCameraSelectionSystem(unittest.TestCase):
         mock_proc.terminate = MagicMock()
         mock_proc.wait = MagicMock()
         mock_proc.stdout = MagicMock()
+        # A pipe blocks until closed, then returns bytes/EOF. A default MagicMock
+        # is truthy and iterates no bytes, trapping the real preview worker in
+        # its partial-frame loop and leaking a busy thread into later tests.
+        import threading
+        pipe_closed = threading.Event()
+        mock_proc.stdout.read.side_effect = lambda _: (pipe_closed.wait(5), b"")[1]
+        mock_proc.stdout.close.side_effect = pipe_closed.set
 
         with patch("subprocess.Popen", return_value=mock_proc), patch("imageio_ffmpeg.get_ffmpeg_exe", return_value="ffmpeg"):
             pm.start_preview("https://example.com/preview.m3u8")

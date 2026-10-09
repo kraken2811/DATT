@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import secrets
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITE = (
@@ -29,6 +30,11 @@ def main():
             DATT_EVENT_AUDIT_ONLY='1', DATT_AGENT_LLM_PROVIDER='mock',
             AGENT_LLM_PROVIDER='mock', DATT_AGENT_EMBEDDING_PROVIDER='mock',
             DATT_AGENT_LLM_FALLBACK_PROVIDER='', DATT_AGENT_LLM_FALLBACK_MODEL='',
+            DATT_ENVIRONMENT='test', DATT_STRICT_AUTH='0', DATT_REQUIRE_OPERATIONAL_AUTH='0',
+            DATT_AGENT_AUTH_SECRET=secrets.token_urlsafe(32), DATT_SECRET_KEY='', DATT_TRUSTED_PROXY_SECRET='',
+            OPENAI_API_KEY='', GEMINI_API_KEY='', GOOGLE_API_KEY='', SUPABASE_URL='',
+            SUPABASE_SERVICE_ROLE_KEY='', DATT_EMAIL_PASSWORD='', DATT_EMAIL_USERNAME='', DATT_EMAIL_TO='',
+            DATT_TEST_POSTGRES_URL='', DATT_TEST_POSTGRES_RESTART='0', DATT_RUN_SUPABASE_MEDIA_TEST='0',
         )
         # Camera API/source-selection tests need the existing schema, not an
         # empty database. Never create tables in the project's configured DB.

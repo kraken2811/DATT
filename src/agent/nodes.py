@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 from typing import Any
 import uuid
 
@@ -20,6 +21,7 @@ from src.agent.face_history import respond as respond_face_history
 from src.agent.prompts import SYSTEM_PROMPT
 from src.agent.response_formatting import current_turn, format_tool_messages
 from src.agent.state import AgentState
+from src.agent.security import operational_auth_required
 from src.agent.tools import ALL_AGENT_TOOLS
 from src.agent.vehicle_history import (
     extract_plate,
@@ -30,6 +32,16 @@ from src.agent.vehicle_history import (
 from src.watchlists.vehicles import normalize_plate
 
 logger = logging.getLogger("datt.agent.nodes")
+
+
+def operational_filters(question):
+    """Carry requested ICT date bounds and explicit camera IDs into every operational tool."""
+    dates = {k: v for k, v in vehicle_filters(question).items() if k in ('from_time', 'to_time')}
+    camera = re.search(r'\b(cam(?:era)?[_-][\w-]+)\b|\bcamera\s+([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|\d+)\b', question, re.I)
+    if camera:
+        value = camera.group(1) or camera.group(2)
+        dates['camera_id'] = 'camera_' + value.zfill(2) if value.isdigit() else value
+    return dates
 
 
 class MockChatModel:
@@ -88,6 +100,10 @@ class MockChatModel:
             return AIMessage(content=format_tool_messages(messages))
 
         lower_q = content.lower()
+        try:
+            op_filters = operational_filters(content)
+        except ValueError:
+            return AIMessage(content='Ngày tra cứu chưa hợp lệ. Bạn hãy cung cấp ngày theo dạng YYYY-MM-DD hoặc DD/MM/YYYY.')
 
         # 2. Prompt injection defense
         injection_patterns = [
@@ -132,14 +148,9 @@ class MockChatModel:
                 elif "hôm qua" in lower_q:
                     period = "yesterday"
 
-                cam_id = None
-                for word in content.split():
-                    clean_w = word.strip(".,:;!?\"'")
-                    if clean_w.upper().startswith("CAM") or clean_w.lower().startswith("camera"):
-                        cam_id = clean_w
-                        break
+                cam_id = op_filters.get("camera_id")
 
-                args = {"period": period}
+                args = {"period": period, **op_filters}
                 if cam_id:
                     args["camera_id"] = cam_id
                 return AIMessage(
@@ -160,16 +171,11 @@ class MockChatModel:
             and ("email" in lower_q or "gửi" in lower_q or "thông báo" in lower_q)
         )
         if is_multi_tool:
-            cam_id = "camera_01"
-            for word in content.split():
-                clean_w = word.strip(".,:;!?\"'")
-                if clean_w.upper().startswith("CAM") or clean_w.lower().startswith("camera"):
-                    cam_id = clean_w
-                    break
+            cam_id = op_filters.get("camera_id")
             tr = "today" if ("hôm nay" in lower_q or "hom nay" in lower_q) else ("yesterday" if "hôm qua" in lower_q else None)
             calls = []
             if "get_traffic_analytics" in self.tools:
-                args = {"camera_id": cam_id}
+                args = dict(op_filters)
                 if tr:
                     args["time_range"] = tr
                 calls.append({"name": "get_traffic_analytics", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"})
@@ -177,11 +183,11 @@ class MockChatModel:
                 calls.append({"name": "get_event_statistics", "args": {"camera_id": cam_id}, "id": f"call_{uuid.uuid4().hex[:8]}"})
 
             if "get_alerts" in self.tools:
-                args = {"camera_id": cam_id}
+                args = dict(op_filters)
                 calls.append({"name": "get_alerts", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"})
 
             if "get_notifications_status" in self.tools:
-                args = {"camera_id": cam_id}
+                args = dict(op_filters)
                 calls.append({"name": "get_notifications_status", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"})
 
             if calls:
@@ -196,7 +202,7 @@ class MockChatModel:
                 filters = vehicle_filters(content)
                 calls.append({"name": "search_events", "args": {"plate": norm_p, "limit": 50, **filters}, "id": f"call_{uuid.uuid4().hex[:8]}"})
             if "get_alerts" in self.tools:
-                calls.append({"name": "get_alerts", "args": {"plate_number": norm_p}, "id": f"call_{uuid.uuid4().hex[:8]}"})
+                calls.append({"name": "get_alerts", "args": {"plate_number": norm_p, **op_filters}, "id": f"call_{uuid.uuid4().hex[:8]}"})
             if calls:
                 return AIMessage(content="", tool_calls=calls)
 
@@ -207,12 +213,12 @@ class MockChatModel:
                 if any(w in lower_q for w in ("email", "thông báo")) and "get_notifications_status" in self.tools:
                     return AIMessage(
                         content="",
-                        tool_calls=[{"name": "get_notifications_status", "args": {"plate_number": prior_p}, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+                        tool_calls=[{"name": "get_notifications_status", "args": {"plate_number": prior_p, **op_filters}, "id": f"call_{uuid.uuid4().hex[:8]}"}],
                     )
                 if "get_alerts" in self.tools:
                     return AIMessage(
                         content="",
-                        tool_calls=[{"name": "get_alerts", "args": {"plate_number": prior_p}, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+                        tool_calls=[{"name": "get_alerts", "args": {"plate_number": prior_p, **op_filters}, "id": f"call_{uuid.uuid4().hex[:8]}"}],
                     )
 
         face_response = respond_face_history(messages, self.tools)
@@ -279,12 +285,7 @@ class MockChatModel:
             or ("lượt xe" in lower_q and ("tuần này" in lower_q or "tuần qua" in lower_q or "7 ngày" in lower_q or "hôm nay" in lower_q or "hôm qua" in lower_q))
         )
         if is_traffic_analytics and "get_traffic_analytics" in self.tools:
-            cam_id = None
-            for word in content.split():
-                clean_w = word.strip(".,:;!?\"'")
-                if clean_w.upper().startswith("CAM") or clean_w.lower().startswith("camera"):
-                    cam_id = clean_w
-                    break
+            cam_id = op_filters.get("camera_id")
 
             grp = "camera"
             if "khung giờ" in lower_q or "cao điểm" in lower_q or "giờ" in lower_q:
@@ -314,7 +315,7 @@ class MockChatModel:
                 cw = "last_week"
                 tr = "this_week"
 
-            args = {"group_by": grp}
+            args = {"group_by": grp, **op_filters}
             if cam_id:
                 args["camera_id"] = cam_id
             if tr:
@@ -328,7 +329,7 @@ class MockChatModel:
             )
 
         # Alert Center inspection
-        if "cảnh báo" in lower_q or "alert" in lower_q:
+        if ("cảnh báo" in lower_q or "alert" in lower_q) and not any(w in lower_q for w in ("email", "thông báo")):
             if "get_alerts" in self.tools:
                 st = None
                 if "chưa" in lower_q and ("xử lý" in lower_q or "gửi" in lower_q):
@@ -338,15 +339,10 @@ class MockChatModel:
                 elif "thành công" in lower_q:
                     st = "sent"
 
-                cam_id = None
-                for word in content.split():
-                    clean_w = word.strip(".,:;!?\"'")
-                    if clean_w.upper().startswith("CAM") or clean_w.lower().startswith("camera"):
-                        cam_id = clean_w
-                        break
+                cam_id = op_filters.get("camera_id")
 
                 p_num = extract_plate(content)
-                args = {"limit": 20}
+                args = {"limit": 20, **op_filters}
                 if st:
                     args["status"] = st
                 if cam_id:
@@ -373,7 +369,7 @@ class MockChatModel:
                     st = "sent"
 
                 p_num = extract_plate(content)
-                args = {"limit": 20}
+                args = {"limit": 20, **op_filters}
                 if st:
                     args["status"] = st
                 if p_num:
@@ -664,8 +660,8 @@ def tool_node(state: AgentState) -> dict[str, Any]:
 
         # Authorization check for sensitive operational tools
         is_authenticated = state.get("is_authenticated", False)
-        sensitive_tools = {"search_watchlist"}
-        require_auth = os.getenv("DATT_STRICT_AUTH") == "1" or os.getenv("DATT_REQUIRE_OPERATIONAL_AUTH") == "1"
+        sensitive_tools = {tool.name for tool in ALL_AGENT_TOOLS} - {"get_knowledge"}
+        require_auth = operational_auth_required()
         if require_auth and call_name in sensitive_tools and not is_authenticated:
             logger.warning(
                 "Unauthorized attempt to access sensitive tool %s by unauthenticated user %s",
@@ -691,6 +687,11 @@ def tool_node(state: AgentState) -> dict[str, Any]:
         total_calls += 1
         try:
             res = target_tool.invoke(call_args)
+            if call_name in sensitive_tools and isinstance(res, dict) and res.get('status') == 'error':
+                # Older operational tools may wrap driver exceptions in their message.
+                # Keep the structured result while excluding private connection details
+                # from model prompts, saved tool messages and explicit JSON replies.
+                res = {**res, 'message': 'Dữ liệu công cụ chưa khả dụng; chưa thể xác minh kết quả.'}
             content_str = json.dumps(res, ensure_ascii=False) if isinstance(res, (dict, list)) else str(res)
             tool_results.append(
                 ToolMessage(
@@ -700,10 +701,10 @@ def tool_node(state: AgentState) -> dict[str, Any]:
                 )
             )
         except Exception as exc:
-            logger.error("Error executing tool %s: %s", call_name, exc)
+            logger.error("Error executing tool %s (%s)", call_name, type(exc).__name__)
             tool_results.append(
                 ToolMessage(
-                    content=json.dumps({"status": "error", "message": f"Execution failed: {exc}"}),
+                    content=json.dumps({"status": "error", "message": "Dữ liệu công cụ chưa khả dụng; chưa thể xác minh kết quả."}, ensure_ascii=False),
                     tool_call_id=call_id,
                     name=call_name,
                 )

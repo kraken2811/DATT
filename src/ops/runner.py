@@ -46,6 +46,8 @@ def main():
     args = p.parse_args()
     sys.stdout, sys.stderr = SafeOutput(sys.stdout), SafeOutput(sys.stderr)
     try:
+        from src.agent.api.auth import validate_auth_configuration
+        validate_auth_configuration()
         from src.ui.web_server import app
         revision = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True,
                                   timeout=10).stdout.strip() or 'unavailable'

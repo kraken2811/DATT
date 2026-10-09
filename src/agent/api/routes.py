@@ -27,6 +27,24 @@ logger = logging.getLogger("datt.agent.api")
 router = APIRouter(prefix="/api/agent", tags=["Agent"])
 
 
+def registry_unavailable(exc):
+    logger.error('Conversation registry unavailable (%s)', type(exc).__name__)
+    return HTTPException(status_code=503, detail='Conversation registry is unavailable; retry later.')
+
+
+def database():
+    try:
+        return agent_config.get_database()
+    except Exception as exc:
+        raise registry_unavailable(exc) from None
+
+
+def missing_conversation(thread_id, user_id):
+    return {'status': 'not_found', 'thread_id': thread_id, 'user_id': user_id,
+            'title': 'Cuộc trò chuyện mới', 'created_at': None, 'updated_at': None,
+            'message_count': 0, 'messages': []}
+
+
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, description="User prompt or query")
     thread_id: str | None = Field(default=None, description="Conversation session identifier")
@@ -65,7 +83,7 @@ async def chat_endpoint(payload: ChatRequest, request: Request) -> ChatResponse:
     )
 
     thread_id = (payload.thread_id or "").strip() or f"thread_{uuid.uuid4().hex[:12]}"
-    db = agent_config.get_database()
+    db = database()
 
     # Verify conversation ownership and update/register registry
     try:
@@ -81,23 +99,32 @@ async def chat_endpoint(payload: ChatRequest, request: Request) -> ChatResponse:
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("Conversation registry check failed (%s); proceeding with chat", exc)
+        raise registry_unavailable(exc) from None
+    finally:
+        db.dispose()
 
     # Offload blocking LangGraph execution to worker thread
-    result = await asyncio.to_thread(
-        run_agent_message,
-        content=payload.message,
-        thread_id=thread_id,
-        user_id=verified_user,
-        is_authenticated=is_authenticated,
-    )
+    try:
+        result = await asyncio.to_thread(
+            run_agent_message, content=payload.message, thread_id=thread_id,
+            user_id=verified_user, is_authenticated=is_authenticated,
+        )
+    except Exception as exc:
+        logger.error('Agent unavailable (%s)', type(exc).__name__)
+        raise HTTPException(status_code=503, detail='Agent/history service is unavailable.') from None
+
+    if result.get('status') == 'error':
+        raise HTTPException(status_code=503, detail='Agent/history service is unavailable.')
 
     # Update conversation activity & title
     try:
+        db = database()
         with db.transaction() as session:
             touch_conversation(session, thread_id, verified_user, user_message=payload.message)
     except Exception as exc:
-        logger.warning("Failed to update conversation activity (%s)", exc)
+        raise registry_unavailable(exc) from None
+    finally:
+        db.dispose()
 
     status = result.get("status", "success")
     if status in ("error", "llm_unavailable"):
@@ -131,7 +158,7 @@ async def create_conversation_endpoint(
         client_claimed_session=payload.session_id,
     )
 
-    db = agent_config.get_database()
+    db = database()
     try:
         with db.transaction() as session:
             conv = create_conversation(
@@ -147,8 +174,9 @@ async def create_conversation_endpoint(
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except Exception as exc:
-        logger.error("Failed to create conversation: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Failed to create conversation: {exc}")
+        raise registry_unavailable(exc) from None
+    finally:
+        db.dispose()
 
 
 @router.get("/conversations")
@@ -166,7 +194,7 @@ async def list_conversations_endpoint(
         client_claimed_session=session_id,
     )
 
-    db = agent_config.get_database()
+    db = database()
     try:
         with db.transaction() as session:
             items, total = list_conversations(session, user_id=auth_user, limit=limit, offset=offset)
@@ -178,8 +206,9 @@ async def list_conversations_endpoint(
                 "conversations": [serialize_conversation(c) for c in items],
             }
     except Exception as exc:
-        logger.error("Failed to list conversations: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Failed to list conversations: {exc}")
+        raise registry_unavailable(exc) from None
+    finally:
+        db.dispose()
 
 
 @router.get("/conversations/{thread_id}")
@@ -190,8 +219,8 @@ async def get_conversation(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """Retrieve message history and metadata for a conversation thread strictly isolated by verified user."""
-    auth_user, _ = resolve_authenticated_user(request, client_claimed_user=user_id, client_claimed_session=session_id)
-    db = agent_config.get_database()
+    auth_user, authenticated = resolve_authenticated_user(request, client_claimed_user=user_id, client_claimed_session=session_id)
+    db = database()
 
     # 1. Check registry and verify ownership
     title = "Cuộc trò chuyện mới"
@@ -202,6 +231,10 @@ async def get_conversation(
             conv = get_conversation_record(session, thread_id)
             if conv:
                 if conv.user_id != auth_user:
+                    # Anonymous session handles are local to their verified client namespace.
+                    # Conceal other anonymous sessions without ever reading their checkpoint.
+                    if not authenticated and conv.user_id.startswith('unauth_'):
+                        return missing_conversation(thread_id, auth_user)
                     raise HTTPException(
                         status_code=403,
                         detail="Forbidden: Cannot access another user's conversation thread.",
@@ -212,13 +245,18 @@ async def get_conversation(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("Could not read conversation registry record: %s", exc)
+        raise registry_unavailable(exc) from None
+    finally:
+        db.dispose()
+
+    if conv is None:
+        return missing_conversation(thread_id, auth_user)
 
     # 2. Retrieve LangGraph checkpoint state
-    checkpointer = get_checkpointer()
     config = make_thread_config(thread_id, user_id=auth_user)
 
     try:
+        checkpointer = get_checkpointer()
         checkpoint_tuple = checkpointer.get_tuple(config)
         if not checkpoint_tuple or not checkpoint_tuple.checkpoint:
             return {
@@ -266,8 +304,8 @@ async def get_conversation(
             "messages": serialized,
         }
     except Exception as exc:
-        logger.error("Error retrieving conversation %s: %s", thread_id, exc)
-        return {"status": "error", "message": str(exc), "messages": []}
+        logger.error('Conversation checkpoint unavailable (%s)', type(exc).__name__)
+        raise HTTPException(status_code=503, detail='Conversation history is unavailable; retry later.') from None
 
 
 @router.patch("/conversations/{thread_id}")
@@ -283,7 +321,7 @@ async def rename_conversation_endpoint(
         client_claimed_session=payload.session_id,
     )
 
-    db = agent_config.get_database()
+    db = database()
     try:
         with db.transaction() as session:
             conv = rename_conversation(session, thread_id, auth_user, payload.title)
@@ -298,8 +336,9 @@ async def rename_conversation_endpoint(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        logger.error("Failed to rename conversation: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Failed to rename conversation: {exc}")
+        raise registry_unavailable(exc) from None
+    finally:
+        db.dispose()
 
 
 @router.delete("/conversations/{thread_id}")
@@ -311,19 +350,26 @@ async def delete_conversation(
 ) -> dict[str, Any]:
     """Permanently delete a conversation thread and its checkpoints strictly isolated by verified user."""
     auth_user, _ = resolve_authenticated_user(request, client_claimed_user=user_id, client_claimed_session=session_id)
-    db = agent_config.get_database()
+    db = database()
 
     # 1. Delete from conversation registry (with ownership check)
     try:
         with db.transaction() as session:
+            conv = get_conversation_record(session, thread_id, auth_user)
+            if conv is None:
+                raise HTTPException(status_code=404, detail='Conversation not found.')
+            cleared = clear_thread_checkpoint(thread_id, user_id=auth_user, session=session)
+            if not cleared:
+                raise HTTPException(status_code=503, detail='Conversation history deletion failed; retry later.')
             delete_conversation_record(session, thread_id, auth_user)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.warning("Failed to delete conversation record (%s)", exc)
-
-    # 2. Clear checkpoint state in PostgresSaver/MemorySaver
-    cleared = clear_thread_checkpoint(thread_id, user_id=auth_user)
+        raise registry_unavailable(exc) from None
+    finally:
+        db.dispose()
 
     return {
         "status": "success",

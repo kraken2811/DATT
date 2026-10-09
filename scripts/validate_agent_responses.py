@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import secrets
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -16,6 +17,8 @@ def main():
             'OPENAI_API_KEY': '', 'GEMINI_API_KEY': '', 'GOOGLE_API_KEY': '',
             'SUPABASE_URL': '', 'SUPABASE_SERVICE_ROLE_KEY': '',
             'DATT_STRICT_AUTH': '0', 'DATT_REQUIRE_OPERATIONAL_AUTH': '0',
+            'DATT_ENVIRONMENT': 'test', 'DATT_AGENT_AUTH_SECRET': secrets.token_urlsafe(32),
+            'DATT_SECRET_KEY': '', 'DATT_TRUSTED_PROXY_SECRET': '',
         })
         from src.db.database import Database
         from src.db.models import Base

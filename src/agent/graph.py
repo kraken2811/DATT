@@ -9,7 +9,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from src.agent.config import agent_config
-from src.agent.memory.checkpoint import get_checkpointer, make_thread_config
+from src.agent.memory.checkpoint import get_checkpointer, make_thread_config, validate_checkpointer
 from src.agent.nodes import agent_node, should_continue, tool_node
 from src.agent.state import AgentState
 
@@ -44,6 +44,7 @@ def build_agent_graph(checkpointer: BaseCheckpointSaver | None = None) -> Any:
 
     # 3. Compile graph with checkpointer
     resolved_checkpointer = checkpointer if checkpointer is not None else get_checkpointer()
+    validate_checkpointer(resolved_checkpointer)
     return workflow.compile(checkpointer=resolved_checkpointer)
 
 
@@ -55,8 +56,9 @@ def get_agent_graph(checkpointer: BaseCheckpointSaver | None = None) -> Any:
     global _compiled_graph
     if checkpointer is not None:
         return build_agent_graph(checkpointer=checkpointer)
-    if _compiled_graph is None:
-        _compiled_graph = build_agent_graph(checkpointer=get_checkpointer())
+    saver = get_checkpointer()  # Revalidate required persistence even after an earlier cached memory graph.
+    if _compiled_graph is None or _compiled_graph.checkpointer is not saver:
+        _compiled_graph = build_agent_graph(checkpointer=saver)
     return _compiled_graph
 
 
@@ -79,9 +81,9 @@ def run_agent_message(
     Returns:
         Structured response dictionary with reply content, tool executions, and sources.
     """
-    graph = get_agent_graph(checkpointer=checkpointer)
     config = make_thread_config(thread_id, user_id=user_id)
-    eff_auth = is_authenticated if is_authenticated is not None else (not user_id.startswith("unauth_"))
+    # A user ID is not proof of authentication. Only the verified boundary can supply True.
+    eff_auth = is_authenticated is True
 
     user_message = HumanMessage(content=content, id=uuid.uuid4().hex)
     initial_input = {
@@ -97,13 +99,14 @@ def run_agent_message(
     }
 
     try:
+        graph = get_agent_graph(checkpointer=checkpointer)
         final_state = graph.invoke(initial_input, config=config)
     except Exception as exc:
-        logger.error("LangGraph execution error on thread %s: %s", thread_id, exc)
+        logger.error("LangGraph execution failed (%s)", type(exc).__name__)
         return {
             "status": "error",
             "thread_id": thread_id,
-            "reply": f"Hệ thống gặp sự cố khi xử lý yêu cầu: {exc}",
+            "reply": "Hệ thống chưa thể xử lý hoặc lưu lịch sử yêu cầu. Vui lòng thử lại sau.",
             "tools_called": [],
             "sources": [],
         }

@@ -139,7 +139,8 @@ def vehicle_history_subject(question: str, messages: list | None = None) -> dict
         'xuat hien', 'nhan dien', 'lich su', 'thoi gian', 'dia diem', 'camera nao',
         'tung', 'di qua', 'khu vuc', 'ghi nhan', 'luot xe', 'lan nao', 'lan dau', 'lan gan nhat', 'cuoi cung'
     )) or bool(prior_plate and is_date_followup)
-    is_watchlist_check = any(w in q_norm for w in ('watchlist', 'danh sach theo doi')) and any(w in q_norm for w in ('co trong', 'thuoc', 'kiem tra', 'khong'))
+    is_watchlist_check = any(w in q_norm for w in ('watchlist', 'danh sach theo doi')) and (
+        not is_history or any(w in q_norm for w in ('co trong', 'thuoc', 'kiem tra', 'khong')))
 
     if not is_history and not is_watchlist_check and not has_plate:
         return None
@@ -148,6 +149,12 @@ def vehicle_history_subject(question: str, messages: list | None = None) -> dict
     norm_plate = normalize_plate(plate) if plate else (prior_plate if prior_plate else None)
     display_name = extract_vehicle_display_name(question) or (prior_name if prior_plate else None)
     is_follow_up = bool(prior_plate)
+
+    if is_watchlist_check and not norm_plate and not display_name and not re.search(
+        r'\b(?:xe|bien(?:\s+so)?|phuong\s+tien)\s+(?:nay|do)\b', q_norm
+    ):
+        # A list request has no single vehicle to resolve; retain the general watchlist listing route.
+        return None
 
     if not norm_plate and not display_name:
         # Check follow-up reference: "xe này", "biển số này", "chiếc xe này"

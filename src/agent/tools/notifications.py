@@ -8,7 +8,7 @@ from langchain_core.tools import tool
 from sqlalchemy import func, or_, select
 
 from src.agent.config import agent_config
-from src.agent.tools.analytics import parse_iso_time
+from src.agent.tools.notification_queries import filtered_notifications, status_totals
 from src.db.models import Camera, FaceEvent, Notification, PlateEvent, Target, VehicleWatchlist
 from src.notifications.alerts import camera_aliases
 from src.notifications.errors import safe_error
@@ -37,6 +37,9 @@ def get_notifications_status(
     end_time: str | None = None,
     to_time: str | None = None,
     limit: int = 20,
+    event_type: str | None = None,
+    target_id: str | None = None,
+    search: str | None = None,
 ) -> dict[str, Any]:
     """Inspect email notification delivery logs and retry statuses.
 
@@ -64,61 +67,14 @@ def get_notifications_status(
     eff_start = start_time or from_time
     eff_end = end_time or to_time
 
-    db = agent_config.get_database()
+    db = None
     try:
+        db = agent_config.get_database()
         with db.transaction() as session:
-            q = (
-                select(Notification, FaceEvent, PlateEvent, Target, VehicleWatchlist)
-                .outerjoin(FaceEvent, Notification.event_id == FaceEvent.id)
-                .outerjoin(PlateEvent, Notification.plate_event_id == PlateEvent.id)
-                .outerjoin(Target, FaceEvent.target_id == Target.id)
-                .outerjoin(VehicleWatchlist, Notification.vehicle_watchlist_id == VehicleWatchlist.id)
-            )
-
-            # Event ID filter
-            if event_id and event_id.strip():
-                clean_eid = event_id.strip()
-                if ":" in clean_eid:
-                    clean_eid = clean_eid.split(":")[-1]
-                try:
-                    uuid_eid = UUID(clean_eid)
-                    q = q.where(or_(Notification.event_id == uuid_eid, Notification.plate_event_id == uuid_eid))
-                except ValueError:
-                    pass
-
-            # Status filter
-            if status and status.lower() != "all":
-                st_clean = status.lower().strip()
-                if st_clean in ("pending", "sent", "failed", "suppressed"):
-                    q = q.where(Notification.status == st_clean)
-
-            # Camera filter
-            if camera_id and camera_id != "all":
-                q = q.where(Notification.camera_id.in_(camera_aliases(camera_id.strip())))
-
-            # Plate filter
-            if plate_number and plate_number.strip():
-                p_clean = f"%{plate_number.strip()}%"
-                q = q.where(or_(PlateEvent.plate_text.ilike(p_clean), PlateEvent.normalized_plate.ilike(p_clean)))
-
-            # Target filter
-            if target_name and target_name.strip():
-                t_clean = f"%{target_name.strip()}%"
-                q = q.where(or_(Target.name.ilike(t_clean), VehicleWatchlist.display_name.ilike(t_clean)))
-
-            # Time filters
-            if eff_start:
-                try:
-                    start_dt = parse_iso_time(eff_start, datetime.min.replace(tzinfo=timezone.utc))
-                    q = q.where(Notification.created_at >= start_dt)
-                except Exception:
-                    pass
-            if eff_end:
-                try:
-                    end_dt = parse_iso_time(eff_end, datetime.max.replace(tzinfo=timezone.utc))
-                    q = q.where(Notification.created_at <= end_dt)
-                except Exception:
-                    pass
+            q = filtered_notifications(session, camera_id=camera_id, status=status, event_type=event_type,
+                event_id=event_id, target_id=target_id, target_name=target_name, plate_number=plate_number,
+                search=search, start_time=eff_start, end_time=eff_end)
+            filtered = q.subquery()
 
             total = session.scalar(select(func.count()).select_from(q.subquery())) or 0
             rows = session.execute(q.order_by(Notification.created_at.desc(), Notification.id.desc()).limit(bounded_limit)).all()
@@ -148,9 +104,7 @@ def get_notifications_status(
                     "next_attempt_at": item.next_attempt_at.isoformat() if item.next_attempt_at else None,
                 })
 
-            # Calculate status totals
-            summary_stmt = select(Notification.status, func.count(Notification.id)).group_by(Notification.status)
-            status_summary = {str(r[0]): int(r[1]) for r in session.execute(summary_stmt).all()}
+            status_summary = status_totals(session, filtered)
 
             return {
                 "status": "success",
@@ -169,6 +123,7 @@ def get_notifications_status(
                 ),
             }
     except Exception as exc:
-        return {"status": "error", "message": f"Failed to retrieve notifications: {exc}"}
+        return {"status": "error", "message": "Không thể truy xuất thông báo hoặc bộ lọc không hợp lệ; chưa xác minh được số lượng."}
     finally:
-        db.dispose()
+        if db is not None:
+            db.dispose()

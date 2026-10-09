@@ -68,6 +68,32 @@ app = FastAPI(
     version="4.4.0",
 )
 
+
+@app.middleware('http')
+async def authorize_operational_api(request: Request, call_next):
+    """Apply the same operational policy to direct data APIs and legacy data aliases."""
+    from src.agent.security import operational_auth_required
+    from src.agent.api.auth import resolve_authenticated_user
+    path = request.url.path
+    legacy = ('/targets', '/events', '/watchlist/vehicles', '/watchlists/vehicles',
+              '/video_source', '/video_sources', '/public_cameras', '/source_status',
+              '/camera_snapshot', '/camera_thumbnail', '/event_snapshot', '/telemetry',
+              '/frame_packet', '/frame_stream', '/video_feed', '/status', '/register_target',
+              '/switch_camera', '/zone_mode', '/set_zone_mode', '/set_video_source',
+              '/select_source', '/stop_camera', '/upload_video', '/stop_preview', '/preview_feed')
+    camera_data = path == '/cameras' and 'text/html' not in request.headers.get('accept', '')
+    protected = (camera_data or path.startswith('/api/')
+                 or any(path == p or path.startswith(p + '/') for p in legacy))
+    # Agent routes resolve identity using their typed payload/session contract themselves.
+    if protected and not path.startswith('/api/agent/') and operational_auth_required():
+        try:
+            _, authenticated = resolve_authenticated_user(request)
+            if not authenticated:
+                raise HTTPException(status_code=401, detail='Operational queries require authentication.')
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
+    return await call_next(request)
+
 from src.ui.camera_capture import router as camera_capture_router
 app.include_router(camera_capture_router)
 

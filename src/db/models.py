@@ -334,7 +334,7 @@ class AgentConversation(Identity, Base):
     """Registry of persistent user conversations for DATT AI Agent."""
     __tablename__ = "agent_conversations"
 
-    thread_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    thread_id: Mapped[str] = mapped_column(String(128), index=True)
     user_id: Mapped[str] = mapped_column(String(255), index=True)
     title: Mapped[str] = mapped_column(String(255), default="Cuộc trò chuyện mới")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
@@ -343,6 +343,7 @@ class AgentConversation(Identity, Base):
     status: Mapped[str] = mapped_column(String(20), default="active", index=True)
 
     __table_args__ = (
+        UniqueConstraint("thread_id", name="uq_agent_conversations_thread_id"),
         Index("ix_agent_conversations_user_updated", "user_id", "updated_at"),
         Index("ix_agent_conversations_user_last_msg", "user_id", "last_message_at"),
     )

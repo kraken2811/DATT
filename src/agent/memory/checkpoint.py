@@ -8,6 +8,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 
 from src.agent.config import agent_config
+from src.agent.security import persistent_history_required
 
 logger = logging.getLogger("datt.agent.memory")
 
@@ -34,17 +35,30 @@ def get_postgres_connection_string() -> str | None:
 _pg_pool: Any = None
 
 
+class CheckpointUnavailable(RuntimeError):
+    """Persistent history is required but cannot be verified; message contains no driver details."""
+
+
+def validate_checkpointer(checkpointer):
+    if persistent_history_required():
+        from langgraph.checkpoint.postgres import PostgresSaver
+        if not isinstance(checkpointer, PostgresSaver):
+            raise CheckpointUnavailable('PostgreSQL conversation history is required')
+    return checkpointer
+
+
 def get_checkpointer(force_memory: bool = False) -> BaseCheckpointSaver:
     """Create or return checkpointer instance.
 
-    Uses PostgresSaver with ConnectionPool if PostgreSQL is available, falling back to MemorySaver.
+    Persistent deployments require PostgresSaver. MemorySaver is permitted only when
+    persistent conversation history is not required.
     """
     global _checkpointer_instance, _pg_pool
     if _checkpointer_instance is not None and not force_memory:
-        return _checkpointer_instance
+        return validate_checkpointer(_checkpointer_instance)
 
     if force_memory:
-        return MemorySaver()
+        return validate_checkpointer(MemorySaver())
 
     conn_str = get_postgres_connection_string()
     if conn_str:
@@ -56,13 +70,14 @@ def get_checkpointer(force_memory: bool = False) -> BaseCheckpointSaver:
             if _pg_pool is None:
                 _pg_pool = ConnectionPool(
                     conn_str,
+                    open=False,
                     min_size=1,
                     max_size=5,
                     check=ConnectionPool.check_connection,
                     max_idle=60.0,
                     kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
                 )
-                _pg_pool.open()
+                _pg_pool.open(wait=True, timeout=agent_config.timeout_seconds)
 
             saver = PostgresSaver(_pg_pool)
             saver.setup()
@@ -70,7 +85,19 @@ def get_checkpointer(force_memory: bool = False) -> BaseCheckpointSaver:
             _checkpointer_instance = saver
             return saver
         except Exception as exc:
-            logger.warning("Failed to initialize PostgresSaver (%s); using MemorySaver", exc)
+            logger.error("Failed to initialize PostgresSaver (%s)", type(exc).__name__)
+            if _pg_pool is not None:
+                failed_pool = _pg_pool
+                _pg_pool = None
+                try:
+                    failed_pool.close()
+                except Exception as close_error:
+                    logger.error('Failed to close checkpoint pool (%s)', type(close_error).__name__)
+            if persistent_history_required():
+                raise CheckpointUnavailable('Persistent conversation history unavailable') from None
+
+    if persistent_history_required():
+        raise CheckpointUnavailable('PostgreSQL conversation history is not configured')
 
     logger.info("Using MemorySaver checkpointer")
     _checkpointer_instance = MemorySaver()
@@ -90,14 +117,22 @@ def make_thread_config(thread_id: str, user_id: str = "default_user") -> dict[st
     }
 
 
-def clear_thread_checkpoint(thread_id: str, user_id: str = "default_user") -> bool:
+def clear_thread_checkpoint(thread_id: str, user_id: str = "default_user", *, session=None) -> bool:
     """Safely clear saved checkpoint state for a specific isolated user and thread."""
     config = make_thread_config(thread_id, user_id=user_id)
     internal_tid = config["configurable"]["thread_id"]
 
+    if session is not None and session.bind.dialect.name == 'postgresql':
+        # Same transaction as registry deletion: rollback restores both on any error.
+        from sqlalchemy import text
+        for table in ('checkpoint_writes', 'checkpoint_blobs', 'checkpoints'):
+            session.execute(text('DELETE FROM ' + table + ' WHERE thread_id = :tid'), {'tid': internal_tid})
+        return True
+
     checkpointer = get_checkpointer()
     if hasattr(checkpointer, "storage") and isinstance(checkpointer.storage, dict):
-        checkpointer.storage.pop(internal_tid, None)
+        # LangGraph stores pending writes separately from the checkpoint history.
+        checkpointer.delete_thread(internal_tid)
         return True
 
     conn_str = get_postgres_connection_string()
@@ -112,5 +147,5 @@ def clear_thread_checkpoint(thread_id: str, user_id: str = "default_user") -> bo
                 conn.commit()
             return True
         except Exception as exc:
-            logger.warning("Failed to clear PostgreSQL checkpoint for %s: %s", internal_tid, exc)
+            logger.error("Failed to clear PostgreSQL checkpoint (%s)", type(exc).__name__)
     return False
