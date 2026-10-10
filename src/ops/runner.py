@@ -48,7 +48,11 @@ def main():
     try:
         from src.agent.api.auth import validate_auth_configuration
         validate_auth_configuration()
-        from src.ui.web_server import app
+        from src.ui.runtime_frontend import prepare_runtime_frontend, configure_runtime_frontend
+        runtime_react_dist = prepare_runtime_frontend()
+        import src.ui.web_server as web_server
+        configure_runtime_frontend(web_server, runtime_react_dist)
+        app = web_server.app
         revision = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True,
                                   timeout=10).stdout.strip() or 'unavailable'
         from src.agent.config import agent_config
@@ -58,7 +62,8 @@ def main():
         def health():
             return {'status': 'ok', 'mode': args.mode, 'instance': args.token,
                     'commit': revision, 'application_module': 'src.ui.web_server',
-                    'agent_llm_provider': agent_config.llm_provider}
+                    'agent_llm_provider': agent_config.llm_provider,
+                    'runtime_frontend': bool(runtime_react_dist)}
 
         @app.get('/startup-health')
         def startup_health():
