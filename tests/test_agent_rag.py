@@ -3,12 +3,12 @@
 from pathlib import Path
 import pytest
 
-from src.agent.rag.chunking import chunk_document
-from src.agent.rag.embeddings import FastEmbedService, MockEmbeddingService, get_embedding_service
+from src.agent.rag.chunking import chunk_document, embedding_text_for_chunk, is_low_value_chunk
+from src.agent.rag.embeddings import FastEmbedService, MockEmbeddingService
 from src.agent.rag.ingestion import IngestionService
-from src.agent.rag.retrieval import KnowledgeRetriever
+from src.agent.rag.retrieval import KnowledgeRetriever, RetrievedChunk
 from src.db.database import Database
-from src.db.models import KnowledgeChunk, KnowledgeDocument
+from src.db.models import KnowledgeDocument
 
 
 @pytest.fixture
@@ -42,9 +42,57 @@ Check error logs for HTTP 404 or connection refused.
 """
     chunks = chunk_document(doc_text, doc_metadata={"source": "docs/test.md"}, chunk_size=200, chunk_overlap=30)
     assert len(chunks) >= 2
-    # Verify section titles extracted
     sections = [c.metadata.get("section") for c in chunks]
     assert any("Camera Configuration" in s or "Troubleshooting" in s or "Overview" in s for s in sections)
+
+
+def test_table_of_contents_is_filtered_from_chunks():
+    doc_text = """# USER GUIDE
+
+## MỤC LỤC
+1. [Giới thiệu hệ thống](#1-gioi-thieu-he-thong)
+2. [Các chức năng chính](#2-cac-chuc-nang-chinh)
+3. [Quản lý Camera](#3-quan-ly-camera)
+4. [Event Center](#4-event-center)
+
+## Các chức năng chính
+DATT cho phép quản lý camera, watchlist, sự kiện, cảnh báo và AI Assistant.
+"""
+    chunks = chunk_document(doc_text, doc_metadata={"title": "User Guide"}, chunk_size=250, chunk_overlap=20)
+    assert chunks
+    assert all("MỤC LỤC" not in c.metadata.get("section", "") for c in chunks)
+    assert any("Các chức năng chính" in c.metadata.get("section", "") for c in chunks)
+    assert is_low_value_chunk("MỤC LỤC", "1. [Giới thiệu](#gioi-thieu)\n2. [Camera](#camera)\n3. [Events](#events)")
+
+
+def test_embedding_text_contains_document_and_section_context():
+    chunks = chunk_document(
+        "# Guide\n\n## Camera offline\nKiểm tra ingestion worker và nguồn video.",
+        doc_metadata={"title": "DATT User Guide"},
+        chunk_size=200,
+        chunk_overlap=10,
+    )
+    target = next(c for c in chunks if "ingestion worker" in c.content)
+    embedding_text = embedding_text_for_chunk(target, "DATT User Guide")
+    assert "Document: DATT User Guide" in embedding_text
+    assert "Section: Camera offline" in embedding_text
+    assert "Kiểm tra ingestion worker" in embedding_text
+
+
+def test_retrieval_reranker_penalizes_toc_and_rewards_section_match():
+    candidates = [
+        RetrievedChunk(
+            chunk_id="toc", document_id="doc", document_name="User Guide", content="1. [Camera](#camera)\n2. [Watchlist](#watchlist)\n3. [Events](#events)",
+            score=0.78, section="MỤC LỤC",
+        ),
+        RetrievedChunk(
+            chunk_id="guide", document_id="doc", document_name="User Guide", content="Quản lý camera, watchlist, Event Center và Alert Center từ giao diện DATT.",
+            score=0.74, section="Các chức năng chính",
+        ),
+    ]
+    ranked = KnowledgeRetriever._rerank("hướng dẫn sử dụng hệ thống camera watchlist event", candidates, 2)
+    assert ranked[0].chunk_id == "guide"
+    assert ranked[-1].chunk_id == "toc"
 
 
 def test_mock_embedding_determinism(mock_embedder):
@@ -52,7 +100,6 @@ def test_mock_embedding_determinism(mock_embedder):
     vec2 = mock_embedder.embed_query("CAM01 connection timeout")
     assert len(vec1) == 384
     assert vec1 == vec2
-    # Different text produces different embedding
     vec3 = mock_embedder.embed_query("Vehicle watchlist registration")
     assert vec1 != vec3
 
@@ -71,7 +118,6 @@ If CAM03 is offline, follow these steps:
     unique_title = "Unit Test Camera Troubleshooting Manual"
     unique_source = "tests/fixtures/test_cam_manual.md"
 
-    # 1. Ingest text
     res = service.ingest_text(
         title=unique_title,
         text=doc_content,
@@ -82,7 +128,6 @@ If CAM03 is offline, follow these steps:
     assert res.status in ("created", "updated")
     assert res.chunks_created >= 1
 
-    # 2. Duplicate ingestion should be skipped
     res_dup = service.ingest_text(
         title=unique_title,
         text=doc_content,
@@ -92,7 +137,6 @@ If CAM03 is offline, follow these steps:
     )
     assert res_dup.status == "skipped"
 
-    # 3. Retrieve knowledge
     search_res = retriever.retrieve(
         query="If CAM03 is offline, follow these steps:",
         top_k=3,
@@ -106,7 +150,6 @@ If CAM03 is offline, follow these steps:
     assert first_result["document_name"] == unique_title
     assert "score" in first_result
 
-    # 4. Insufficient context test
     empty_res = retriever.retrieve(
         query="completely unrelated astronomical quantum query xyz987654",
         score_threshold=0.999,
@@ -114,7 +157,6 @@ If CAM03 is offline, follow these steps:
     assert empty_res["status"] == "insufficient_context"
     assert len(empty_res["results"]) == 0
 
-    # Cleanup test document
     with test_db.transaction() as session:
         doc = session.query(KnowledgeDocument).filter(KnowledgeDocument.source == unique_source).first()
         if doc:
