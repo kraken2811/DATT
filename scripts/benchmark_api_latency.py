@@ -22,6 +22,7 @@ ENDPOINTS = (
     ('VEHICLE_WATCHLIST', '/api/watchlist/vehicles?page=1&page_size=25'),
     ('EVENT_CENTER_25', '/api/event_center/events?page=1&page_size=25'),
     ('EVENT_CENTER_5', '/api/event_center/events?page=1&page_size=5'),
+    ('EVENT_CENTER_5_NO_TOTAL', '/api/event_center/events?page=1&page_size=5&include_total=false'),
     ('ALERT_CENTER', '/api/alerts?page=1&page_size=25'),
     ('VIDEO_SOURCES', '/video_sources'),
 )
@@ -99,6 +100,12 @@ def main():
             warm_p50 = report['endpoints'][name]['warm'].get('client_total_ms', {}).get('p50')
             warm_p95 = report['endpoints'][name]['warm'].get('client_total_ms', {}).get('p95')
             print(f'{name}: cold={cold["client_total_ms"]:.2f}ms warm_p50={warm_p50}ms warm_p95={warm_p95}ms')
+
+    exact = report['endpoints']['EVENT_CENTER_5']['warm'].get('client_total_ms', {}).get('p50')
+    light = report['endpoints']['EVENT_CENTER_5_NO_TOTAL']['warm'].get('client_total_ms', {}).get('p50')
+    if exact is not None and light is not None:
+        report['event_center_count_cost_estimate_p50_ms'] = round(max(0.0, exact - light), 2)
+        print('EVENT_COUNT_COST_ESTIMATE_P50_MS=' + str(report['event_center_count_cost_estimate_p50_ms']))
 
     print('\n[DATT_API_LATENCY_JSON]')
     print(json.dumps(report, indent=2, sort_keys=True))
