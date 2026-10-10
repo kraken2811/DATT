@@ -19,11 +19,13 @@ export async function fetchEvents(params = {}, signal = null) {
   if (params.from) query.set('from', params.from);
   if (params.to) query.set('to', params.to);
   if (params.sort) query.set('sort', params.sort);
+  if (params.include_total !== undefined) query.set('include_total', String(params.include_total));
 
   const qs = query.toString();
   return apiRequest(`/api/event_center/events${qs ? `?${qs}` : ''}`, {
     signal,
-    cacheTtlMs: 2000,
+    cacheTtlMs: 5000,
+    staleWhileRevalidateMs: 30000,
   });
 }
 
@@ -31,6 +33,7 @@ export async function fetchEventDetail(eventId, signal = null) {
   return apiRequest(`/api/event_center/events/${encodeURIComponent(eventId)}`, {
     signal,
     cacheTtlMs: 10000,
+    staleWhileRevalidateMs: 30000,
   });
 }
 
