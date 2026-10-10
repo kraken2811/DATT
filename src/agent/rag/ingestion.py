@@ -3,8 +3,8 @@
 Features:
 - Content extraction and cleaning
 - SHA256 content deduplication
-- Chunking with section hierarchy
-- Batch embedding generation
+- Navigation/TOC filtering through semantic chunking
+- Context-aware embedding using document title + section + passage
 - Transactional persistence to PostgreSQL (knowledge_documents & knowledge_chunks)
 """
 
@@ -13,12 +13,16 @@ import hashlib
 import logging
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from sqlalchemy import delete, select
 
 from src.agent.config import agent_config
-from src.agent.rag.chunking import chunk_document
+from src.agent.rag.chunking import (
+    RAG_PIPELINE_VERSION,
+    chunk_document,
+    embedding_text_for_chunk,
+)
 from src.agent.rag.embeddings import BaseEmbeddingService, get_embedding_service
 from src.db.database import Database
 from src.db.models import KnowledgeChunk, KnowledgeDocument, utc_now
@@ -62,11 +66,7 @@ class IngestionService:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def extract_text_from_file(self, file_path: Path | str) -> tuple[str, str]:
-        """Extract plain text and determine document type from a file path.
-
-        Returns:
-            tuple[text, document_type]
-        """
+        """Extract plain text and determine document type from a file path."""
         path = Path(file_path).resolve()
         if not path.is_file():
             raise FileNotFoundError(f"Document file not found: {path}")
@@ -75,10 +75,10 @@ class IngestionService:
         if suffix in (".md", ".markdown"):
             text = path.read_text(encoding="utf-8", errors="replace")
             return text, "markdown"
-        elif suffix in (".txt", ".log", ".rst"):
+        if suffix in (".txt", ".log", ".rst"):
             text = path.read_text(encoding="utf-8", errors="replace")
             return text, "txt"
-        elif suffix == ".pdf":
+        if suffix == ".pdf":
             try:
                 import pypdf
                 reader = pypdf.PdfReader(str(path))
@@ -89,7 +89,7 @@ class IngestionService:
                 return "\n\n".join(pages), "pdf"
             except Exception as exc:
                 raise ValueError(f"Failed to extract PDF text from {path}: {exc}") from exc
-        elif suffix in (".docx", ".doc"):
+        if suffix in (".docx", ".doc"):
             try:
                 import docx
                 doc = docx.Document(str(path))
@@ -97,8 +97,7 @@ class IngestionService:
                 return text, "docx"
             except Exception as exc:
                 raise ValueError(f"Failed to extract DOCX text from {path}: {exc}") from exc
-        else:
-            raise ValueError(f"Unsupported document format: {suffix}")
+        raise ValueError(f"Unsupported document format: {suffix}")
 
     def ingest_text(
         self,
@@ -130,9 +129,10 @@ class IngestionService:
             "document_type": document_type,
             "embedding_model": agent_config.embedding_model,
             "embedding_dim": agent_config.embedding_dim,
+            "rag_pipeline_version": RAG_PIPELINE_VERSION,
         })
 
-        # 1. Chunk document
+        # 1. Chunk document and drop structural/navigation-only passages.
         chunks = chunk_document(cleaned, doc_metadata=doc_meta)
         if not chunks:
             return IngestionResult(
@@ -142,14 +142,14 @@ class IngestionService:
                 document_type=document_type,
                 chunks_created=0,
                 status="failed",
-                error="No chunks produced from text",
+                error="No answerable chunks produced from text",
             )
 
-        # 2. Batch compute embeddings BEFORE opening DB transaction
-        chunk_texts = [c.content for c in chunks]
-        embeddings = self.embedder.embed_documents(chunk_texts)
+        # 2. Embed a retrieval representation that includes title + active section.
+        # Raw chunk.content remains unchanged for citations and grounded answers.
+        embedding_inputs = [embedding_text_for_chunk(c, title) for c in chunks]
+        embeddings = self.embedder.embed_documents(embedding_inputs)
 
-        # Protection against incompatible embedding dimension
         for emb in embeddings:
             if emb is not None and len(emb) != agent_config.embedding_dim:
                 raise ValueError(
@@ -157,16 +157,27 @@ class IngestionService:
                     f"but database schema expects {agent_config.embedding_dim}."
                 )
 
-        # 3. Short atomic database write transaction
+        # 3. Short atomic database write transaction.
         with self.db.transaction() as session:
-            # Check existing document by source or content hash
             existing_by_hash = session.scalar(
                 select(KnowledgeDocument).where(KnowledgeDocument.content_hash == content_hash)
             )
-            # Verify existing doc was embedded with the current model
-            existing_model = (existing_by_hash.doc_metadata or {}).get("embedding_model") if existing_by_hash else None
-            if existing_by_hash and existing_model == agent_config.embedding_model and not force_update:
-                logger.info("Document '%s' identical hash already exists with current model; skipping", title)
+
+            existing_meta = (existing_by_hash.doc_metadata or {}) if existing_by_hash else {}
+            existing_model = existing_meta.get("embedding_model")
+            existing_dim = existing_meta.get("embedding_dim")
+            existing_pipeline = existing_meta.get("rag_pipeline_version")
+            compatible_existing = (
+                existing_by_hash is not None
+                and existing_model == agent_config.embedding_model
+                and existing_dim == agent_config.embedding_dim
+                and existing_pipeline == RAG_PIPELINE_VERSION
+            )
+            if compatible_existing and not force_update:
+                logger.info(
+                    "Document '%s' identical hash already exists with current embedding/RAG pipeline; skipping",
+                    title,
+                )
                 return IngestionResult(
                     document_id=str(existing_by_hash.id),
                     title=existing_by_hash.title,
@@ -176,13 +187,11 @@ class IngestionService:
                     status="skipped",
                 )
 
-            # Check existing document by source path
             existing_by_source = session.scalar(
                 select(KnowledgeDocument).where(KnowledgeDocument.source == source)
             )
 
             if existing_by_source:
-                # Update existing document: remove old chunks first
                 doc_record = existing_by_source
                 doc_record.title = title
                 doc_record.document_type = document_type
@@ -211,11 +220,14 @@ class IngestionService:
 
             session.flush()
 
-            # Insert chunks with embeddings
             for i, chunk in enumerate(chunks):
                 emb = embeddings[i] if i < len(embeddings) else None
                 chunk_meta = dict(chunk.metadata)
-                chunk_meta["embedding_model"] = agent_config.embedding_model
+                chunk_meta.update({
+                    "embedding_model": agent_config.embedding_model,
+                    "embedding_dim": agent_config.embedding_dim,
+                    "rag_pipeline_version": RAG_PIPELINE_VERSION,
+                })
                 chunk_rec = KnowledgeChunk(
                     id=uuid4(),
                     document_id=doc_record.id,
