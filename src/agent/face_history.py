@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from src.agent.identity_resolution import extract_context_scope
 from src.agent.response_formatting import current_turn, facts, format_tool_messages, safe_result, wants_json, text
 
 
@@ -132,7 +133,11 @@ def respond(messages, tools):
     wants_notifs = asks_notifications(original_question)
 
     if not results:
-        if not subject:
+        scope = extract_context_scope(original_question)
+        cand_name = scope.get("candidate_name")
+        entity_span = scope.get("entity_span")
+        effective_query = cand_name or entity_span or subject
+        if not effective_query:
             return AIMessage(content='Bạn muốn tra cứu lịch sử nhận diện của ai? Vui lòng cung cấp tên hoặc ID trong Face Watchlist.')
         if 'search_watchlist' not in tools:
             return AIMessage(content='Chưa thể tra cứu danh tính và lịch sử nhận diện vì công cụ hiện không khả dụng.')
@@ -140,7 +145,11 @@ def respond(messages, tools):
             uuid.UUID(subject)
             args = {'target_id': subject}
         except ValueError:
-            args = {'query': subject}
+            args = {'query': effective_query}
+            if entity_span:
+                args['contextual_scope'] = entity_span
+            if cand_name:
+                args['candidate_name'] = cand_name
         try:
             history_filters(original_question)
         except ValueError:

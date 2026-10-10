@@ -574,6 +574,62 @@ body {
   z-index: 10;
 }
 
+.stream-idle-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background-color: rgba(11, 15, 23, 0.88);
+  color: var(--text-primary);
+  z-index: 8;
+  text-align: center;
+  padding: 24px;
+  backdrop-filter: blur(6px);
+}
+
+/* Source Selection Cards & Action Banner */
+.source-selection-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  background: var(--accent-surface);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  margin-bottom: 24px;
+  gap: 16px;
+  flex-wrap: wrap;
+  box-shadow: 0 4px 16px var(--accent-surface);
+}
+
+.source-card {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.source-card:hover {
+  border-color: var(--border-focus);
+  background-color: var(--bg-card-hover);
+  transform: translateY(-1px);
+}
+
+.source-card.selected {
+  border-color: var(--accent);
+  background-color: var(--accent-surface);
+  box-shadow: 0 0 0 1px var(--accent), 0 4px 14px var(--accent-glow);
+}
+
 /* Form Controls & Filter Bars */
 .filter-bar {
   display: flex;

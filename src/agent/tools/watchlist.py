@@ -6,6 +6,7 @@ from langchain_core.tools import tool
 from sqlalchemy import func, or_, select
 
 from src.agent.config import agent_config
+from src.agent.identity_resolution import resolve_identity
 from src.db.models import Target, VehicleWatchlist
 from src.watchlists.vehicles import normalize_plate, serialize_item
 
@@ -20,6 +21,8 @@ def search_watchlist(
     watchlist_type: str | None = None,
     status: str | None = None,
     limit: int = 20,
+    contextual_scope: str | None = None,
+    candidate_name: str | None = None,
 ) -> dict[str, Any]:
     """Search registered watchlists for monitored persons of interest (face) and vehicles (license plate).
 
@@ -84,8 +87,8 @@ def search_watchlist(
             # 2. Search face target watchlist if relevant
             if w_type in ("face", "person", "") and not (effective_plate and not effective_target):
                 stmt_f = select(Target).where(Target.target_type.in_(("face", "person")))
-                if effective_target:
-                    clean_target = effective_target.strip()
+                clean_target = effective_target.strip() if effective_target else None
+                if clean_target:
                     try:
                         u_id = UUID(clean_target)
                         stmt_f = stmt_f.where(Target.id == u_id)
@@ -94,10 +97,50 @@ def search_watchlist(
                         stmt_f = stmt_f.where(Target.name.ilike(f"%{literal}%", escape="\\"))
                 if status:
                     stmt_f = stmt_f.where(Target.active == (status.lower() == "active"))
-                results["face_total_matches"] = session.scalar(select(func.count()).select_from(stmt_f.subquery()))
-                results["face_has_more"] = results["face_total_matches"] > bounded_limit
+                f_count = session.scalar(select(func.count()).select_from(stmt_f.subquery())) or 0
                 stmt_f = stmt_f.order_by(Target.created_at.desc(), Target.id).limit(bounded_limit)
                 f_rows = session.scalars(stmt_f).all()
+
+                # Coordinated identity resolution fallback / enrichment
+                # If direct name substring search returns 0 rows (e.g. multi-word phrase like 'người tên Long')
+                # or if contextual_scope was explicitly passed:
+                if (f_count == 0 or contextual_scope) and clean_target:
+                    res = resolve_identity(
+                        original_question=clean_target,
+                        contextual_scope=contextual_scope or clean_target,
+                        candidate_name=candidate_name,
+                        entity_domain="face_watchlist",
+                        max_candidates=bounded_limit,
+                        session=session,
+                    )
+                    results["identity_resolution"] = res
+                    if res.get("status") == "resolved" and res.get("target_id"):
+                        resolved_t = session.scalar(
+                            select(Target).where(Target.id == UUID(res["target_id"]), Target.target_type.in_(("face", "person")))
+                        )
+                        if resolved_t:
+                            f_rows = [resolved_t]
+                            f_count = 1
+                    elif res.get("status") == "ambiguous" and res.get("candidates"):
+                        c_uuids = [UUID(c["id"]) for c in res["candidates"] if c.get("id")]
+                        if c_uuids:
+                            f_rows = session.scalars(
+                                select(Target).where(Target.id.in_(c_uuids)).order_by(Target.created_at.desc(), Target.id).limit(bounded_limit)
+                            ).all()
+                            f_count = len(f_rows)
+                elif f_count > 0 and clean_target:
+                    res = resolve_identity(
+                        original_question=clean_target,
+                        contextual_scope=contextual_scope or clean_target,
+                        candidate_name=candidate_name,
+                        entity_domain="face_watchlist",
+                        max_candidates=bounded_limit,
+                        session=session,
+                    )
+                    results["identity_resolution"] = res
+
+                results["face_total_matches"] = f_count
+                results["face_has_more"] = f_count > bounded_limit
                 results["face_watchlist"] = [
                     {
                         "id": str(t.id),

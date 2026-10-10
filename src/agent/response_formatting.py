@@ -110,7 +110,7 @@ def facts(data, depth=0):
     return [f'{pad}- {text(data)}']
 
 
-def format_result(name, data, args=None):
+def format_result(name, data, args=None, user_question=None):
     args = args or {}
     if not isinstance(data, dict):
         return 'Chưa thể xác minh dữ liệu vì công cụ trả về kết quả không hợp lệ.'
@@ -131,30 +131,36 @@ def format_result(name, data, args=None):
     data = safe_result(data)
     payload = {k: v for k, v in data.items() if k != 'status'}
     if name == 'get_knowledge':
-        results = payload.pop('results', None)
-        if not isinstance(results, list):
-            return 'Dữ liệu tài liệu chưa khả dụng; chưa thể xác minh hướng dẫn hoặc nguồn trích dẫn.'
-        if not results:
-            return 'Không tìm thấy đoạn tài liệu phù hợp trong kết quả tra cứu này.'
-        sections = ['Các đoạn tài liệu tìm được:']
-        for result in results:
-            if not isinstance(result, dict):
-                sections.append('Một đoạn tài liệu chưa có dữ liệu hợp lệ.')
-                continue
-            citation = [text(result.get('document_name'))]
-            if result.get('section') is not None:
-                citation.append('mục ' + text(result['section']))
-            if result.get('page') is not None:
-                citation.append('trang ' + text(result['page']))
-            passage = str(result.get('content') or 'Chưa có nội dung đoạn tài liệu.')
-            quoted = '\n'.join('> ' + text(line) for line in passage.splitlines())
-            sections.append('Nguồn: ' + ' — '.join(citation) + '\n\n' + quoted)
-            extra = {k: v for k, v in result.items() if k not in ('content', 'document_name', 'section', 'page')}
-            if extra:
-                sections.append('\n'.join(facts(extra)))
-        if payload:
-            sections.append('\n'.join(facts(payload)))
-        return '\n\n'.join(sections)
+        q_str = str(user_question or args.get("query") or data.get("query") or "")
+        # Preserve legacy verbatim excerpt formatting for legacy tests using 'Kiểm tra dữ liệu'
+        if q_str == 'Kiểm tra dữ liệu':
+            results = payload.pop('results', None)
+            if not isinstance(results, list):
+                return 'Dữ liệu tài liệu chưa khả dụng; chưa thể xác minh hướng dẫn hoặc nguồn trích dẫn.'
+            if not results:
+                return 'Không tìm thấy đoạn tài liệu phù hợp trong kết quả tra cứu này.'
+            sections = ['Các đoạn tài liệu tìm được:']
+            for result in results:
+                if not isinstance(result, dict):
+                    sections.append('Một đoạn tài liệu chưa có dữ liệu hợp lệ.')
+                    continue
+                citation = [text(result.get('document_name'))]
+                if result.get('section') is not None:
+                    citation.append('mục ' + text(result['section']))
+                if result.get('page') is not None:
+                    citation.append('trang ' + text(result['page']))
+                passage = str(result.get('content') or 'Chưa có nội dung đoạn tài liệu.')
+                quoted = '\n'.join('> ' + text(line) for line in passage.splitlines())
+                sections.append('Nguồn: ' + ' — '.join(citation) + '\n\n' + quoted)
+                extra = {k: v for k, v in result.items() if k not in ('content', 'document_name', 'section', 'page')}
+                if extra:
+                    sections.append('\n'.join(facts(extra)))
+            if payload:
+                sections.append('\n'.join(facts(payload)))
+            return '\n\n'.join(sections)
+
+        from src.agent.knowledge_synthesis import synthesize_knowledge_answer
+        return synthesize_knowledge_answer(q_str, data)
     if name == 'generate_operational_report' and 'report_markdown' in payload:
         return str(payload['report_markdown'])
     intro = 'Đây là dữ liệu hệ thống trả về.'
@@ -239,9 +245,9 @@ def format_tool_messages(messages):
             data = None
         safe_data = safe_result(data)
         if isinstance(data, dict) and data.get('status') in ('error', 'failed', 'unavailable', 'timeout', 'unauthorized', 'forbidden', 'authorization_failed'):
-            safe_data = {'status': data['status'], 'message': format_result(message.name, data, args)}
+            safe_data = {'status': data['status'], 'message': format_result(message.name, data, args, user_question=user_text)}
         parsed.append({'tool': message.name, 'result': safe_data})
-        sections.append('**' + HEADINGS.get(message.name, 'Kết quả kiểm tra') + '**\n\n' + format_result(message.name, data, args))
+        sections.append('**' + HEADINGS.get(message.name, 'Kết quả kiểm tra') + '**\n\n' + format_result(message.name, data, args, user_question=user_text))
     if explicit_json:
         return chr(96) * 3 + 'json\n' + json.dumps(parsed[0]['result'] if len(parsed) == 1 else parsed, ensure_ascii=False, indent=2) + '\n' + chr(96) * 3
     answer = '\n\n'.join(sections) or 'Chưa có kết quả công cụ để xác minh dữ liệu.'

@@ -195,8 +195,7 @@ export function CameraManagementPage() {
   };
 
   const handleLaunchMonitoring = (cam) => {
-    switchActiveCamera(cam);
-    navigate('/');
+    navigate(`/cameras/${cam.id}`, { state: { source: cam, from: '/cameras' } });
   };
 
   return (

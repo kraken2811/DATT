@@ -432,7 +432,43 @@ class MockChatModel:
                 ],
             )
 
-        # C. Watchlist search
+        # C. Documentation / How-to / Troubleshooting / System Guides -> get_knowledge
+        if (
+            "tài liệu" in lower_q
+            or "hướng dẫn" in lower_q
+            or "khắc phục" in lower_q
+            or "xử lý thế nào" in lower_q
+            or "quy tắc" in lower_q
+            or "chính sách" in lower_q
+            or "cấu hình" in lower_q
+            or "kiến trúc" in lower_q
+            or "how to" in lower_q
+            or "troubleshoot" in lower_q
+            or "bytetrack" in lower_q
+            or "giới thiệu" in lower_q
+            or "datt là gì" in lower_q
+            or "tổng quan" in lower_q
+            or "cài đặt" in lower_q
+            or "triển khai" in lower_q
+            or "cách sử dụng" in lower_q
+            or "cách dùng" in lower_q
+            or "cách xem" in lower_q
+            or "cách thêm" in lower_q
+            or "cách tạo" in lower_q
+            or "cách đăng ký" in lower_q
+        ):
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_knowledge",
+                        "args": {"query": content, "top_k": 5},
+                        "id": f"call_{uuid.uuid4().hex[:8]}",
+                    }
+                ],
+            )
+
+        # D. Watchlist search (operational query)
         if "watchlist" in lower_q or "danh sách theo dõi" in lower_q:
             target = None
             if "biển số" in lower_q or "30a-" in lower_q:
@@ -451,7 +487,7 @@ class MockChatModel:
                 ],
             )
 
-        # D. Operational events search (person detection or target or specific events)
+        # E. Operational events search (person detection or target or specific events)
         if (
             "target_" in lower_q
             or "xuất hiện" in lower_q
@@ -471,31 +507,6 @@ class MockChatModel:
                     {
                         "name": "search_events",
                         "args": args,
-                        "id": f"call_{uuid.uuid4().hex[:8]}",
-                    }
-                ],
-            )
-
-        # E & F. Documentation / How-to / Troubleshooting -> get_knowledge
-        if (
-            "tài liệu" in lower_q
-            or "hướng dẫn" in lower_q
-            or "khắc phục" in lower_q
-            or "xử lý thế nào" in lower_q
-            or "quy tắc" in lower_q
-            or "chính sách" in lower_q
-            or "cấu hình" in lower_q
-            or "kiến trúc" in lower_q
-            or "how to" in lower_q
-            or "troubleshoot" in lower_q
-            or "bytetrack" in lower_q
-        ):
-            return AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "get_knowledge",
-                        "args": {"query": content, "top_k": 3},
                         "id": f"call_{uuid.uuid4().hex[:8]}",
                     }
                 ],

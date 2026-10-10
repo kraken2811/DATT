@@ -43,6 +43,7 @@ function AppRoutes() {
               <Routes key={connectionRevision}>
                 <Route path="/" element={<DashboardPage />} />
                 <Route path="/dashboard" element={<DashboardPage />} />
+                <Route path="/monitor" element={<CameraViewPage />} />
                 <Route path="/cameras" element={<CameraManagementPage />} />
                 <Route path="/cameras/:id" element={<CameraViewPage />} />
                 <Route path="/watchlist" element={<WatchlistPage />} />

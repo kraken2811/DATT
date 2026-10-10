@@ -14,7 +14,9 @@
     "test:auth": "node --test test/auth-contract.test.js",
     "test:watchlist": "node --test test/watchlist-contract.test.js",
     "test:notifications": "node --test test/notification-toast.test.js",
-    "test:auth-browser": "node scripts/test_auth_e2e.cjs"
+    "test:dashboard-monitor": "node --test test/dashboard-monitor.test.js",
+    "test:auth-browser": "node scripts/test_auth_e2e.cjs",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "lucide-react": "^0.475.0",

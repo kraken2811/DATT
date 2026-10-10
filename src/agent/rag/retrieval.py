@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from src.agent.config import agent_config
 from src.agent.rag.embeddings import BaseEmbeddingService, get_embedding_service
+from src.agent.rag.intent import DocIntent, calculate_adjusted_score, classify_doc_intent
 from src.db.database import Database
 from src.db.models import KnowledgeChunk, KnowledgeDocument
 
@@ -89,6 +90,11 @@ class KnowledgeRetriever:
                 "results": [],
             }
 
+        # Classify documentation intent and target feature domain
+        intent_info = classify_doc_intent(clean_query)
+        doc_intent = intent_info["intent"]
+        feature_domain = intent_info["feature_domain"]
+
         # Embed query
         query_vec = self.embedder.embed_query(clean_query)
         if len(query_vec) != agent_config.embedding_dim:
@@ -120,28 +126,40 @@ class KnowledgeRetriever:
                         if document_type:
                             stmt = stmt.where(KnowledgeDocument.document_type == document_type)
 
-                        stmt = stmt.order_by(dist_col.asc()).limit(k * 2)
+                        # Fetch candidates pool to re-rank with intent priority
+                        stmt = stmt.order_by(dist_col.asc()).limit(max(k * 5, 25))
                         rows = session.execute(stmt).all()
 
+                        candidates = []
                         for chunk_row, doc_title, doc_type, dist in rows:
                             dist_val = float(dist) if dist is not None else 1.0
                             sim_val = max(0.0, 1.0 - dist_val)
-                            if sim_val < threshold:
-                                continue
                             meta = chunk_row.chunk_metadata or {}
+                            section = meta.get("section", "General")
+                            adj_score = calculate_adjusted_score(
+                                doc_title=doc_title,
+                                section=section,
+                                content=chunk_row.content,
+                                base_score=sim_val,
+                                intent=doc_intent,
+                                feature_domain=feature_domain,
+                            )
+                            if adj_score < threshold and sim_val < threshold:
+                                continue
                             candidates.append(
                                 RetrievedChunk(
-                                chunk_id=str(chunk_row.id),
-                                document_id=str(chunk_row.document_id),
-                                document_name=doc_title,
-                                content=chunk_row.content,
-                                score=sim_val,
-                                section=meta.get("section", "General"),
-                                page=meta.get("page"),
-                                document_type=doc_type,
-                                metadata=meta,
+                                    chunk_id=str(chunk_row.id),
+                                    document_id=str(chunk_row.document_id),
+                                    document_name=doc_title,
+                                    content=chunk_row.content,
+                                    score=adj_score,
+                                    section=section,
+                                    page=meta.get("page"),
+                                    document_type=doc_type,
+                                    metadata=meta,
+                                )
                             )
-                        )
+                        candidates.sort(key=lambda x: x.score, reverse=True)
                     else:
                         # SQLite fallback: load chunks and compute cosine similarity in memory
                         stmt = (
@@ -168,16 +186,25 @@ class KnowledgeRetriever:
                             c_arr = np.array(emb, dtype=np.float32)
                             c_norm = np.linalg.norm(c_arr) or 1.0
                             sim = float(np.dot(q_arr, c_arr) / (q_norm * c_norm))
-                            if sim >= threshold:
-                                meta = chunk_row.chunk_metadata or {}
+                            meta = chunk_row.chunk_metadata or {}
+                            section = meta.get("section", "General")
+                            adj_score = calculate_adjusted_score(
+                                doc_title=doc_title,
+                                section=section,
+                                content=chunk_row.content,
+                                base_score=sim,
+                                intent=doc_intent,
+                                feature_domain=feature_domain,
+                            )
+                            if adj_score >= threshold or sim >= threshold:
                                 candidates.append(
                                     RetrievedChunk(
                                         chunk_id=str(chunk_row.id),
                                         document_id=str(chunk_row.document_id),
                                         document_name=doc_title,
                                         content=chunk_row.content,
-                                        score=sim,
-                                        section=meta.get("section", "General"),
+                                        score=adj_score,
+                                        section=section,
                                         page=meta.get("page"),
                                         document_type=doc_type,
                                         metadata=meta,
@@ -202,5 +229,8 @@ class KnowledgeRetriever:
         return {
             "status": "success",
             "query": clean_query,
+            "doc_intent": doc_intent,
+            "feature_domain": feature_domain,
             "results": [c.to_dict() for c in selected],
         }
+

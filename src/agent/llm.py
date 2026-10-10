@@ -113,6 +113,31 @@ class ResilientChatModel:
             ) from primary_exc
 
 
+def get_active_provider_info() -> dict[str, Any]:
+    """Inspect configured and active runtime LLM provider information without revealing credentials."""
+    cfg_provider = (agent_config.llm_provider or "mock").lower()
+    has_gemini = bool(agent_config.gemini_api_key and agent_config.gemini_api_key.strip())
+    has_openai = bool(agent_config.openai_api_key and agent_config.openai_api_key.strip())
+
+    if cfg_provider == "google_genai":
+        actual = "google_genai" if has_gemini else "mock (missing GEMINI_API_KEY)"
+    elif cfg_provider == "openai":
+        actual = "openai" if has_openai else "mock (missing OPENAI_API_KEY)"
+    else:
+        actual = "mock"
+
+    return {
+        "configured_provider": cfg_provider,
+        "actual_runtime": actual,
+        "is_mock": actual.startswith("mock"),
+        "model_name": agent_config.model_name,
+        "temperature": agent_config.temperature,
+        "fallback_provider": agent_config.fallback_provider,
+        "has_gemini_key": has_gemini,
+        "has_openai_key": has_openai,
+    }
+
+
 def create_raw_model(provider: str, model_name: str, temperature: float) -> Any:
     """Instantiate a configured chat model. Mock must be selected explicitly."""
     prov = (provider or "").strip().lower()
@@ -176,3 +201,4 @@ def get_configured_llm() -> ResilientChatModel:
         timeout_seconds=agent_config.timeout_seconds,
         max_retries=agent_config.max_retries,
     )
+
