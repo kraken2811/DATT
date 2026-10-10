@@ -48,10 +48,26 @@ def main():
     try:
         from src.agent.api.auth import validate_auth_configuration
         validate_auth_configuration()
-        from src.ui.runtime_frontend import prepare_runtime_frontend, configure_runtime_frontend
-        runtime_react_dist = prepare_runtime_frontend()
+
+        # Frontend compilation is deployment presentation work. It must never
+        # prevent the AI/CV/API runtime from starting. Colab always has the
+        # tracked React bundle as a safe fallback; runtime builds are best-effort.
+        runtime_react_dist = None
+        try:
+            from src.ui.runtime_frontend import prepare_runtime_frontend
+            runtime_react_dist = prepare_runtime_frontend()
+        except Exception as exc:
+            print('runtime_frontend=FALLBACK; build_error=' + type(exc).__name__, flush=True)
+
         import src.ui.web_server as web_server
-        configure_runtime_frontend(web_server, runtime_react_dist)
+        if runtime_react_dist is not None:
+            try:
+                from src.ui.runtime_frontend import configure_runtime_frontend
+                configure_runtime_frontend(web_server, runtime_react_dist)
+            except Exception as exc:
+                print('runtime_frontend=FALLBACK; configure_error=' + type(exc).__name__, flush=True)
+                runtime_react_dist = None
+
         app = web_server.app
         revision = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True,
                                   timeout=10).stdout.strip() or 'unavailable'
