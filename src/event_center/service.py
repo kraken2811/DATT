@@ -2,8 +2,10 @@
 from datetime import datetime,timezone
 from uuid import UUID
 import json
+from time import perf_counter
 from sqlalchemy import select,union_all,literal,cast,String,Float,Boolean,func,case,or_
 from src.db.models import FaceEvent,PlateEvent,VehicleEvent,VehiclePassage,BusinessEvent,DetectionEvent,Notification,VehicleWatchlistResult
+from src.db.latency import add_metric, measure
 from src.watchlists.vehicles import normalize_plate
 
 KINDS=('face','plate','vehicle','passage','business')
@@ -81,6 +83,17 @@ def serialize(row):
         notification_status={4:'failed',3:'pending',2:'sent',1:'suppressed'}.get(row.notification_rank))
 
 
+def _bool_param(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized=str(value).strip().lower()
+    if normalized in ('1','true','yes','on'): return True
+    if normalized in ('0','false','no','off'): return False
+    raise ValueError('INVALID_INCLUDE_TOTAL')
+
+
 def query(session,params,ident=None):
     events=projection();q=select(events)
     if ident:
@@ -138,10 +151,24 @@ def query(session,params,ident=None):
     if ident:
         row=session.execute(q).first()
         if not row: raise LookupError('EVENT_NOT_FOUND')
-        return serialize(row)
+        with measure('serialization_ms'):
+            return serialize(row)
     try: page=int(params.get('page',1));size=int(params.get('page_size',params.get('limit',50)))
     except ValueError: raise ValueError('INVALID_PAGINATION') from None
     if page<1 or not 1<=size<=200: raise ValueError('INVALID_PAGINATION')
-    total=session.scalar(select(func.count()).select_from(q.order_by(None).subquery()))
+
+    include_total=_bool_param(params.get('include_total'), True)
+    total=None
+    if include_total:
+        count_started=perf_counter()
+        total=session.scalar(select(func.count()).select_from(q.order_by(None).subquery()))
+        add_metric('event_count_ms',(perf_counter()-count_started)*1000.0)
+
     rows=session.execute(q.offset((page-1)*size).limit(size)).all()
-    return dict(status='ok',events=[serialize(r) for r in rows],page=page,page_size=size,total=total)
+    with measure('serialization_ms'):
+        serialized=[serialize(r) for r in rows]
+    result=dict(status='ok',events=serialized,page=page,page_size=size,total=total)
+    if not include_total:
+        result['total_included']=False
+        result['has_more']=len(rows)==size
+    return result
