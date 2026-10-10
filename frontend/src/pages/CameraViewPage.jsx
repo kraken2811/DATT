@@ -3,11 +3,12 @@ import { useNavigate, useParams } from 'react-router-dom';
 import {
   FiArrowLeft,
   FiCamera,
-  FiCircle,
   FiMaximize2,
+  FiPause,
   FiRefreshCw,
-  FiServer,
-  FiVideoOff,
+  FiUsers,
+  FiVideo,
+  FiZap,
 } from 'react-icons/fi';
 import { AuthenticatedVideo } from '../components/AuthenticatedVideo';
 import { fetchCameraDetail } from '../api/cameras';
@@ -20,20 +21,49 @@ function valueOrDash(value) {
   return value === null || value === undefined || value === '' ? EMPTY : value;
 }
 
+function MetricCard({ label, value, unit, icon: Icon }) {
+  return (
+    <div className="classic-monitor-metric">
+      <div className="classic-monitor-metric-label">
+        <span>{label}</span>
+        <Icon size={15} />
+      </div>
+      <div className="classic-monitor-metric-value">
+        {value}
+        {value !== EMPTY && unit ? <small>{unit}</small> : null}
+      </div>
+    </div>
+  );
+}
+
 export function CameraViewPage() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { telemetry, activeCamera, switchActiveCamera } = useApp();
-  const [camera, setCamera] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const {
+    telemetry,
+    activeCamera,
+    switchActiveCamera,
+    stopActiveCamera,
+  } = useApp();
+
+  const [camera, setCamera] = useState(id ? null : activeCamera);
+  const [loading, setLoading] = useState(Boolean(id));
   const [error, setError] = useState(null);
   const [fullscreen, setFullscreen] = useState(false);
   const rootRef = useRef(null);
   const switchedCameraRef = useRef(null);
 
   useEffect(() => {
+    if (!id) {
+      setCamera(activeCamera);
+      setLoading(false);
+      return undefined;
+    }
+
     let mounted = true;
     const controller = new AbortController();
+    setLoading(true);
+    setError(null);
 
     fetchCameraDetail(id, controller.signal)
       .then(async (resp) => {
@@ -41,7 +71,7 @@ export function CameraViewPage() {
         if (!detail) throw new Error('Camera không tồn tại hoặc đã bị xóa');
         if (!mounted) return;
         setCamera(detail);
-        if (switchedCameraRef.current !== detail.id) {
+        if (switchedCameraRef.current !== detail.id && String(activeCamera?.id) !== String(detail.id)) {
           switchedCameraRef.current = detail.id;
           await switchActiveCamera(detail);
         }
@@ -57,7 +87,7 @@ export function CameraViewPage() {
       mounted = false;
       controller.abort();
     };
-  }, [id, switchActiveCamera]);
+  }, [id, activeCamera, switchActiveCamera]);
 
   useEffect(() => {
     const onFullscreen = () => setFullscreen(document.fullscreenElement === rootRef.current);
@@ -67,108 +97,95 @@ export function CameraViewPage() {
 
   const toggleFullscreen = async () => {
     if (!rootRef.current) return;
-    if (document.fullscreenElement === rootRef.current) {
-      await document.exitFullscreen();
-    } else {
-      await rootRef.current.requestFullscreen();
-    }
+    if (document.fullscreenElement === rootRef.current) await document.exitFullscreen();
+    else await rootRef.current.requestFullscreen();
   };
 
+  const currentCamera = camera || activeCamera || {};
+  const cameraId = currentCamera.id || activeCamera?.id;
   const live = Boolean(telemetry?.stream_alive);
+  const cameraStatus = String(telemetry?.camera_status || (live ? 'ONLINE' : 'OFFLINE')).toUpperCase();
   const fps = typeof telemetry?.processing_fps === 'number'
     ? telemetry.processing_fps.toFixed(1)
     : (typeof telemetry?.stream_fps === 'number' ? telemetry.stream_fps.toFixed(1) : EMPTY);
-  const latency = typeof telemetry?.pipeline_latency_ms === 'number' && telemetry.pipeline_latency_ms > 0
-    ? `${Math.round(telemetry.pipeline_latency_ms)} ms`
+  const latency = typeof telemetry?.pipeline_latency_ms === 'number'
+    ? Math.round(telemetry.pipeline_latency_ms)
     : EMPTY;
 
   if (loading) {
-    return <div className="monitor-page"><div className="monitor-card"><LoadingSpinner text="Đang tải camera…" /></div></div>;
+    return <div className="classic-monitor-page"><div className="classic-monitor-card"><LoadingSpinner text="Đang tải camera…" /></div></div>;
   }
   if (error) {
-    return <div className="monitor-page"><ErrorState message={error} onRetry={() => navigate('/cameras')} /></div>;
+    return <div className="classic-monitor-page"><ErrorState message={error} onRetry={() => navigate('/')} /></div>;
   }
 
   return (
-    <div ref={rootRef} className={`monitor-page camera-view-page ${fullscreen ? 'is-fullscreen' : ''}`} id="cameraViewPage">
+    <div ref={rootRef} className={`classic-monitor-page ${fullscreen ? 'is-fullscreen' : ''}`} id="cameraViewPage">
       {!fullscreen ? (
-        <header className="monitor-page-header">
-          <div className="camera-view-heading">
-            <button type="button" className="icon-action" onClick={() => navigate('/cameras')} title="Quay lại Camera">
-              <FiArrowLeft size={16} />
-            </button>
-            <div>
-              <h1>{camera?.name || 'Camera'}</h1>
-              <p>{camera?.zone || camera?.location || camera?.id}</p>
+        <>
+          <header className="classic-monitor-topbar">
+            <div className="classic-monitor-title">
+              <strong>{currentCamera.name || telemetry?.camera_name || 'Camera'}</strong>
+              <span className={live ? 'online' : 'offline'}>{cameraStatus}</span>
             </div>
+            <button type="button" className="classic-monitor-fullscreen-top" onClick={toggleFullscreen}>
+              <FiMaximize2 size={15} /> Toàn màn hình
+            </button>
+          </header>
+
+          <div className="classic-monitor-back-row">
+            <button type="button" onClick={() => navigate('/')}>
+              <FiArrowLeft size={13} /> Quay lại Dashboard
+            </button>
           </div>
-        </header>
+
+          <section className="classic-monitor-metrics">
+            <MetricCard label="NGƯỜI TRONG KHUNG HÌNH" icon={FiUsers} value={telemetry?.people_count ?? 0} />
+            <MetricCard label="PHƯƠNG TIỆN PHÁT HIỆN" icon={FiVideo} value={telemetry?.car_count ?? 0} />
+            <MetricCard label="TỐC ĐỘ XỬ LÝ (FPS)" icon={FiRefreshCw} value={fps === EMPTY ? 0 : fps} unit="fps" />
+            <MetricCard label="ĐỘ TRỄ PIPELINE" icon={FiZap} value={latency === EMPTY ? 0 : latency} unit="ms" />
+          </section>
+        </>
       ) : null}
 
-      <section className="camera-detail-layout">
-        <div className="monitor-card camera-live-card">
-          <div className="camera-live-surface">
-            {live ? (
-              <AuthenticatedVideo cameraId={id} label={camera?.name || 'Camera feed'} />
-            ) : (
-              <div className="offline-state large">
-                <FiVideoOff size={42} />
-                <strong>Camera Offline</strong>
-                <span>{camera?.name || activeCamera?.name || id}</span>
-                <button type="button" className="monitor-button primary" onClick={() => switchActiveCamera(camera)}>
-                  <FiRefreshCw size={14} /> Reconnect
-                </button>
-              </div>
-            )}
-
-            <div className="vertical-video-toolbar" aria-label="Điều khiển video">
-              <button type="button" className={`video-tool ${live ? 'active' : ''}`} title={live ? 'Đang phát' : 'Offline'}>
-                <FiCircle size={15} />
-              </button>
-              <button type="button" className="video-tool" title={`Nguồn: ${camera?.source_type || EMPTY}`}>
-                <FiServer size={15} />
-              </button>
-              <button type="button" className="video-tool" onClick={() => switchActiveCamera(camera)} title="Reconnect">
-                <FiRefreshCw size={15} />
-              </button>
-              <button type="button" className="video-tool" onClick={toggleFullscreen} title="Fullscreen">
-                <FiMaximize2 size={15} />
-              </button>
+      <section className={`classic-monitor-video-shell ${fullscreen ? 'fullscreen' : ''}`}>
+        <div className="classic-monitor-video">
+          {live ? (
+            <AuthenticatedVideo cameraId={cameraId} label={currentCamera.name || 'Camera feed'} />
+          ) : (
+            <div className="classic-monitor-offline">
+              <FiCamera size={31} />
+              <strong>CAMERA OFFLINE</strong>
+              <span>{currentCamera.name || telemetry?.camera_name || 'Nguồn hiện không khả dụng'}</span>
             </div>
+          )}
 
-            {fullscreen ? (
-              <div className="fullscreen-status-bar">
-                <span><FiCamera size={13} /> {camera?.name || id}</span>
-                <span>People {telemetry?.people_count ?? EMPTY}</span>
-                <span>Vehicles {telemetry?.car_count ?? EMPTY}</span>
-                <span>FPS {fps}</span>
-              </div>
-            ) : null}
+          <div className="classic-monitor-video-badges">
+            <span>{currentCamera.name || telemetry?.camera_name || 'Camera'}</span>
+            <strong className={live ? 'online' : 'offline'}>{live ? 'ONLINE' : 'OFFLINE'}</strong>
+          </div>
+
+          <div className="classic-monitor-video-actions">
+            <button type="button" onClick={stopActiveCamera}><FiPause size={13} /> Dừng</button>
+            <button type="button" onClick={toggleFullscreen}><FiMaximize2 size={13} /> Toàn màn hình</button>
           </div>
         </div>
-
-        {!fullscreen ? (
-          <aside className="monitor-card camera-info-panel">
-            <div className="monitor-card-header">
-              <div>
-                <h2>System information</h2>
-                <span>Dữ liệu backend hiện có</span>
-              </div>
-            </div>
-            <dl className="camera-info-list">
-              <div><dt>Camera name</dt><dd>{valueOrDash(camera?.name)}</dd></div>
-              <div><dt>Source</dt><dd>{valueOrDash(camera?.source_type)}</dd></div>
-              <div><dt>Status</dt><dd><span className={`monitor-badge ${live ? 'online' : 'offline'}`}>{telemetry?.camera_status || (live ? 'online' : 'offline')}</span></dd></div>
-              <div><dt>People detected</dt><dd>{telemetry?.people_count ?? EMPTY}</dd></div>
-              <div><dt>Vehicles detected</dt><dd>{telemetry?.car_count ?? EMPTY}</dd></div>
-              <div><dt>Processing FPS</dt><dd>{fps}</dd></div>
-              <div><dt>Pipeline latency</dt><dd>{latency}</dd></div>
-              <div><dt>Resolution</dt><dd>{valueOrDash(telemetry?.resolution || camera?.resolution)}</dd></div>
-              <div><dt>AI/GPU</dt><dd>{valueOrDash(telemetry?.gpu_status || telemetry?.ai_status || telemetry?.device)}</dd></div>
-            </dl>
-          </aside>
-        ) : null}
       </section>
+
+      {!fullscreen ? (
+        <section className="classic-monitor-tech-card">
+          <h2><FiCamera size={15} /> Thông tin kỹ thuật Camera</h2>
+          <div className="classic-monitor-tech-grid">
+            <div><span>Mã Camera (ID):</span><strong>{valueOrDash(currentCamera.id)}</strong></div>
+            <div><span>Khu vực / Vị trí:</span><strong>{valueOrDash(currentCamera.zone || currentCamera.location || (currentCamera.source_type === 'local' ? 'Local Storage' : null))}</strong></div>
+            <div><span>Loại giao thức:</span><strong>{valueOrDash(currentCamera.source_type)}</strong></div>
+            <div><span>Trạng thái luồng:</span><strong>{cameraStatus}</strong></div>
+            <div><span>Giao thức phát hình:</span><strong>Authenticated Frame Stream</strong></div>
+            <div><span>Độ trễ AI (YOLO):</span><strong>{telemetry?.yolo_latency_ms != null ? `${Math.round(telemetry.yolo_latency_ms)} ms` : EMPTY}</strong></div>
+            <div className="wide"><span>Địa chỉ nguồn (ẩn mật khẩu):</span><strong>{valueOrDash(currentCamera.source_url || currentCamera.url)}</strong></div>
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }
