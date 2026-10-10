@@ -14,30 +14,25 @@ export async function fetchTargets(params = {}, signal = null) {
 
   return apiRequest(`/api/targets${qs ? `?${qs}` : ''}`, {
     signal,
-    cacheTtlMs: 3000,
+    cacheTtlMs: 5000,
+    staleWhileRevalidateMs: 30000,
   });
 }
 
 export async function registerTarget(formData) {
   invalidateApiCache('/api/targets');
-  return apiRequest('/api/register_target', {
-    method: 'POST',
-    body: formData,
-  });
+  return apiRequest('/api/register_target', { method: 'POST', body: formData });
 }
 
 export async function deleteTarget(targetId) {
   invalidateApiCache('/api/targets');
-  return apiRequest(`/api/targets/${encodeURIComponent(targetId)}`, {
-    method: 'DELETE',
-  });
+  return apiRequest(`/api/targets/${encodeURIComponent(targetId)}`, { method: 'DELETE' });
 }
 
 export async function toggleTargetSelection(targetId, selected) {
   invalidateApiCache('/api/targets');
   return apiRequest(`/api/targets/${encodeURIComponent(targetId)}/select`, {
-    method: 'POST',
-    body: { selected },
+    method: 'POST', body: { selected },
   });
 }
 
@@ -47,8 +42,7 @@ export function getTargetImageUrl(targetId) {
 
 export async function fetchTargetDetail(targetId, signal = null) {
   return apiRequest(`/api/targets/${encodeURIComponent(targetId)}`, {
-    signal,
-    cacheTtlMs: 5000,
+    signal, cacheTtlMs: 5000, staleWhileRevalidateMs: 30000,
   });
 }
 
@@ -68,43 +62,36 @@ export async function fetchVehicles(params = {}, signal = null) {
 
   return apiRequest(`/api/watchlist/vehicles${qs ? `?${qs}` : ''}`, {
     signal,
-    cacheTtlMs: 3000,
+    cacheTtlMs: 5000,
+    staleWhileRevalidateMs: 30000,
   });
 }
 
 export async function fetchVehicleDetail(vehicleId, signal = null) {
   return apiRequest(`/api/watchlist/vehicles/${encodeURIComponent(vehicleId)}`, {
-    signal,
-    cacheTtlMs: 5000,
+    signal, cacheTtlMs: 5000, staleWhileRevalidateMs: 30000,
   });
 }
 
 export async function createVehicle(vehicleData) {
   invalidateApiCache('/api/watchlist/vehicles');
-  return apiRequest('/api/watchlist/vehicles', {
-    method: 'POST',
-    body: vehicleData,
-  });
+  return apiRequest('/api/watchlist/vehicles', { method: 'POST', body: vehicleData });
 }
 
 export async function updateVehicle(vehicleId, vehicleData) {
   invalidateApiCache('/api/watchlist/vehicles');
   return apiRequest(`/api/watchlist/vehicles/${encodeURIComponent(vehicleId)}`, {
-    method: 'PATCH',
-    body: vehicleData,
+    method: 'PATCH', body: vehicleData,
   });
 }
 
 export async function deleteVehicle(vehicleId) {
   invalidateApiCache('/api/watchlist/vehicles');
-  return apiRequest(`/api/watchlist/vehicles/${encodeURIComponent(vehicleId)}`, {
-    method: 'DELETE',
-  });
+  return apiRequest(`/api/watchlist/vehicles/${encodeURIComponent(vehicleId)}`, { method: 'DELETE' });
 }
 
 export async function fetchVehicleDetections(vehicleId, signal = null) {
   return apiRequest(`/api/watchlist/vehicles/${encodeURIComponent(vehicleId)}/detections`, {
-    signal,
-    cacheTtlMs: 5000,
+    signal, cacheTtlMs: 5000, staleWhileRevalidateMs: 30000,
   });
 }
