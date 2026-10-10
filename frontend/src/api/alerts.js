@@ -13,7 +13,8 @@ export async function fetchAlerts(params = {}, signal = null, options = {}) {
   const qs = query.toString();
   return apiRequest(`/api/alerts${qs ? `?${qs}` : ''}`, {
     signal,
-    cacheTtlMs: options.cacheTtlMs ?? 2000,
+    cacheTtlMs: options.cacheTtlMs ?? 5000,
+    staleWhileRevalidateMs: options.staleWhileRevalidateMs ?? 30000,
     forceRefresh: options.forceRefresh ?? false,
   });
 }
@@ -22,5 +23,6 @@ export async function fetchAlertDetail(alertId, signal = null) {
   return apiRequest(`/api/alerts/${encodeURIComponent(alertId)}`, {
     signal,
     cacheTtlMs: 10000,
+    staleWhileRevalidateMs: 30000,
   });
 }
