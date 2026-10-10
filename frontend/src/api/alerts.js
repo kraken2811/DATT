@@ -1,6 +1,6 @@
 import { apiRequest } from './client';
 
-export async function fetchAlerts(params = {}, signal = null) {
+export async function fetchAlerts(params = {}, signal = null, options = {}) {
   const query = new URLSearchParams();
   if (params.search) query.set('search', params.search);
   if (params.q) query.set('q', params.q);
@@ -13,7 +13,8 @@ export async function fetchAlerts(params = {}, signal = null) {
   const qs = query.toString();
   return apiRequest(`/api/alerts${qs ? `?${qs}` : ''}`, {
     signal,
-    cacheTtlMs: 2000,
+    cacheTtlMs: options.cacheTtlMs ?? 2000,
+    forceRefresh: options.forceRefresh ?? false,
   });
 }
 

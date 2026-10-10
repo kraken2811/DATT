@@ -6,7 +6,8 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.exc import SQLAlchemyError
 from src.cameras.service import database
 from src.db.models import Notification, FaceEvent, PlateEvent, Target, VehicleWatchlist, Camera
-from .errors import safe_error, ERROR_MESSAGES
+from .config import EmailConfig
+from .errors import safe_error, ERROR_MESSAGES, RETRY_ERRORS
 
 router = APIRouter()
 EVENT_TYPES = ('FACE_WATCHLIST_MATCH', 'VEHICLE_WATCHLIST_MATCH')
@@ -80,11 +81,18 @@ def query(session, params, ident=None):
     for cam in cameras:
         for key in (cam.registry_key, str(cam.id), cam.id.hex):
             names[key] = cam.name
+    email_cfg = getattr(router, '_email_config', None) or EmailConfig.from_env()
     alerts = []
     for item, face, plate, target, vehicle in rows:
         is_face = item.event_id is not None
         event_id = str(item.event_id if is_face else item.plate_event_id)
         event_key = ('face:' if is_face else 'plate:') + event_id
+        is_failed = item.status == 'failed'
+        can_retry = (
+            is_failed
+            and item.error in RETRY_ERRORS
+            and item.retry_count < email_cfg.max_retries
+        )
         alerts.append(dict(
             id=str(item.id), event_id=event_id, event_center_id=event_key,
             event_type=EVENT_TYPES[0 if is_face else 1], camera_id=item.camera_id,
@@ -93,6 +101,7 @@ def query(session, params, ident=None):
             created_at=item.created_at.isoformat(), sent_at=item.sent_at.isoformat() if item.sent_at else None,
             error_code=item.error if item.error in ERROR_MESSAGES else ('delivery_failed' if item.error else None),
             error_message=safe_error(item.error), retry_count=item.retry_count,
+            retry_scheduled=can_retry, max_retries=email_cfg.max_retries,
             target_id=str(face.target_id) if face and face.target_id else
                       (str(item.vehicle_watchlist_id) if item.vehicle_watchlist_id else None),
             target_name=target.name if target else (vehicle.display_name if vehicle else None),

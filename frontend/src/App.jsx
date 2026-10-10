@@ -5,6 +5,7 @@ import { AppProvider, useApp } from './context/AppContext';
 import { AuthenticationNotice } from './components/AuthenticationNotice';
 import { Sidebar } from './components/Sidebar';
 import { ToastContainer } from './components/ToastContainer';
+import { NotificationToastWatcher } from './components/NotificationToastWatcher';
 
 // Pages
 import { DashboardPage } from './pages/DashboardPage';
@@ -21,6 +22,7 @@ export default function App() {
     <BrowserRouter>
       <ToastProvider>
         <AppProvider>
+          <NotificationToastWatcher />
           <div className="app-layout">
             <Sidebar />
             <main className="main-content">

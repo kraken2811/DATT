@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 from dataclasses import replace
 from unittest.mock import Mock
-from uuid import uuid4
+from uuid import uuid4, UUID
 import smtplib
 import threading
 import pytest
@@ -24,9 +24,11 @@ from tests.test_notifications import setup, enqueue, history
 @pytest.fixture
 def client(setup):
     app = FastAPI()
+    router._email_config = setup[2].config
     app.include_router(router)
     with TestClient(app) as client:
         yield client
+    router._email_config = None
 
 
 def test_face_event_pending_smtp_sent_and_alert_api(setup, client, monkeypatch):
@@ -218,3 +220,30 @@ def test_each_configured_recipient_gets_one_delivery(setup, client):
     assert {r['recipient_email'] for r in rows} == set(service.config.recipients)
     assert {r['event_id'] for r in rows} == {str(event_id)}
     assert setup[3].send.call_count == 2
+
+
+def test_alert_api_exposes_retry_scheduled_and_max_retries(setup, client):
+    db, target, service, _ = setup
+    enqueue(setup)
+    res = client.get('/api/alerts').json()['alerts'][0]
+    assert 'retry_scheduled' in res
+    assert 'max_retries' in res
+    assert res['max_retries'] == service.config.max_retries
+    assert res['retry_scheduled'] is False
+    # Simulate a retryable failure
+    with db.transaction() as s:
+        item = s.scalar(select(Notification).where(Notification.id == UUID(res['id'])))
+        item.status = 'failed'
+        item.error = 'smtp_connection'
+        item.retry_count = 1
+    failed_res = client.get(f"/api/alerts/{res['id']}").json()['alert']
+    assert failed_res['status'] == 'FAILED'
+    assert failed_res['retry_scheduled'] is True
+    assert failed_res['retry_count'] == 1
+    # Simulate exhausted retries
+    with db.transaction() as s:
+        item = s.scalar(select(Notification).where(Notification.id == UUID(res['id'])))
+        item.retry_count = service.config.max_retries
+    exhausted_res = client.get(f"/api/alerts/{res['id']}").json()['alert']
+    assert exhausted_res['retry_scheduled'] is False
+
