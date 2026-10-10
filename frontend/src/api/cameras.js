@@ -16,6 +16,7 @@ export async function fetchCameras(params = {}, signal = null) {
   return apiRequest(`/api/cameras${qs ? `?${qs}` : ''}`, {
     signal,
     cacheTtlMs: 5000,
+    staleWhileRevalidateMs: 30000,
   });
 }
 
@@ -23,6 +24,7 @@ export async function fetchCameraDetail(id, signal = null) {
   return apiRequest(`/api/cameras/${encodeURIComponent(id)}`, {
     signal,
     cacheTtlMs: 5000,
+    staleWhileRevalidateMs: 30000,
   });
 }
 
@@ -52,10 +54,7 @@ export async function switchCamera(camera, signal = null) {
 
 export async function stopCamera(signal = null) {
   invalidateApiCache('/telemetry');
-  return apiRequest('/stop_camera', {
-    method: 'POST',
-    signal,
-  });
+  return apiRequest('/stop_camera', { method: 'POST', signal });
 }
 
 export async function fetchPublicCameras(params = {}, signal = null) {
@@ -65,24 +64,22 @@ export async function fetchPublicCameras(params = {}, signal = null) {
   const qs = query.toString();
   return apiRequest(`/public_cameras${qs ? `?${qs}` : ''}`, {
     signal,
-    cacheTtlMs: 30000, // Cache public cameras for 30s
+    cacheTtlMs: 30000,
+    staleWhileRevalidateMs: 60000,
   });
 }
 
 export async function fetchVideoSources(signal = null) {
   return apiRequest('/video_sources', {
     signal,
-    cacheTtlMs: 5000,
+    cacheTtlMs: 10000,
+    staleWhileRevalidateMs: 60000,
   });
 }
 
 export async function uploadVideo(formData, signal = null) {
   invalidateApiCache('/video_sources');
-  return apiRequest('/upload_video', {
-    method: 'POST',
-    body: formData,
-    signal,
-  });
+  return apiRequest('/upload_video', { method: 'POST', body: formData, signal });
 }
 
 export async function testCameraConnection(sourceType, sourceUrl) {
@@ -94,30 +91,20 @@ export async function testCameraConnection(sourceType, sourceUrl) {
 
 export async function createCamera(cameraData) {
   invalidateApiCache('/api/cameras');
-  return apiRequest('/api/cameras', {
-    method: 'POST',
-    body: cameraData,
-  });
+  return apiRequest('/api/cameras', { method: 'POST', body: cameraData });
 }
 
 export async function updateCamera(id, cameraData) {
   invalidateApiCache('/api/cameras');
-  return apiRequest(`/api/cameras/${encodeURIComponent(id)}`, {
-    method: 'PATCH',
-    body: cameraData,
-  });
+  return apiRequest(`/api/cameras/${encodeURIComponent(id)}`, { method: 'PATCH', body: cameraData });
 }
 
 export async function deleteCamera(id) {
   invalidateApiCache('/api/cameras');
-  return apiRequest(`/api/cameras/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-  });
+  return apiRequest(`/api/cameras/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 export async function toggleCameraStatus(id, enabled) {
   invalidateApiCache('/api/cameras');
-  return apiRequest(`/api/cameras/${encodeURIComponent(id)}/${enabled ? 'enable' : 'disable'}`, {
-    method: 'POST',
-  });
+  return apiRequest(`/api/cameras/${encodeURIComponent(id)}/${enabled ? 'enable' : 'disable'}`, { method: 'POST' });
 }
