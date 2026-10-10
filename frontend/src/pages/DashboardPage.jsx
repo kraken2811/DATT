@@ -5,7 +5,6 @@ import {
   FiCamera,
   FiChevronRight,
   FiExternalLink,
-  FiGauge,
   FiRefreshCw,
   FiUsers,
   FiVideo,
@@ -249,7 +248,7 @@ export function DashboardPage() {
         <MetricCard label="Vehicles" icon={FiVideo} value={telemetry?.car_count ?? EMPTY} />
         <MetricCard
           label="Processing FPS"
-          icon={FiGauge}
+          icon={FiActivity}
           value={typeof telemetry?.processing_fps === 'number'
             ? telemetry.processing_fps.toFixed(1)
             : (typeof telemetry?.stream_fps === 'number' ? telemetry.stream_fps.toFixed(1) : EMPTY)}
