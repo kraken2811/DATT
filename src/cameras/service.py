@@ -5,8 +5,9 @@ from urllib.parse import urlsplit
 from contextlib import contextmanager
 import os
 import threading
-from sqlalchemy import select, or_, update
+from sqlalchemy import select, or_, update, func, case, cast, String
 from src.db.database import Database
+from src.db.latency import measure
 from src.db.models import Camera, VideoSource, utc_now
 
 TYPES={'rtsp':'rtsp','hls':'direct_hls','direct_hls':'direct_hls','http':'http','https':'http',
@@ -69,37 +70,67 @@ def serialize(c):
         thumbnail='/api/cameras/'+str(c.id)+'/thumbnail',thumbnail_url='/api/cameras/'+str(c.id)+'/thumbnail',video_source_id=str(c.video_source_id) if c.video_source_id else None)
 
 
+def _camera_conditions(filters, now):
+    conditions=[]
+    status=filters.get('status')
+    if status and status!='all':
+        if status=='disabled': conditions.append(Camera.enabled.is_(False))
+        elif status in ('online','active'):
+            conditions.extend((Camera.enabled.is_(True),Camera.active_until.is_not(None),Camera.active_until>now))
+        elif status=='offline':
+            conditions.extend((Camera.enabled.is_(True),or_(Camera.active_until.is_(None),Camera.active_until<=now)))
+    source_type=filters.get('source_type')
+    if source_type and source_type!='all':
+        conditions.append(Camera.source_type==TYPES.get(source_type.lower(),source_type))
+    zone=filters.get('zone')
+    if zone and zone!='all': conditions.append(Camera.location==zone)
+    search=(filters.get('search') or filters.get('q') or '').strip()
+    if search:
+        like=f"%{search}%"
+        conditions.append(or_(
+            cast(Camera.id,String).ilike(like),Camera.name.ilike(like),
+            Camera.location.ilike(like),Camera.description.ilike(like),
+            Camera.registry_key.ilike(like),
+        ))
+    return conditions
+
+
 def list_records(filters=None):
-    filters = filters or {}
-    with database() as db, db.transaction() as s:
-        items = [serialize(c) for c in s.scalars(select(Camera).order_by(Camera.created_at.desc()))]
-    summary = {'total': len(items), **{v: sum(c['status'] == v for c in items) for v in ('online', 'offline', 'disabled')}}
-    result = items
-    for key in ('status', 'source_type', 'zone'):
-        value = filters.get(key)
-        if value and value != 'all': result = [c for c in result if c.get(key) == value]
-    q = (filters.get('search') or filters.get('q') or '').lower().strip()
-    if q: result = [c for c in result if q in ' '.join(str(c.get(k) or '') for k in ('id', 'name', 'zone', 'description')).lower()]
-    total_matching = len(result)
-
-    page = filters.get('page')
-    page_size = filters.get('page_size', filters.get('limit', 25))
-    resp = dict(status='ok', total=total_matching, summary=summary,
-        active_camera_id=next((c['id'] for c in items if c['active']), None))
-
+    filters=filters or {}
+    now=utc_now()
+    page=filters.get('page')
+    page_size=filters.get('page_size',filters.get('limit',25))
     if page is not None:
         try:
-            page = max(1, int(page))
-            page_size = max(1, min(200, int(page_size)))
-        except (ValueError, TypeError):
-            page, page_size = 1, 25
-        start_idx = (page - 1) * page_size
-        resp['cameras'] = result[start_idx:start_idx + page_size]
-        resp['page'] = page
-        resp['page_size'] = page_size
-    else:
-        resp['cameras'] = result
+            page=max(1,int(page));page_size=max(1,min(200,int(page_size)))
+        except (ValueError,TypeError): page,page_size=1,25
 
+    conditions=_camera_conditions(filters,now)
+    with database() as db,db.transaction() as s:
+        total_matching=s.scalar(select(func.count(Camera.id)).where(*conditions))
+
+        online_case=case((Camera.enabled.is_(False),0),(Camera.active_until>now,1),else_=0)
+        disabled_case=case((Camera.enabled.is_(False),1),else_=0)
+        offline_case=case((Camera.enabled.is_(True) & or_(Camera.active_until.is_(None),Camera.active_until<=now),1),else_=0)
+        total_all,online,offline,disabled=s.execute(select(
+            func.count(Camera.id),func.coalesce(func.sum(online_case),0),
+            func.coalesce(func.sum(offline_case),0),func.coalesce(func.sum(disabled_case),0)
+        )).one()
+
+        query=select(Camera).where(*conditions).order_by(Camera.created_at.desc())
+        if page is not None: query=query.offset((page-1)*page_size).limit(page_size)
+        rows=list(s.scalars(query))
+        active_id=s.scalar(select(Camera.id).where(
+            Camera.enabled.is_(True),Camera.active_until.is_not(None),Camera.active_until>now
+        ).order_by(Camera.last_active.desc()).limit(1))
+
+    with measure('serialization_ms'):
+        items=[serialize(c) for c in rows]
+    resp=dict(status='ok',total=total_matching,
+        summary={'total':int(total_all or 0),'online':int(online or 0),'offline':int(offline or 0),'disabled':int(disabled or 0)},
+        active_camera_id=str(active_id) if active_id else None,cameras=items)
+    if page is not None:
+        resp['page']=page;resp['page_size']=page_size
     return resp
 
 
@@ -149,13 +180,11 @@ def release(manager):
             with database() as db,db.transaction() as s:
                 s.execute(update(Camera).where(Camera.id==ident,Camera.active_token==token).values(active_until=None,active_token=None))
         except Exception:
-            # Reader shutdown must still happen; crashed leases expire without renewal.
             pass
 
 
 def activate(manager,ident):
     from dataclasses import replace
-    # Release and stop the previous reader before locking the next camera.
     manager._stop_reader_internal()
     manager._active_camera=None
     manager._status='STOPPED'
