@@ -2,10 +2,9 @@
 
 import logging
 import time
-from typing import Any, Callable
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.agent.config import agent_config
 
@@ -69,7 +68,6 @@ class ResilientChatModel:
         last_exception = None
         for attempt in range(self.max_retries + 1):
             try:
-                # If model supports request_timeout kwarg
                 if hasattr(model, "request_timeout"):
                     return model.invoke(messages, timeout=self.timeout_seconds)
                 return model.invoke(messages)
@@ -109,7 +107,6 @@ class ResilientChatModel:
                         reason="all_providers_failed"
                     ) from fallback_exc
 
-            # No fallback configured
             raise LLMUnavailableException(
                 f"Primary LLM failed and no fallback available: {primary_exc}",
                 reason="primary_failed_no_fallback"
@@ -117,9 +114,15 @@ class ResilientChatModel:
 
 
 def create_raw_model(provider: str, model_name: str, temperature: float) -> Any:
-    """Instantiate raw provider chat model."""
-    prov = (provider or "mock").lower()
+    """Instantiate a configured chat model. Mock must be selected explicitly."""
+    prov = (provider or "").strip().lower()
+
     if prov == "openai":
+        if not agent_config.openai_api_key:
+            raise LLMUnavailableException(
+                "OPENAI_API_KEY is required when DATT_AGENT_LLM_PROVIDER=openai",
+                reason="missing_credentials",
+            )
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
             model=model_name,
@@ -127,7 +130,13 @@ def create_raw_model(provider: str, model_name: str, temperature: float) -> Any:
             api_key=agent_config.openai_api_key,
             request_timeout=agent_config.timeout_seconds,
         )
-    elif prov == "google_genai":
+
+    if prov == "google_genai":
+        if not agent_config.gemini_api_key:
+            raise LLMUnavailableException(
+                "GEMINI_API_KEY or GOOGLE_API_KEY is required when DATT_AGENT_LLM_PROVIDER=google_genai",
+                reason="missing_credentials",
+            )
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(
             model=model_name,
@@ -135,9 +144,14 @@ def create_raw_model(provider: str, model_name: str, temperature: float) -> Any:
             google_api_key=agent_config.gemini_api_key,
             request_timeout=agent_config.timeout_seconds,
         )
-    else:
+
+    if prov == "mock":
         from src.agent.nodes import MockChatModel
         return MockChatModel()
+
+    raise ValueError(
+        f"Unsupported LLM provider: {provider!r}. Use 'google_genai', 'openai', or 'mock'."
+    )
 
 
 def get_configured_llm() -> ResilientChatModel:
