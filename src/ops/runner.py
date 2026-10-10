@@ -69,6 +69,9 @@ def main():
                 runtime_react_dist = None
 
         app = web_server.app
+        from src.db.latency_middleware import DatabaseLatencyMiddleware
+        app.add_middleware(DatabaseLatencyMiddleware)
+
         revision = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True,
                                   timeout=10).stdout.strip() or 'unavailable'
         from src.agent.config import agent_config
