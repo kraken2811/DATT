@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 RUNTIME_DIST = PROJECT_ROOT / ".datt-runtime" / "react_dist"
 RUNTIME_LOG_DIR = PROJECT_ROOT / ".datt-runtime" / "frontend"
+REVISION_MARKER = RUNTIME_LOG_DIR / "built-revision.txt"
 
 
 def _is_colab_checkout() -> bool:
@@ -30,12 +31,34 @@ def _is_colab_checkout() -> bool:
     return str(PROJECT_ROOT).startswith("/content/") or bool(os.getenv("COLAB_RELEASE_TAG"))
 
 
+def _git_revision() -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
+def _runtime_bundle_ready(revision: str) -> bool:
+    if not (RUNTIME_DIST / "index.html").is_file() or not (RUNTIME_DIST / "assets").is_dir():
+        return False
+    try:
+        return REVISION_MARKER.read_text(encoding="utf-8").strip() == revision
+    except OSError:
+        return False
+
+
 def prepare_runtime_frontend() -> Path | None:
     """Build current React source into an ignored runtime directory when required.
 
     Set DATT_BUILD_FRONTEND_RUNTIME=1 to force this behavior outside Colab, or 0
     to disable it explicitly. npm is invoked with package-lock writes disabled so
-    the safe source update cell remains clean.
+    the safe source update cell remains clean. A successful bundle is cached by
+    Git revision and reused across backend restarts.
     """
     requested = os.getenv("DATT_BUILD_FRONTEND_RUNTIME", "").strip().lower()
     if requested in {"0", "false", "no", "off"}:
@@ -47,12 +70,17 @@ def prepare_runtime_frontend() -> Path | None:
     if not package_json.is_file():
         raise RuntimeError("React frontend package.json is missing")
 
+    RUNTIME_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    RUNTIME_DIST.parent.mkdir(parents=True, exist_ok=True)
+    revision = _git_revision()
+
+    if revision != "unknown" and _runtime_bundle_ready(revision):
+        os.environ["DATT_REACT_DIST"] = str(RUNTIME_DIST)
+        return RUNTIME_DIST
+
     npm = shutil.which("npm")
     if not npm:
         raise RuntimeError("npm is required to build the React frontend")
-
-    RUNTIME_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    RUNTIME_DIST.parent.mkdir(parents=True, exist_ok=True)
 
     install_log = RUNTIME_LOG_DIR / "npm-install.log"
     with install_log.open("w", encoding="utf-8") as log:
@@ -92,6 +120,8 @@ def prepare_runtime_frontend() -> Path | None:
     if not (RUNTIME_DIST / "index.html").is_file() or not (RUNTIME_DIST / "assets").is_dir():
         raise RuntimeError("React frontend build completed without the expected dist output")
 
+    if revision != "unknown":
+        REVISION_MARKER.write_text(revision + "\n", encoding="utf-8")
     os.environ["DATT_REACT_DIST"] = str(RUNTIME_DIST)
     return RUNTIME_DIST
 
