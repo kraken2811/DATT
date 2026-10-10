@@ -1,114 +1,249 @@
-# Hệ Thống Giám Sát Thị Giác Thông Minh DATT (Documentation Hub)
+# Hệ Thống Giám Sát Thị Giác Thông Minh DATT — Documentation Hub
 
-Chào mừng bạn đến với bộ tài liệu kỹ thuật và hướng dẫn vận hành toàn diện của **Hệ Thống Giám Sát Thị Giác Thông Minh Đa Luồng DATT** (Deep AI Tracking & Targeting System).
+Bộ tài liệu này là điểm vào chính cho hệ thống **DATT (Deep AI Tracking & Targeting System)** trên nhánh `dev`.
 
-Hệ thống được phát triển nhằm mục đích giám sát video thời gian thực từ nhiều nguồn camera (RTSP, HLS, YouTube Live, WebRTC, Video File), ứng dụng thị giác máy tính và học sâu (Deep Learning) để phát hiện đối tượng, bám vết đa mục tiêu (Multi-Object Tracking), nhận diện khuôn mặt hai pha (Two-pass Face Recognition với SCRFD & AdaFace) và tự động nhận dạng biển số xe (ANPR/ALPR với YOLOv11 & EasyOCR), đối soát danh sách theo dõi (Watchlist) và kích hoạt cảnh báo tức thời qua Event Center và Email Notification.
+Hệ thống hiện gồm hai nhóm chức năng lớn:
 
----
-
-## Danh Mục Tài Liệu Hệ Thống
-
-Bộ tài liệu này được cấu trúc chi tiết dành riêng cho 3 nhóm đối tượng: **Người dùng cuối (End-user)**, **Quản trị viên hệ thống (System Administrator)** và **Kỹ sư phát triển phần mềm (Software/AI Engineer)**.
-
-| STT | Tài Liệu | Đối Tượng Phục Vụ | Nội Dung Chính | Liên Kết Truy Cập |
-|---|---|---|---|---|
-| **01** | **Hướng Dẫn Sử Dụng Người Dùng** | Người vận hành, Giám sát viên an ninh | Giao diện Live View, Quản lý Camera, Danh sách đối tượng khuôn mặt, Danh sách biển số xe theo dõi, Trung tâm sự kiện (Event Center), Bộ lọc tìm kiếm sự kiện, Cảnh báo thông báo, Câu hỏi thường gặp (FAQ). | [USER_GUIDE.md](USER_GUIDE.md) |
-| **02** | **Điều Kiện & Yêu Cầu Kỹ Thuật** | IT Ops, Kỹ sư hạ tầng, Triển khai | Cấu hình phần cứng tối thiểu & khuyến nghị, Yêu cầu GPU NVIDIA CUDA/TensorRT, Phiên bản Python 3.11, PostgreSQL 17 + `pgvector`, Tiêu chuẩn nguồn cấp video camera RTSP/HLS, Điều kiện ảnh khuôn mặt & góc nghiêng biển số, Biến môi trường `.env`. | [SYSTEM_REQUIREMENTS.md](SYSTEM_REQUIREMENTS.md) |
-| **03** | **Tài Liệu Quản Trị Hệ Thống** | DevOps, System Admin, DB Admin | Quy trình cài đặt môi trường (Local / Docker / Google Colab), Cấu hình biến môi trường, Khởi tạo và chạy 13 Alembic Migrations (bao gồm Knowledge Base & pgvector HNSW Index), Quản lý Database PostgreSQL/SQLite và Supabase Storage, Tải trọng số AI Models, Khởi động/Dừng dịch vụ qua CLI & FastAPIServer, Giám sát log và Sao lưu phục hồi dữ liệu. | [ADMIN_GUIDE.md](ADMIN_GUIDE.md) |
-| **04** | **Tài Liệu Kiến Trúc Kỹ Thuật** | Kỹ sư AI, Backend & Frontend Dev | Kiến trúc chi tiết Pipeline xử lý luồng, AI Models (YOLO11s, ByteTrack, Two-pass SCRFD, AdaFace IR50 512-d, PlateDetector, EasyOCR, Color Extractor), Thuật toán đồng thuận biển số 10-frame consensus (ECC median), Database Worker Thread & Async Engine (`NullPool`), Cơ chế Notification Outbox & Exponential Backoff, Binary Frame Streaming (Giao thức 64-byte Header DATT). | [TECHNICAL_GUIDE.md](TECHNICAL_GUIDE.md) |
-| **05** | **Sơ Đồ Luồng Hoạt Động (Mermaid)** | Solution Architect, Developer | 10 biểu đồ Mermaid chuẩn hóa trực quan hóa: Luồng xử lý camera đa luồng, Pipeline nhận diện khuôn mặt hai pha, Đối soát Face Watchlist Cosine Similarity, Nhận diện và chuẩn hóa biển số, Khởi tạo và gom cụm sự kiện (Episode Coalescing), Luồng cảnh báo và gửi Email tự động, Tương tác cơ sở dữ liệu và Luồng API Frontend - Backend - Database. | [SYSTEM_FLOWS.md](SYSTEM_FLOWS.md) |
-| **06** | **Cẩm Nang Xử Lý Sự Cố (Troubleshooting)** | Vận hành viên, Helpdesk, DevOps | 22 kịch bản lỗi chi tiết từ thực tế mã nguồn: Camera mất kết nối/lag FPS, CUDA out of memory, Không phát hiện khuôn mặt hoặc nhận diện nhầm, OCR đọc sai ký tự biển số xe, Lỗi kết nối DB và Migration ForeignKey, Email Notification pending/failed, Lỗi mã hóa JSON và Frontend ngắt kết nối WebSocket/Fetch API. Định dạng chuẩn: Triệu chứng -> Nguyên nhân -> Cách kiểm tra -> Cách khắc phục. | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) |
-| **07** | **Trợ Lý AI Vận Hành (AI Operations Agent & RAG)** | Vận hành viên, Giám sát an ninh, DevOps | Kiến trúc LangGraph Single Agent StateGraph, Công cụ RAG tra cứu tài liệu vận hành với FastEmbed/pgvector HNSW, Các công cụ đọc trạng thái camera/sự kiện/danh sách theo dõi/thống kê, Cơ chế bộ nhớ ngắn hạn PostgreSQL Checkpointer (`PostgresSaver`), Xác thực phiên người dùng HMAC Bearer Token và giao diện UI Chat trực quan. | [USER_GUIDE.md](USER_GUIDE.md) |
+1. **Computer Vision / Security Monitoring** — camera đa nguồn, object detection, tracking, face recognition, ANPR/OCR, watchlist, Event Center, Alert Center và notification.
+2. **DATT AI Assistant** — giao diện React `/agent`, LangGraph Single Agent, tool nghiệp vụ, conversation persistence, authentication/tenant isolation và RAG/Knowledge Base.
 
 ---
 
-## Kiến Trúc Tổng Quan Hệ Thống
+## 1. Danh mục tài liệu chuẩn
 
-Hệ thống hoạt động theo mô hình Pipeline phân tán lỏng lẻo (Decoupled Pipeline) qua hàng đợi bất đồng bộ và cơ chế Non-blocking I/O:
+| STT | Tài liệu | Đối tượng | Nội dung chính |
+|---|---|---|---|
+| 01 | [USER_GUIDE.md](USER_GUIDE.md) | Người vận hành | Camera, Watchlist, Event Center, Alert Center, thao tác giao diện và FAQ |
+| 02 | [AGENT_RAG_GUIDE.md](AGENT_RAG_GUIDE.md) | Người vận hành, Admin, Developer | AI Assistant, conversation, Agent API, authentication, LLM, RAG, troubleshooting Agent |
+| 03 | [SYSTEM_REQUIREMENTS.md](SYSTEM_REQUIREMENTS.md) | IT Ops, triển khai | CPU/GPU/RAM, Python, PostgreSQL/pgvector, camera/video source và điều kiện triển khai |
+| 04 | [ADMIN_GUIDE.md](ADMIN_GUIDE.md) | System Admin, DevOps | Cài đặt, database, storage, models, service lifecycle, backup/restore |
+| 05 | [TECHNICAL_GUIDE.md](TECHNICAL_GUIDE.md) | Developer, AI Engineer | Kiến trúc pipeline CV, backend, persistence, notification và các module kỹ thuật |
+| 06 | [SYSTEM_FLOWS.md](SYSTEM_FLOWS.md) | Architect, Developer | Các flow Camera/CV/Event/Notification hiện có |
+| 07 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Helpdesk, DevOps | Sự cố Camera/GPU/Face/OCR/DB/Notification/Frontend |
 
-```
-[ Camera / RTSP / Video Stream ]
+### Engineering notes / historical reports
+
+Các file như [agent_colab_integration.md](agent_colab_integration.md) dùng để ghi lại quá trình sửa lỗi, hardening hoặc validation. Chúng hữu ích cho kỹ sư nhưng **không thay thế** tài liệu chuẩn ở bảng trên.
+
+---
+
+## 2. Kiến trúc tổng quan hiện hành
+
+```text
+Camera / RTSP / HLS / YouTube / Video File
                 │
                 ▼
-  [ Ingestion Worker (OpenCV / Decord / FFmpeg) ]
+        Video Ingestion / Runtime
                 │
                 ▼
-      [ YOLO11s Object Detection ] ──(Persons & Vehicles)
+       YOLO Object Detection
                 │
                 ▼
-     [ ByteTrack Multi-Object Tracker ]
-        ├── Person Tracks (ID, Tracklet History)
-        └── Vehicle Tracks (ID, Tracklet History)
-                │
-       ┌────────┴─────────────────────────┐
-       ▼                                  ▼
-[ Person Branch ]                 [ Vehicle Branch ]
- Two-Pass SCRFD Face Detection     YOLO Plate Detection (0.25)
- R2 Homography & Canonical Align   Perspective Warp & Contrast CLAHE
- Quality Filter (Area, Landmarks)  EasyOCR Text Recognition
- AdaFace IR50 (512-d Embedding)    Plate Normalizer & Regex Format
- F2 Candidate Fusion (Top-3)       ECC Median Fusion & Consensus
-       │                                  │
-       ▼                                  ▼
-[ Watchlist Vector Matching ]     [ Vehicle Watchlist Exact Match ]
- Cosine Similarity (>= 0.45)       Normalized License Plate Lookup
-       │                                  │
-       └────────┬─────────────────────────┘
-                │
+            ByteTrack
+       ┌────────┴────────┐
+       ▼                 ▼
+ Face Pipeline       Vehicle Pipeline
+ SCRFD + AdaFace     Plate Detect + OCR
+       │                 │
+       ▼                 ▼
+ Face Watchlist      Vehicle Watchlist
+       └────────┬────────┘
                 ▼
-      [ Event Manager Engine ]
-        - Track-level Deduplication
-        - Episode Coalescing (Cooldown 40 frames)
-        - DB Background Worker (Queue -> NullPool Connection)
+          Event Manager
                 │
-       ┌────────┴─────────────────────────┐
-       ▼                                  ▼
- [ PostgreSQL 17 + pgvector ]     [ Notification Outbox Worker ]
-  - Targets & TargetFaces          - Priority Alert Queue
-  - Vehicles & PlateEvents         - Rate Limit Cooldown (300s)
-  - Episodes & Audit Logs          - SMTP TLS / SSL Dispatcher
-  - AlertOutbox (Pending/Sent)     - Exponential Backoff Retries
-                │
-                ▼
- [ FastAPI Web Server (Port 8000) ]
-  - RESTful APIs (/api/v1/...)
-  - Binary Frame Stream (/api/frame-stream)
-  - Static Single Page Application (HTML5 / Vanilla JS)
+       ┌────────┴──────────────┐
+       ▼                       ▼
+ PostgreSQL + pgvector    Notification Outbox
+       │                       │
+       └──────────┬────────────┘
+                  ▼
+          FastAPI Backend
+                  │
+        ┌─────────┴──────────┐
+        ▼                    ▼
+   React Frontend       DATT AI Agent
+ dashboard/camera/      LangGraph + tools
+ events/alerts/...      + conversation/RAG
+        │                    │
+        └─────────┬──────────┘
+                  ▼
+               User
 ```
 
----
+Frontend hiện tại nằm trong `frontend/` và dùng **React + React Router**. Các route chính gồm:
 
-## Thông Tin Các File Mã Nguồn Trọng Tâm
+```text
+/
+/dashboard
+/cameras
+/cameras/:id
+/watchlist
+/events
+/alerts
+/settings
+/agent
+```
 
-Khi cần đọc và chỉnh sửa code lõi, hãy tham khảo các file tương ứng trong workspace:
-
-* **Entrypoint & CLI Pipeline:**
-  * [app.py](../app.py) - Script điều phối chính, xử lý video offline, trích xuất sự kiện và benchmark.
-  * [src/runtime/runtime_manager.py](../src/runtime/runtime_manager.py) - Quản lý vòng đời tiến trình camera con (Child Process / Subprocess).
-* **Backend Web Server & APIs:**
-  * [src/ui/web_server.py](../src/ui/web_server.py) - Ứng dụng FastAPI, khai báo toàn bộ Router, Endpoint quản lý Camera, Watchlist, Events, Alerts và Binary Video Streaming.
-* **Mô Hình AI & Xử Lý Thị Giác:**
-  * [src/detector/yolo_detector.py](../src/detector/yolo_detector.py) - Module phát hiện người và phương tiện YOLOv11.
-  * [src/face/adaptive_pipeline.py](../src/face/adaptive_pipeline.py) - Pipeline nhận diện khuôn mặt hai pha SCRFD + AdaFace.
-  * [src/ocr/plate_reader.py](../src/ocr/plate_reader.py) - Pipeline nhận diện biển số xe Plate Detector + EasyOCR.
-  * [src/recognition/color_extractor.py](../src/recognition/color_extractor.py) - Trích xuất màu xe theo không gian màu HSV & Lab.
-  * [src/tracker/bytetrack_tracker.py](../src/tracker/bytetrack_tracker.py) - Thuật toán theo dõi ByteTrack.
-* **Quản Lý Sự Kiện & Lưu Trữ:**
-  * [src/events/event_manager.py](../src/events/event_manager.py) - Logic lọc trùng, gom cụm Episode và chuyển giao event.
-  * [src/events/db_worker.py](../src/events/db_worker.py) - Worker tiến trình nền ghi sự kiện vào Database qua `NullPool`.
-  * [src/notifications/service.py](../src/notifications/service.py) - Quản lý hàng đợi gửi thông báo và cơ chế thử lại (Retry).
-  * [src/storage.py](../src/storage.py) - Bộ điều phối lưu trữ ảnh snapshot (Local, Supabase Storage, External).
-* **Database Models & Migrations:**
-  * [src/db/models.py](../src/db/models.py) - Khai báo các thực thể SQLAlchemy 2.0 (`Target`, `TargetFace`, `Vehicle`, `PlateEvent`, `Episode`, `AlertOutbox`).
-  * [src/db/database.py](../src/db/database.py) - Khởi tạo Engine, Async Sessionmaker và cấu hình Pooling.
-  * [src/db/migrations/versions/](../src/db/migrations/versions/) - 11 phiên bản Migration Schema từ `0001` đến `0011`.
-* **Giao Diện Người Dùng (Frontend SPA):**
-  * [src/ui/static/index.html](../src/ui/static/index.html) - Cấu trúc HTML Dashboard & Sidebar điều khiển.
-  * [src/ui/static/app.js](../src/ui/static/app.js) - Logic điều hướng DOM, gọi API, bộ lọc sự kiện và quản trị danh sách.
-  * [src/ui/static/frame_stream.js](../src/ui/static/frame_stream.js) - Trình đọc luồng nhị phân tốc độ cao với 64-byte Header và vẽ khung hình Canvas.
-  * [src/ui/static/alerts.js](../src/ui/static/alerts.js) - Bảng theo dõi trạng thái gửi email thông báo (Pending / Sent / Failed).
+Không sử dụng mô tả kiến trúc cũ “HTML5 / CSS / Vanilla JS” để đại diện cho frontend hiện tại.
 
 ---
 
-> [!NOTE]
-> Bộ tài liệu này được biên soạn và kiểm chứng trực tiếp từ mã nguồn thực tế của hệ thống. Tất cả các tham số, đường dẫn endpoint, tên bảng cơ sở dữ liệu và thuật toán trong các tài liệu đều phản ánh chính xác cấu trúc hiện hành.
+## 3. DATT AI Assistant
+
+Tài liệu chuẩn: [AGENT_RAG_GUIDE.md](AGENT_RAG_GUIDE.md).
+
+### Thành phần chính
+
+```text
+frontend/src/pages/AgentPage.jsx
+frontend/src/api/agent.js
+src/agent/api/routes.py
+src/agent/api/auth.py
+src/agent/graph.py
+src/agent/tools/
+src/agent/rag/
+src/agent/memory/checkpoint.py
+src/agent/conversations.py
+```
+
+### API prefix
+
+```text
+/api/agent
+```
+
+Các route conversation/chat hiện tại:
+
+```text
+POST   /api/agent/chat
+POST   /api/agent/conversations
+GET    /api/agent/conversations
+GET    /api/agent/conversations/{thread_id}
+PATCH  /api/agent/conversations/{thread_id}
+DELETE /api/agent/conversations/{thread_id}
+```
+
+### Agent tools
+
+Agent đăng ký các nhóm tool: camera, event, watchlist, analytics, alerts, notification status, operational report và knowledge/RAG.
+
+---
+
+## 4. Database migrations
+
+Deployment không nên hard-code giả định rằng migration chỉ dừng ở `0011`.
+
+Trên nhánh `dev`, migration hiện đã bao gồm Knowledge Base và vector index:
+
+```text
+0001 ... 0011  Core CV / watchlist / notification schema
+0012_knowledge_base.py
+0013_knowledge_chunks_hnsw_index.py
+```
+
+Quy tắc vận hành: chạy Alembic đến **`head`** theo version code đang deploy.
+
+---
+
+## 5. Cấu hình môi trường
+
+File tham chiếu:
+
+```text
+.env.example
+```
+
+`.env.example` hiện bao gồm các nhóm cấu hình:
+
+- LLM provider/model/API key;
+- optional fallback LLM;
+- Agent execution/tool-loop limits;
+- conversation/context trimming;
+- RAG embedding/chunk/retrieval settings;
+- Agent authentication và trusted proxy;
+- PostgreSQL/persistence;
+- external storage.
+
+Không commit `.env` thật hoặc bất kỳ API key/password/signing secret nào.
+
+---
+
+## 6. Colab
+
+Notebook chính:
+
+```text
+notebooks/DATT_Colab_GPU.ipynb
+```
+
+Notebook hiện có cơ chế cập nhật checkout sạch về `origin/dev` bằng fast-forward trước khi startup. Tài liệu kỹ thuật chi tiết về quá trình hardening Agent/Colab nằm tại [agent_colab_integration.md](agent_colab_integration.md).
+
+Khi nghiệm thu Colab, cần phân biệt:
+
+- **Source/runtime readiness** — đúng commit, dependency, API routes, smoke tests;
+- **Real Camera Acceptance** — camera thật, stream thật, inference và event thực tế.
+
+`SYSTEM_READY=YES` không tự động chứng minh Real Camera Acceptance.
+
+---
+
+## 7. File mã nguồn trọng tâm
+
+### Backend / runtime
+
+- `src/ui/web_server.py` — FastAPI application và backend routes.
+- `src/runtime/runtime_manager.py` — quản lý lifecycle camera/runtime.
+- `src/events/event_manager.py` — event logic và dedup/coalescing.
+- `src/events/db_worker.py` — ghi DB nền.
+- `src/notifications/service.py` — notification/outbox.
+- `src/storage.py` — storage abstraction.
+
+### Computer Vision
+
+- `src/detector/yolo_detector.py`
+- `src/tracker/bytetrack_tracker.py`
+- `src/face/adaptive_pipeline.py`
+- `src/ocr/plate_reader.py`
+- `src/recognition/color_extractor.py`
+
+### Database
+
+- `src/db/models.py`
+- `src/db/database.py`
+- `src/db/migrations/versions/`
+
+### React frontend
+
+- `frontend/src/App.jsx` — route composition.
+- `frontend/src/pages/` — các trang Dashboard/Camera/Watchlist/Event/Alert/Settings/Agent.
+- `frontend/src/api/` — API clients.
+- `frontend/src/components/` — UI components dùng chung.
+- `frontend/src/context/` — React contexts.
+
+### AI Agent / RAG
+
+- `src/agent/config.py`
+- `src/agent/graph.py`
+- `src/agent/nodes.py`
+- `src/agent/api/routes.py`
+- `src/agent/api/auth.py`
+- `src/agent/tools/`
+- `src/agent/rag/`
+- `src/agent/memory/`
+
+---
+
+## 8. Quy tắc đồng bộ tài liệu với code
+
+Khi thay đổi một trong các phần sau, pull request/commit tương ứng phải cập nhật tài liệu liên quan:
+
+- route frontend hoặc API;
+- Agent tool;
+- authentication contract;
+- environment variable;
+- migration/schema;
+- RAG embedding/index/chunking;
+- deployment/Colab startup flow;
+- yêu cầu phần cứng/phần mềm.
+
+Không sử dụng câu khẳng định “tài liệu phản ánh chính xác code hiện hành” nếu chưa kiểm tra lại code của cùng commit.
