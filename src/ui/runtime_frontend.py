@@ -24,6 +24,8 @@ FRONTEND_DIR = PROJECT_ROOT / "frontend"
 RUNTIME_DIST = PROJECT_ROOT / ".datt-runtime" / "react_dist"
 RUNTIME_LOG_DIR = PROJECT_ROOT / ".datt-runtime" / "frontend"
 REVISION_MARKER = RUNTIME_LOG_DIR / "built-revision.txt"
+INSTALL_TIMEOUT_SECONDS = 90
+BUILD_TIMEOUT_SECONDS = 90
 
 
 def _is_colab_checkout() -> bool:
@@ -59,6 +61,10 @@ def prepare_runtime_frontend() -> Path | None:
     to disable it explicitly. npm is invoked with package-lock writes disabled so
     the safe source update cell remains clean. A successful bundle is cached by
     Git revision and reused across backend restarts.
+
+    The operation is deliberately bounded so frontend installation/build work
+    cannot consume the full backend startup budget. The caller treats failures as
+    best-effort and falls back to the tracked React bundle.
     """
     requested = os.getenv("DATT_BUILD_FRONTEND_RUNTIME", "").strip().lower()
     if requested in {"0", "false", "no", "off"}:
@@ -90,7 +96,7 @@ def prepare_runtime_frontend() -> Path | None:
                 cwd=FRONTEND_DIR,
                 stdout=log,
                 stderr=subprocess.STDOUT,
-                timeout=600,
+                timeout=INSTALL_TIMEOUT_SECONDS,
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
@@ -109,7 +115,7 @@ def prepare_runtime_frontend() -> Path | None:
                 env=env,
                 stdout=log,
                 stderr=subprocess.STDOUT,
-                timeout=600,
+                timeout=BUILD_TIMEOUT_SECONDS,
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
