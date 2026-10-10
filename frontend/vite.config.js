@@ -2,6 +2,8 @@ import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 import { fileURLToPath, URL } from 'node:url'
 
+const runtimeOutDir = process.env.DATT_FRONTEND_OUT_DIR
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -30,7 +32,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: '../src/ui/static/react_dist',
+    outDir: runtimeOutDir || '../src/ui/static/react_dist',
     emptyOutDir: true,
   },
 })
