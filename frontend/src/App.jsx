@@ -8,6 +8,7 @@ import { ToastContainer } from './components/ToastContainer';
 import { NotificationToastWatcher } from './components/NotificationToastWatcher';
 import './styles/monitoring-redesign.css';
 import './styles/watchlist-redesign.css';
+import './styles/classic-layout.css';
 
 import { DashboardPage } from './pages/DashboardPage';
 import { CameraManagementPage } from './pages/CameraManagementPage';
@@ -44,6 +45,7 @@ function AppRoutes() {
     <Routes key={connectionRevision}>
       <Route path="/" element={<DashboardPage />} />
       <Route path="/dashboard" element={<DashboardPage />} />
+      <Route path="/monitor" element={<CameraViewPage />} />
       <Route path="/cameras" element={<CameraManagementPage />} />
       <Route path="/cameras/:id" element={<CameraViewPage />} />
       <Route path="/watchlist" element={<WatchlistPage />} />
