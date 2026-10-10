@@ -1,0 +1,179 @@
+.watchlist-tabbar {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 10px;
+  background: var(--monitor-card);
+  border: 1px solid var(--monitor-border);
+  border-radius: 9px;
+}
+
+.watchlist-tab {
+  height: 31px;
+  padding: 0 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--monitor-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.watchlist-tab:hover {
+  color: var(--monitor-text);
+  background: var(--monitor-soft);
+}
+
+.watchlist-tab.active {
+  color: var(--accent, #3b82f6);
+  background: var(--accent-surface, rgba(59, 130, 246, .09));
+}
+
+.watchlist-face-thumb {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 7px;
+  border: 1px solid var(--monitor-border);
+  background: var(--monitor-soft);
+}
+
+.plate-value {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--accent, #3b82f6);
+}
+
+.watchlist-form {
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.watchlist-form label {
+  display: grid;
+  gap: 5px;
+  color: var(--monitor-muted);
+  font-size: 11px;
+}
+
+.watchlist-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.monitor-textarea {
+  min-height: 76px;
+  resize: vertical;
+  border: 1px solid var(--monitor-border);
+  border-radius: 7px;
+  background: var(--monitor-input);
+  color: var(--monitor-text);
+  font: inherit;
+  padding: 8px 9px;
+}
+
+.watchlist-file {
+  padding: 9px;
+  border: 1px dashed var(--monitor-border);
+  border-radius: 7px;
+  background: var(--monitor-soft);
+}
+
+.watchlist-detail-body {
+  display: grid;
+  grid-template-columns: minmax(240px, .85fr) minmax(280px, 1.15fr);
+  gap: 12px;
+  padding: 12px;
+}
+
+.watchlist-detail-body .detail-list {
+  padding: 0;
+}
+
+.watchlist-history {
+  border: 1px solid var(--monitor-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.watchlist-history h3 {
+  min-height: 38px;
+  margin: 0;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--monitor-border);
+  background: var(--monitor-soft);
+  font-size: 12px;
+}
+
+.watchlist-history p {
+  padding: 16px;
+  color: var(--monitor-muted);
+  font-size: 11px;
+}
+
+.history-row {
+  min-height: 37px;
+  padding: 7px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--monitor-border);
+  font-size: 11px;
+}
+
+.history-row:last-child {
+  border-bottom: 0;
+}
+
+.history-row span {
+  color: var(--monitor-muted);
+}
+
+.icon-action.danger {
+  color: #dc2626;
+}
+
+.monitor-button.danger {
+  background: #dc2626;
+  border-color: #dc2626;
+  color: #fff;
+}
+
+.delete-confirm-modal {
+  width: min(440px, 94vw);
+}
+
+.delete-confirm-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #dc2626;
+}
+
+.delete-confirm-body {
+  padding: 16px 12px;
+  color: var(--monitor-text);
+  line-height: 1.55;
+}
+
+.delete-confirm-actions {
+  padding: 10px 12px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  border-top: 1px solid var(--monitor-border);
+}
+
+@media (max-width: 1080px) {
+  .watchlist-detail-body {
+    grid-template-columns: 1fr;
+  }
+}
