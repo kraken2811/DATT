@@ -1,25 +1,24 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  FiActivity,
   FiCamera,
-  FiChevronRight,
+  FiCheckCircle,
   FiExternalLink,
-  FiRefreshCw,
-  FiUsers,
-  FiVideo,
-  FiVideoOff,
-  FiZap,
+  FiGlobe,
+  FiPlay,
+  FiSettings,
+  FiShield,
+  FiSliders,
+  FiUploadCloud,
 } from 'react-icons/fi';
-import { AuthenticatedVideo } from '../components/AuthenticatedVideo';
 import { useApp } from '../context/AppContext';
 import { useToast } from '../context/ToastContext';
 import {
   fetchCameras,
   fetchPublicCameras,
   fetchVideoSources,
-  testCameraConnection,
 } from '../api/cameras';
+import { fetchEvents } from '../api/events';
 
 const EMPTY = '—';
 
@@ -28,60 +27,76 @@ function normalizeStatus(value) {
   if (['online', 'running', 'live', 'connected', 'active'].includes(status)) return 'online';
   if (['connecting', 'loading', 'starting'].includes(status)) return 'connecting';
   if (['offline', 'stopped', 'error', 'disconnected', 'disabled'].includes(status)) return 'offline';
-  return status || 'unknown';
+  return status || 'offline';
 }
 
-function MetricCard({ label, value, unit, icon: Icon }) {
+function formatTime(value) {
+  if (!value) return EMPTY;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleTimeString();
+}
+
+function eventRecognition(event) {
+  const plate = event.plate || event.plate_number || event.plate_text;
+  if (plate) {
+    const confidence = event.confidence != null ? ` (${Math.round(Number(event.confidence) * (Number(event.confidence) <= 1 ? 100 : 1))}%)` : '';
+    return `Biển số: ${plate}${confidence}`;
+  }
+  return event.target_name || event.person_name || event.vehicle_type || EMPTY;
+}
+
+function sourceSubtitle(source) {
+  return source.zone || source.location || source.source_type || source.provider || EMPTY;
+}
+
+function SourceCard({ source, active, onSelect, actionLabel = 'Chọn nguồn' }) {
   return (
-    <div className="monitor-metric-card">
-      <div className="monitor-metric-label">
-        <span>{label}</span>
-        <Icon size={16} aria-hidden="true" />
+    <article className={`classic-source-card ${active ? 'active' : ''}`}>
+      <div className="classic-source-card-head">
+        <strong>{source.name || source.original_filename || source.id || 'Nguồn camera'}</strong>
+        {source.status ? <span className={`classic-status-pill ${normalizeStatus(source.status)}`}>{normalizeStatus(source.status)}</span> : null}
       </div>
-      <div className="monitor-metric-value">
-        {value}
-        {value !== EMPTY && unit ? <span>{unit}</span> : null}
+      <div className="classic-source-card-subtitle">{sourceSubtitle(source)}</div>
+      <div className="classic-source-card-footer">
+        <button type="button" className={`classic-small-button ${active ? 'primary' : ''}`} onClick={() => onSelect(source)}>
+          {active ? <FiPlay size={13} /> : null}
+          {active ? 'Xem camera' : actionLabel}
+        </button>
+        {active ? <span className="classic-selected-label">ĐÃ CHỌN</span> : null}
       </div>
-    </div>
+    </article>
   );
 }
 
 export function DashboardPage() {
   const navigate = useNavigate();
   const { showToast } = useToast();
-  const { telemetry, activeCamera, switchActiveCamera } = useApp();
+  const { apiStatus, activeCamera, switchActiveCamera } = useApp();
 
+  const [tab, setTab] = useState('system');
   const [cameras, setCameras] = useState([]);
   const [videoSources, setVideoSources] = useState([]);
   const [publicSources, setPublicSources] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [sourcePanel, setSourcePanel] = useState(null);
-  const [selectedVideoId, setSelectedVideoId] = useState('');
-  const [selectedPublicId, setSelectedPublicId] = useState('');
-  const [publicProvider, setPublicProvider] = useState('caltrans');
+  const [events, setEvents] = useState([]);
   const [customUrl, setCustomUrl] = useState('');
-  const [customName, setCustomName] = useState('');
+  const [customName, setCustomName] = useState('Custom Camera');
   const [customType, setCustomType] = useState('direct_hls');
-  const [testingSource, setTestingSource] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let mounted = true;
     const controller = new AbortController();
-
     Promise.allSettled([
       fetchCameras({}, controller.signal),
       fetchVideoSources(controller.signal),
-    ]).then(([cameraResult, sourceResult]) => {
+      fetchEvents({ page: 1, page_size: 5, sort: 'desc' }, controller.signal),
+    ]).then(([cameraResult, sourceResult, eventResult]) => {
       if (!mounted) return;
-      if (cameraResult.status === 'fulfilled') {
-        setCameras(cameraResult.value?.cameras || []);
-      }
-      if (sourceResult.status === 'fulfilled') {
-        setVideoSources(sourceResult.value?.sources || []);
-      }
+      if (cameraResult.status === 'fulfilled') setCameras(cameraResult.value?.cameras || []);
+      if (sourceResult.status === 'fulfilled') setVideoSources(sourceResult.value?.sources || []);
+      if (eventResult.status === 'fulfilled') setEvents(eventResult.value?.events || []);
       setLoading(false);
     });
-
     return () => {
       mounted = false;
       controller.abort();
@@ -89,357 +104,203 @@ export function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    if (sourcePanel?.mode !== 'public') return undefined;
+    if (tab !== 'public') return undefined;
     let mounted = true;
     const controller = new AbortController();
-
-    fetchPublicCameras({ provider: publicProvider }, controller.signal)
-      .then((resp) => {
-        if (mounted) setPublicSources(resp?.cameras || []);
+    fetchPublicCameras({ provider: 'all' }, controller.signal)
+      .then((response) => {
+        if (mounted) setPublicSources(response?.cameras || []);
       })
       .catch((error) => {
-        if (error.name !== 'AbortError' && mounted) {
-          setPublicSources([]);
-          showToast(`Không tải được CCTV công cộng: ${error.message}`, 'error');
-        }
+        if (mounted && error.name !== 'AbortError') showToast(`Không tải được CCTV công cộng: ${error.message}`, 'error');
       });
-
     return () => {
       mounted = false;
       controller.abort();
     };
-  }, [sourcePanel?.mode, publicProvider, showToast]);
+  }, [tab, showToast]);
 
-  const activeRegisteredCamera = useMemo(
-    () => cameras.find((camera) => String(camera.id) === String(activeCamera?.id)),
-    [cameras, activeCamera?.id],
-  );
+  const selectedSource = useMemo(() => {
+    const candidates = [...cameras, ...videoSources];
+    return candidates.find((item) => String(item.id) === String(activeCamera?.id)) || activeCamera;
+  }, [cameras, videoSources, activeCamera]);
 
-  const activeStatus = normalizeStatus(telemetry?.camera_status);
-  const isLive = Boolean(telemetry?.stream_alive) && activeStatus !== 'offline';
-
-  const metricForCamera = (camera, field, formatter) => {
-    if (String(camera.id) !== String(activeCamera?.id)) return EMPTY;
-    const value = telemetry?.[field];
-    if (value === null || value === undefined || Number.isNaN(value)) return EMPTY;
-    return formatter ? formatter(value) : value;
+  const selectRegistered = async (source) => {
+    await switchActiveCamera(source);
   };
 
-  const handleRegisteredSwitch = async (camera) => {
-    await switchActiveCamera(camera);
+  const selectVideo = async (source) => {
+    await switchActiveCamera({
+      id: source.id,
+      name: source.name || source.original_filename || 'Uploaded video',
+      source_url: source.storage_path || source.file_path,
+      source_type: 'local',
+      video_source_id: source.id,
+      loop: true,
+    });
   };
 
-  const openSourceMode = async (camera, mode) => {
-    if (mode === 'stream') {
-      await handleRegisteredSwitch(camera);
-      setSourcePanel(null);
+  const selectPublic = async (source) => {
+    if (!source.stream_url) {
+      showToast('Nguồn CCTV này không có stream URL hợp lệ.', 'warning');
       return;
     }
-    if (mode === 'local' && camera?.source_type === 'local') {
-      await handleRegisteredSwitch(camera);
-      setSourcePanel(null);
-      return;
-    }
-    setSelectedVideoId('');
-    setSelectedPublicId('');
-    setCustomUrl('');
-    setCustomName(camera?.name || '');
-    setSourcePanel({ camera, mode });
+    await switchActiveCamera({
+      id: source.id,
+      name: source.name || source.id,
+      source_url: source.stream_url,
+      source_type: 'direct_hls',
+      provider: source.provider,
+    });
   };
 
-  const applyAlternateSource = async () => {
-    if (!sourcePanel) return;
-    const { camera, mode } = sourcePanel;
-
-    if (mode === 'local' || mode === 'uploaded') {
-      const source = videoSources.find((item) => String(item.id) === String(selectedVideoId));
-      if (!source) {
-        showToast('Chọn một video có thật từ hệ thống trước khi chuyển nguồn.', 'warning');
-        return;
-      }
-      await switchActiveCamera({
-        name: source.name || source.original_filename || camera.name,
-        source_url: source.storage_path || source.file_path,
-        source_type: 'local',
-        video_source_id: source.id,
-        loop: true,
-      });
-      setSourcePanel(null);
+  const selectCustom = async () => {
+    if (!customUrl.trim()) {
+      showToast('Nhập URL nguồn camera.', 'warning');
       return;
     }
-
-    if (mode === 'public') {
-      const source = publicSources.find((item) => String(item.id) === String(selectedPublicId));
-      if (!source?.stream_url) {
-        showToast('Chọn một camera CCTV công cộng hợp lệ.', 'warning');
-        return;
-      }
-      await switchActiveCamera({
-        name: source.name || camera.name,
-        source_url: source.stream_url,
-        source_type: 'direct_hls',
-        provider: source.provider || publicProvider,
-      });
-      setSourcePanel(null);
-      return;
-    }
-
-    if (mode === 'custom') {
-      if (!customUrl.trim()) {
-        showToast('Nhập URL nguồn trước khi kết nối.', 'warning');
-        return;
-      }
-      await switchActiveCamera({
-        name: customName.trim() || camera.name || 'Custom source',
-        source_url: customUrl.trim(),
-        source_type: customType,
-      });
-      setSourcePanel(null);
-    }
+    await switchActiveCamera({
+      name: customName.trim() || 'Custom Camera',
+      source_url: customUrl.trim(),
+      source_type: customType,
+    });
   };
 
-  const handleTestSource = async () => {
-    const camera = sourcePanel?.camera || activeRegisteredCamera;
-    const sourceType = sourcePanel?.mode === 'custom' ? customType : camera?.source_type;
-    const sourceUrl = sourcePanel?.mode === 'custom'
-      ? customUrl.trim()
-      : (camera?.source_url || camera?.url);
+  const openMonitor = () => navigate('/monitor');
+  const hasSelected = activeCamera?.name && !String(activeCamera.name).toLowerCase().includes('initializing');
 
-    if (!sourceType || !sourceUrl) {
-      showToast('Backend không cung cấp đủ source type/URL để kiểm tra nguồn này.', 'warning');
-      return;
-    }
-
-    setTestingSource(true);
-    try {
-      const result = await testCameraConnection(sourceType, sourceUrl);
-      const ok = result?.status === 'ok' || result?.success === true || result?.reachable === true;
-      showToast(ok ? 'Nguồn camera phản hồi bình thường.' : 'Backend chưa xác nhận nguồn camera hoạt động.', ok ? 'success' : 'warning');
-    } catch (error) {
-      showToast(`Kiểm tra nguồn thất bại: ${error.message}`, 'error');
-    } finally {
-      setTestingSource(false);
-    }
-  };
-
-  const sourceOptions = [
-    ['stream', 'Stream'],
-    ['local', 'Local'],
-    ['public', 'Public/CCTV'],
-    ['uploaded', 'Uploaded video'],
-    ['custom', 'Custom URL'],
+  const tabs = [
+    ['system', FiCamera, `Hệ thống (${cameras.length})`],
+    ['public', FiGlobe, 'CCTV Công cộng'],
+    ['uploaded', FiUploadCloud, `Video Tải lên (${videoSources.length})`],
+    ['custom', FiSliders, 'Tùy chỉnh (URL)'],
   ];
 
   return (
-    <div className="monitor-page dashboard-monitor" id="dashboardPage">
-      <header className="monitor-page-header">
-        <div>
-          <h1>Dashboard</h1>
-          <p>Giám sát camera và telemetry AI theo dữ liệu backend hiện tại.</p>
-        </div>
-        <div className={`monitor-connection-pill ${isLive ? 'online' : 'offline'}`}>
-          <FiActivity size={14} aria-hidden="true" />
-          <span>{isLive ? 'Monitoring online' : 'Monitoring unavailable'}</span>
-        </div>
+    <div className="classic-dashboard-page" id="dashboardPage">
+      <header className="classic-dashboard-header">
+        <h1>Bảng điều khiển (Dashboard)</h1>
+        <span className={`classic-connection-badge ${apiStatus === 'connected' ? 'online' : 'offline'}`}>
+          <FiCheckCircle size={13} />
+          {apiStatus === 'connected' ? 'ĐÃ KẾT NỐI' : 'MẤT KẾT NỐI'}
+        </span>
       </header>
 
-      <section className="monitor-metrics-grid" aria-label="Telemetry camera đang chọn">
-        <MetricCard label="People" icon={FiUsers} value={telemetry?.people_count ?? EMPTY} />
-        <MetricCard label="Vehicles" icon={FiVideo} value={telemetry?.car_count ?? EMPTY} />
-        <MetricCard
-          label="Processing FPS"
-          icon={FiActivity}
-          value={typeof telemetry?.processing_fps === 'number'
-            ? telemetry.processing_fps.toFixed(1)
-            : (typeof telemetry?.stream_fps === 'number' ? telemetry.stream_fps.toFixed(1) : EMPTY)}
-          unit="fps"
-        />
-        <MetricCard
-          label="Pipeline latency"
-          icon={FiZap}
-          value={typeof telemetry?.pipeline_latency_ms === 'number' && telemetry.pipeline_latency_ms > 0
-            ? Math.round(telemetry.pipeline_latency_ms)
-            : EMPTY}
-          unit="ms"
-        />
-      </section>
-
-      <section className="dashboard-workspace-grid">
-        <div className="monitor-card camera-table-card">
-          <div className="monitor-card-header">
-            <div>
-              <h2>Camera</h2>
-              <span>{loading ? 'Đang tải…' : `${cameras.length} camera đăng ký`}</span>
-            </div>
+      {hasSelected ? (
+        <section className="classic-selected-source">
+          <div className="classic-selected-icon"><FiCheckCircle size={19} /></div>
+          <div className="classic-selected-copy">
+            <span>Nguồn camera đã chọn:</span>
+            <strong>{activeCamera.name} <em>({String(activeCamera.source_type || 'source').toUpperCase()})</em></strong>
+            <small>Vị trí: {selectedSource?.location || selectedSource?.zone || (activeCamera.source_type === 'local' ? 'Local Storage' : EMPTY)}</small>
           </div>
+          <button type="button" className="classic-view-button" onClick={openMonitor}>
+            <FiPlay size={15} /> Xem camera
+          </button>
+        </section>
+      ) : null}
 
-          <div className="monitor-table-wrap">
-            <table className="monitor-table camera-dashboard-table">
-              <thead>
-                <tr>
-                  <th>Camera</th>
-                  <th>Status</th>
-                  <th>Source</th>
-                  <th>People</th>
-                  <th>Vehicles</th>
-                  <th>FPS</th>
-                  <th>Latency</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {!loading && cameras.length === 0 ? (
-                  <tr>
-                    <td colSpan={8} className="monitor-empty-cell">Không có camera từ backend.</td>
-                  </tr>
-                ) : cameras.map((camera) => {
-                  const isActive = String(camera.id) === String(activeCamera?.id);
-                  const status = isActive ? activeStatus : normalizeStatus(camera.status);
-                  return (
-                    <tr key={camera.id} className={isActive ? 'is-active-row' : ''}>
-                      <td>
-                        <div className="camera-name-cell">
-                          <FiCamera size={15} aria-hidden="true" />
-                          <div>
-                            <strong>{camera.name || camera.id}</strong>
-                            <span>{camera.zone || camera.location || camera.id}</span>
-                          </div>
-                        </div>
-                      </td>
-                      <td><span className={`monitor-badge ${status}`}>{status}</span></td>
-                      <td>
-                        <select
-                          className="monitor-select compact"
-                          value={sourcePanel?.camera?.id === camera.id ? sourcePanel.mode : 'stream'}
-                          onChange={(event) => openSourceMode(camera, event.target.value)}
-                          aria-label={`Chọn nguồn cho ${camera.name || camera.id}`}
-                        >
-                          {sourceOptions.map(([value, label]) => (
-                            <option key={value} value={value}>{label}</option>
-                          ))}
-                        </select>
-                      </td>
-                      <td>{metricForCamera(camera, 'people_count')}</td>
-                      <td>{metricForCamera(camera, 'car_count')}</td>
-                      <td>{metricForCamera(camera, 'processing_fps', (value) => Number(value).toFixed(1))}</td>
-                      <td>{metricForCamera(camera, 'pipeline_latency_ms', (value) => `${Math.round(Number(value))} ms`)}</td>
-                      <td>
-                        <div className="monitor-row-actions">
-                          <button type="button" className="icon-action" onClick={() => handleRegisteredSwitch(camera)} title="Chọn camera">
-                            <FiChevronRight size={15} />
-                          </button>
-                          <button type="button" className="icon-action" onClick={() => navigate(`/cameras/${encodeURIComponent(camera.id)}`)} title="Xem camera">
-                            <FiExternalLink size={15} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+      <section className="classic-panel classic-source-panel">
+        <div className="classic-panel-topline">
+          <div>
+            <h2>Lựa chọn nguồn Camera</h2>
+            <p>Chọn một nguồn từ danh sách bên dưới rồi nhấn “Xem camera” để mở màn hình giám sát.</p>
           </div>
-
-          {sourcePanel ? (
-            <div className="source-inline-panel">
-              <div className="source-inline-heading">
-                <div>
-                  <strong>{sourcePanel.camera?.name || sourcePanel.camera?.id}</strong>
-                  <span>Chọn nguồn: {sourcePanel.mode}</span>
-                </div>
-                <button type="button" className="text-button" onClick={() => setSourcePanel(null)}>Đóng</button>
-              </div>
-
-              {(sourcePanel.mode === 'local' || sourcePanel.mode === 'uploaded') ? (
-                <select className="monitor-select" value={selectedVideoId} onChange={(e) => setSelectedVideoId(e.target.value)}>
-                  <option value="">Chọn video đã có trên backend</option>
-                  {videoSources.map((source) => (
-                    <option key={source.id} value={source.id}>
-                      {source.name || source.original_filename || source.id}
-                    </option>
-                  ))}
-                </select>
-              ) : null}
-
-              {sourcePanel.mode === 'public' ? (
-                <div className="source-panel-grid">
-                  <select className="monitor-select" value={publicProvider} onChange={(e) => setPublicProvider(e.target.value)}>
-                    <option value="caltrans">Caltrans CCTV</option>
-                    <option value="seattle">Seattle SDOT CCTV</option>
-                  </select>
-                  <select className="monitor-select" value={selectedPublicId} onChange={(e) => setSelectedPublicId(e.target.value)}>
-                    <option value="">Chọn camera công cộng</option>
-                    {publicSources.map((source) => (
-                      <option key={source.id} value={source.id}>{source.name || source.id}</option>
-                    ))}
-                  </select>
-                </div>
-              ) : null}
-
-              {sourcePanel.mode === 'custom' ? (
-                <div className="source-panel-grid custom-source-grid">
-                  <input className="monitor-input" value={customName} onChange={(e) => setCustomName(e.target.value)} placeholder="Tên hiển thị" />
-                  <select className="monitor-select" value={customType} onChange={(e) => setCustomType(e.target.value)}>
-                    <option value="direct_hls">HLS</option>
-                    <option value="rtsp">RTSP</option>
-                    <option value="youtube">YouTube</option>
-                  </select>
-                  <input className="monitor-input span-2" value={customUrl} onChange={(e) => setCustomUrl(e.target.value)} placeholder="URL nguồn thực tế" />
-                </div>
-              ) : null}
-
-              <div className="source-panel-actions">
-                {(sourcePanel.mode === 'custom' || sourcePanel.mode === 'local') ? (
-                  <button type="button" className="monitor-button secondary" onClick={handleTestSource} disabled={testingSource}>
-                    <FiRefreshCw size={14} />
-                    {testingSource ? 'Đang kiểm tra…' : 'Test Source'}
-                  </button>
-                ) : null}
-                <button type="button" className="monitor-button primary" onClick={applyAlternateSource}>
-                  Áp dụng nguồn
-                </button>
-              </div>
-            </div>
-          ) : null}
+          <div className="classic-source-tabs">
+            {tabs.map(([value, Icon, label]) => (
+              <button key={value} type="button" className={tab === value ? 'active' : ''} onClick={() => setTab(value)}>
+                <Icon size={13} /> {label}
+              </button>
+            ))}
+          </div>
         </div>
 
-        <div className="monitor-card preview-card">
-          <div className="monitor-card-header">
-            <div>
-              <h2>Monitoring preview</h2>
-              <span>{activeCamera?.name || 'Chưa chọn camera'}</span>
-            </div>
-            <span className={`monitor-badge ${isLive ? 'online' : 'offline'}`}>{isLive ? 'online' : 'offline'}</span>
-          </div>
+        {loading ? <div className="classic-loading">Đang tải nguồn camera…</div> : null}
 
-          <div className="dashboard-preview">
-            {isLive ? (
-              <AuthenticatedVideo cameraId={activeCamera?.id} id="mainVideoStream" label={activeCamera?.name || 'Camera feed'} />
-            ) : (
-              <div className="offline-state">
-                <FiVideoOff size={34} aria-hidden="true" />
-                <strong>Camera Offline</strong>
-                <span>{activeCamera?.name || telemetry?.camera_name || 'Chưa có nguồn camera hoạt động'}</span>
-                <div className="offline-actions">
-                  {activeRegisteredCamera ? (
-                    <button type="button" className="monitor-button primary" onClick={() => handleRegisteredSwitch(activeRegisteredCamera)}>
-                      <FiRefreshCw size={14} /> Reconnect
-                    </button>
-                  ) : null}
-                  <button type="button" className="monitor-button secondary" onClick={handleTestSource} disabled={testingSource}>
-                    Test Source
-                  </button>
-                </div>
-              </div>
-            )}
+        {!loading && tab === 'system' ? (
+          <div className="classic-source-grid">
+            {cameras.map((camera) => (
+              <SourceCard
+                key={camera.id}
+                source={camera}
+                active={String(camera.id) === String(activeCamera?.id)}
+                onSelect={async (source) => {
+                  if (String(source.id) === String(activeCamera?.id)) openMonitor();
+                  else await selectRegistered(source);
+                }}
+              />
+            ))}
           </div>
+        ) : null}
 
-          <div className="preview-status-strip">
-            <span><strong>Camera</strong>{activeCamera?.name || EMPTY}</span>
-            <span><strong>People</strong>{telemetry?.people_count ?? EMPTY}</span>
-            <span><strong>Vehicles</strong>{telemetry?.car_count ?? EMPTY}</span>
-            <span><strong>FPS</strong>{typeof telemetry?.processing_fps === 'number' ? telemetry.processing_fps.toFixed(1) : EMPTY}</span>
+        {!loading && tab === 'uploaded' ? (
+          <div className="classic-source-grid uploaded-grid">
+            {videoSources.map((source) => (
+              <SourceCard
+                key={source.id}
+                source={{ ...source, name: source.name || source.original_filename, source_type: 'local' }}
+                active={String(source.id) === String(activeCamera?.id)}
+                onSelect={async (item) => {
+                  if (String(item.id) === String(activeCamera?.id)) openMonitor();
+                  else await selectVideo(source);
+                }}
+              />
+            ))}
           </div>
+        ) : null}
+
+        {tab === 'public' ? (
+          <div className="classic-source-grid">
+            {publicSources.length ? publicSources.slice(0, 12).map((source) => (
+              <SourceCard key={`${source.provider}-${source.id}`} source={source} active={String(source.id) === String(activeCamera?.id)} onSelect={selectPublic} />
+            )) : <div className="classic-empty">Không có CCTV công cộng phù hợp.</div>}
+          </div>
+        ) : null}
+
+        {tab === 'custom' ? (
+          <div className="classic-custom-source">
+            <input value={customName} onChange={(e) => setCustomName(e.target.value)} placeholder="Tên camera" />
+            <select value={customType} onChange={(e) => setCustomType(e.target.value)}>
+              <option value="direct_hls">HLS / HTTP Stream</option>
+              <option value="rtsp">RTSP</option>
+              <option value="youtube">YouTube</option>
+            </select>
+            <input className="url" value={customUrl} onChange={(e) => setCustomUrl(e.target.value)} placeholder="Nhập URL nguồn camera" />
+            <button type="button" onClick={selectCustom}><FiSettings size={14} /> Chọn nguồn</button>
+          </div>
+        ) : null}
+      </section>
+
+      <section className="classic-panel classic-events-panel">
+        <div className="classic-events-heading">
+          <h2><FiShield size={15} /> Sự kiện gần nhất</h2>
+          <button type="button" onClick={() => navigate('/events')}>Xem tất cả sự kiện <FiExternalLink size={12} /></button>
+        </div>
+        <div className="classic-events-table-wrap">
+          <table className="classic-events-table">
+            <thead>
+              <tr>
+                <th>THỜI GIAN</th>
+                <th>LOẠI SỰ KIỆN</th>
+                <th>CAMERA</th>
+                <th>CHI TIẾT NHẬN DIỆN</th>
+                <th>WATCHLIST</th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.length ? events.map((event) => (
+                <tr key={event.event_id || event.id}>
+                  <td>{formatTime(event.timestamp || event.created_at)}</td>
+                  <td><span className="classic-event-type">{event.event_type || event.type || EMPTY}</span></td>
+                  <td>{event.camera_name || event.camera_id || EMPTY}</td>
+                  <td>{eventRecognition(event)}</td>
+                  <td>{event.watchlist_match ? <span className="classic-watchlist-match">TRÙNG KHỚP</span> : EMPTY}</td>
+                </tr>
+              )) : (
+                <tr><td colSpan={5} className="classic-empty-row">Chưa có sự kiện gần đây.</td></tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </section>
     </div>
