@@ -1,407 +1,206 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Header } from '../components/Header';
-import { fetchAlerts, fetchAlertDetail } from '../api/alerts';
-import { LoadingSpinner, EmptyState, ErrorState } from '../components/StatusStates';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Bell,
-  Search,
-  Eye,
-  Mail,
-  ChevronLeft,
-  ChevronRight,
-  X,
-  CheckCircle,
-  AlertTriangle,
-  Clock,
-  ExternalLink,
-} from 'lucide-react';
+  FiBell,
+  FiChevronLeft,
+  FiChevronRight,
+  FiEye,
+  FiMail,
+  FiSearch,
+  FiX,
+} from 'react-icons/fi';
+import { fetchAlertDetail, fetchAlerts } from '../api/alerts';
+import { EmptyState, ErrorState, LoadingSpinner } from '../components/StatusStates';
+import { useToast } from '../context/ToastContext';
+
+const EMPTY = '—';
+
+function formatTime(value) {
+  if (!value) return EMPTY;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function DetailRow({ label, value }) {
+  if (value === undefined || value === null || value === '') return null;
+  return <div className="detail-row"><span>{label}</span><strong>{String(value)}</strong></div>;
+}
 
 export function AlertCenterPage() {
+  const { showToast } = useToast();
   const [alerts, setAlerts] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
+  const [pageSize] = useState(25);
+  const [search, setSearch] = useState('');
+  const [query, setQuery] = useState('');
+  const [status, setStatus] = useState('all');
+  const [eventType, setEventType] = useState('all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [detail, setDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
-  // Filters
-  const [searchTerm, setSearchTerm] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [typeFilter, setTypeFilter] = useState('all');
-
-  // Detail Modal
-  const [selectedAlertId, setSelectedAlertId] = useState(null);
-  const [alertDetail, setAlertDetail] = useState(null);
-  const [loadingDetail, setLoadingDetail] = useState(false);
-
-  // Debounce search
   useEffect(() => {
     const timer = setTimeout(() => {
-      setDebouncedSearch(searchTerm);
+      setQuery(search.trim());
       setPage(1);
-    }, 350);
+    }, 300);
     return () => clearTimeout(timer);
-  }, [searchTerm]);
+  }, [search]);
 
-  const loadAlerts = useCallback(async (signal) => {
+  const load = useCallback(async (signal) => {
     setLoading(true);
     setError(null);
     try {
-      const resp = await fetchAlerts(
-        {
-          page,
-          page_size: pageSize,
-          search: debouncedSearch,
-          status: statusFilter,
-          event_type: typeFilter,
-        },
-        signal
-      );
-      if (resp && resp.status === 'ok') {
-        setAlerts(resp.alerts || []);
-        setTotal(resp.total || 0);
-      } else {
-        throw new Error(resp?.detail || 'Không thể tải danh sách cảnh báo');
-      }
+      const response = await fetchAlerts({
+        page,
+        page_size: pageSize,
+        search: query,
+        status,
+        event_type: eventType,
+      }, signal);
+      if (response?.status !== 'ok') throw new Error(response?.detail || 'Không tải được Alert Center');
+      setAlerts(response.alerts || []);
+      setTotal(response.total || 0);
     } catch (err) {
-      if (err.name !== 'AbortError') {
-        setError(err.message || 'Lỗi kết nối máy chủ');
-      }
+      if (err.name !== 'AbortError') setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, debouncedSearch, statusFilter, typeFilter]);
+  }, [page, pageSize, query, status, eventType]);
 
   useEffect(() => {
-    const abortCtrl = new AbortController();
-    loadAlerts(abortCtrl.signal);
-    return () => abortCtrl.abort();
-  }, [loadAlerts]);
+    const controller = new AbortController();
+    load(controller.signal);
+    return () => controller.abort();
+  }, [load]);
 
-  const handleOpenDetail = async (alertId) => {
-    setSelectedAlertId(alertId);
-    setAlertDetail(null);
-    setLoadingDetail(true);
+  const openDetail = async (id) => {
+    setDetailLoading(true);
+    setDetail({ id });
     try {
-      const resp = await fetchAlertDetail(alertId);
-      if (resp && resp.status === 'ok') {
-        setAlertDetail(resp.alert);
-      }
+      const response = await fetchAlertDetail(id);
+      if (response?.status === 'ok') setDetail(response.alert);
+      else throw new Error(response?.detail || 'Không tải được chi tiết cảnh báo');
     } catch (err) {
-      console.error('Failed to load alert detail:', err);
+      showToast(err.message, 'error');
+      setDetail(null);
     } finally {
-      setLoadingDetail(false);
+      setDetailLoading(false);
     }
   };
 
-  const totalPages = Math.ceil(total / pageSize) || 1;
-
-  const getAlertCenterStatus = () => {
-    if (error) {
-      const errStr = String(error).toLowerCase();
-      if (errStr.includes('401') || errStr.includes('xác thực') || errStr.includes('unauthorized')) {
-        return { className: 'disconnected', label: 'CẦN XÁC THỰC' };
-      }
-      if (errStr.includes('403') || errStr.includes('forbidden') || errStr.includes('quyền')) {
-        return { className: 'disconnected', label: 'CHƯA CÓ QUYỀN' };
-      }
-      if (errStr.includes('500') || errStr.includes('503') || errStr.includes('database')) {
-        return { className: 'disconnected', label: 'LỖI MÁY CHỦ' };
-      }
-      if (errStr.includes('network') || errStr.includes('failed to fetch')) {
-        return { className: 'disconnected', label: 'MẤT KẾT NỐI' };
-      }
-      return { className: 'disconnected', label: 'KHÔNG THỂ TRUY XUẤT' };
-    }
-    if (loading) {
-      return { className: 'connecting', label: 'ĐANG TẢI...' };
-    }
-    return { className: 'live', label: 'ĐÃ KẾT NỐI' };
-  };
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   return (
-    <>
-      <Header
-        title="Trung tâm Cảnh báo (Alert Center)"
-        status={getAlertCenterStatus()}
-      />
+    <div className="monitor-page" id="alertCenterPage">
+      <header className="monitor-page-header">
+        <div><h1>Alert Center</h1><p>Trạng thái cảnh báo và notification do backend cung cấp.</p></div>
+      </header>
 
-      <div className="page-container" id="alertCenterPage">
-        {/* Filter Bar */}
-        <div className="card" style={{ marginBottom: '20px' }}>
-          <div className="filter-bar" style={{ margin: 0 }}>
-            <div className="search-input-wrapper">
-              <Search size={16} className="search-input-icon" />
-              <input
-                type="text"
-                className="input-field with-icon"
-                placeholder="Tìm kiếm cảnh báo (email, đối tượng, biển số, camera...)"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                id="alertSearchInput"
-              />
-            </div>
-
-            <select
-              className="select-field"
-              value={statusFilter}
-              onChange={(e) => {
-                setStatusFilter(e.target.value);
-                setPage(1);
-              }}
-              id="alertStatusSelect"
-            >
-              <option value="all">Tất cả trạng thái</option>
-              <option value="sent">Đã gửi (Sent)</option>
-              <option value="pending">Đang chờ (Pending)</option>
-              <option value="failed">Thất bại (Failed)</option>
-              <option value="suppressed">Bị chặn / Trùng (Suppressed)</option>
-            </select>
-
-            <select
-              className="select-field"
-              value={typeFilter}
-              onChange={(e) => {
-                setTypeFilter(e.target.value);
-                setPage(1);
-              }}
-              id="alertTypeSelect"
-            >
-              <option value="all">Tất cả loại cảnh báo</option>
-              <option value="FACE_WATCHLIST_MATCH">Khuôn mặt Watchlist</option>
-              <option value="VEHICLE_WATCHLIST_MATCH">Biển số Watchlist</option>
-            </select>
-
-            <select
-              className="select-field"
-              value={pageSize}
-              onChange={(e) => {
-                setPageSize(Number(e.target.value));
-                setPage(1);
-              }}
-            >
-              <option value={10}>10 dòng / trang</option>
-              <option value={25}>25 dòng / trang</option>
-              <option value={50}>50 dòng / trang</option>
-            </select>
-          </div>
+      <div className="monitor-card compact-filter-card">
+        <div className="monitor-filter-row">
+          <label className="monitor-search">
+            <FiSearch size={15} />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Tìm cảnh báo, camera, biển số…" />
+          </label>
+          <select className="monitor-select" value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }}>
+            <option value="all">Tất cả trạng thái</option>
+            <option value="sent">Sent</option>
+            <option value="pending">Pending</option>
+            <option value="failed">Failed</option>
+            <option value="suppressed">Suppressed</option>
+          </select>
+          <select className="monitor-select" value={eventType} onChange={(e) => { setEventType(e.target.value); setPage(1); }}>
+            <option value="all">Tất cả loại</option>
+            <option value="FACE_WATCHLIST_MATCH">Face watchlist</option>
+            <option value="VEHICLE_WATCHLIST_MATCH">Vehicle watchlist</option>
+          </select>
         </div>
+      </div>
 
-        {/* Alerts Table */}
-        {loading ? (
-          <div className="card">
-            <LoadingSpinner text="Đang tải danh sách cảnh báo..." />
-          </div>
-        ) : error ? (
-          <ErrorState message={error} onRetry={() => loadAlerts()} />
-        ) : alerts.length === 0 ? (
-          <div className="card">
-            <EmptyState
-              icon={Bell}
-              title="Không có thông báo cảnh báo nào"
-              message="Chưa có thông báo gửi email nào khớp với bộ lọc hiện tại."
-            />
-          </div>
-        ) : (
-          <div className="table-container">
-            <table className="data-table" id="alertCenterTable">
+      {loading ? (
+        <div className="monitor-card"><LoadingSpinner text="Đang tải cảnh báo…" /></div>
+      ) : error ? (
+        <ErrorState message={error} onRetry={() => load()} />
+      ) : alerts.length === 0 ? (
+        <div className="monitor-card"><EmptyState icon={FiBell} title="Không có cảnh báo" message="Không có bản ghi phù hợp với bộ lọc hiện tại." /></div>
+      ) : (
+        <div className="monitor-card monitor-table-card">
+          <div className="monitor-table-wrap">
+            <table className="monitor-table">
               <thead>
                 <tr>
-                  <th>Thời gian tạo</th>
-                  <th>Loại cảnh báo</th>
-                  <th>Đối tượng</th>
-                  <th>Camera</th>
-                  <th>Kênh / Người nhận</th>
-                  <th>Trạng thái</th>
-                  <th style={{ textAlign: 'center' }}>Thao tác</th>
+                  <th>Thời gian</th>
+                  <th>Loại</th>
+                  <th>Camera / Event</th>
+                  <th>Notification</th>
+                  <th>Retry / Send</th>
+                  <th>Status</th>
+                  <th aria-label="Thao tác" />
                 </tr>
               </thead>
               <tbody>
-                {alerts.map((item) => {
-                  let statusBg = 'var(--bg-hover)';
-                  let statusColor = 'var(--text-muted)';
-                  if (item.status === 'SENT') {
-                    statusBg = 'rgba(16, 185, 129, 0.15)';
-                    statusColor = '#10b981';
-                  } else if (item.status === 'FAILED') {
-                    statusBg = 'rgba(239, 68, 68, 0.15)';
-                    statusColor = '#ef4444';
-                  } else if (item.status === 'PENDING') {
-                    statusBg = 'rgba(245, 158, 11, 0.15)';
-                    statusColor = '#f59e0b';
-                  }
-
-                  return (
-                    <tr key={item.id}>
-                      <td style={{ fontSize: '0.8rem', whiteSpace: 'nowrap', color: 'var(--text-secondary)' }}>
-                        {item.created_at ? new Date(item.created_at).toLocaleString() : 'N/A'}
-                      </td>
-                      <td>
-                        <span className="tag-badge" style={{ background: 'var(--accent-surface)', color: 'var(--accent)' }}>
-                          {item.event_type}
-                        </span>
-                      </td>
-                      <td>
-                        <div style={{ fontWeight: 600 }}>{item.target_name || item.plate_number || 'Đối tượng theo dõi'}</div>
-                        {item.plate_number && (
-                          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                            Biển số: {item.plate_number}
-                          </span>
-                        )}
-                      </td>
-                      <td style={{ fontSize: '0.8rem' }}>{item.camera_name || item.camera_id || 'N/A'}</td>
-                      <td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <Mail size={14} style={{ color: 'var(--text-muted)' }} />
-                          <span style={{ fontSize: '0.85rem' }}>{item.recipient_email || 'Default Email'}</span>
-                        </div>
-                      </td>
-                      <td>
-                        <span className="tag-badge" style={{ background: statusBg, color: statusColor }}>
-                          {item.status}
-                        </span>
-                      </td>
-                      <td style={{ textAlign: 'center' }}>
-                        <button
-                          type="button"
-                          className="btn btn-secondary btn-icon btn-sm"
-                          onClick={() => handleOpenDetail(item.id)}
-                          title="Xem chi tiết cảnh báo"
-                          aria-label="Xem chi tiết cảnh báo"
-                        >
-                          <Eye size={14} />
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
+                {alerts.map((alert) => (
+                  <tr key={alert.id}>
+                    <td>{formatTime(alert.created_at || alert.timestamp)}</td>
+                    <td><span className="monitor-badge neutral">{alert.event_type || EMPTY}</span></td>
+                    <td>
+                      <strong>{alert.camera_name || alert.camera_id || EMPTY}</strong>
+                      <span className="subtle-row-text">{alert.event_id || EMPTY}</span>
+                    </td>
+                    <td>
+                      <span className="notification-cell"><FiMail size={14} />{alert.notification_status || alert.delivery_status || alert.status || EMPTY}</span>
+                    </td>
+                    <td>{alert.retry_count ?? alert.send_attempts ?? EMPTY}</td>
+                    <td><span className={`monitor-badge ${String(alert.status || '').toLowerCase()}`}>{alert.status || EMPTY}</span></td>
+                    <td className="cell-action">
+                      <button type="button" className="icon-action" onClick={() => openDetail(alert.id)} title="Xem chi tiết">
+                        <FiEye size={15} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
+          </div>
 
-            {/* Pagination */}
-            <div className="pagination-container">
-              <div>
-                Hiển thị {(page - 1) * pageSize + 1} -{' '}
-                {Math.min(page * pageSize, total)} trong tổng số <strong>{total}</strong> thông báo
-              </div>
-              <div className="pagination-controls">
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-sm"
-                  disabled={page <= 1}
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  id="btnPrevAlertPage"
-                >
-                  <ChevronLeft size={14} />
-                  <span>Trước</span>
-                </button>
-                <div style={{ display: 'flex', alignItems: 'center', padding: '0 8px', fontSize: '0.85rem' }}>
-                  Trang {page} / {totalPages}
-                </div>
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-sm"
-                  disabled={page >= totalPages}
-                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  id="btnNextAlertPage"
-                >
-                  <span>Sau</span>
-                  <ChevronRight size={14} />
-                </button>
-              </div>
+          <div className="monitor-pagination">
+            <span>{total} bản ghi</span>
+            <div>
+              <button type="button" className="icon-action" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}><FiChevronLeft /></button>
+              <span>{page} / {totalPages}</span>
+              <button type="button" className="icon-action" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}><FiChevronRight /></button>
             </div>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* Alert Detail Modal */}
-        {selectedAlertId && (
-          <div className="modal-overlay" onClick={() => setSelectedAlertId(null)}>
-            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-              <div className="modal-header">
-                <h3 className="modal-title">Chi tiết Cảnh báo Outbox</h3>
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-icon btn-sm"
-                  onClick={() => setSelectedAlertId(null)}
-                >
-                  <X size={16} />
-                </button>
-              </div>
-
-              <div className="modal-body">
-                {loadingDetail ? (
-                  <LoadingSpinner text="Đang tải thông tin chi tiết..." />
-                ) : alertDetail ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', fontSize: '0.85rem' }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                      <div>
-                        <span style={{ color: 'var(--text-muted)' }}>Mã cảnh báo:</span>
-                        <div style={{ fontWeight: 600 }}>{alertDetail.id}</div>
-                      </div>
-                      <div>
-                        <span style={{ color: 'var(--text-muted)' }}>Trạng thái:</span>
-                        <div style={{ fontWeight: 600 }}>{alertDetail.status}</div>
-                      </div>
-                      <div>
-                        <span style={{ color: 'var(--text-muted)' }}>Loại sự kiện:</span>
-                        <div style={{ fontWeight: 600 }}>{alertDetail.event_type}</div>
-                      </div>
-                      <div>
-                        <span style={{ color: 'var(--text-muted)' }}>Đối tượng:</span>
-                        <div style={{ fontWeight: 600 }}>{alertDetail.target_name || alertDetail.plate_number || 'N/A'}</div>
-                      </div>
-                      <div>
-                        <span style={{ color: 'var(--text-muted)' }}>Camera:</span>
-                        <div style={{ fontWeight: 600 }}>{alertDetail.camera_name || alertDetail.camera_id}</div>
-                      </div>
-                      <div>
-                        <span style={{ color: 'var(--text-muted)' }}>Người nhận:</span>
-                        <div style={{ fontWeight: 600 }}>{alertDetail.recipient_email}</div>
-                      </div>
-                      <div>
-                        <span style={{ color: 'var(--text-muted)' }}>Tạo lúc:</span>
-                        <div>{new Date(alertDetail.created_at).toLocaleString()}</div>
-                      </div>
-                      <div>
-                        <span style={{ color: 'var(--text-muted)' }}>Gửi lúc:</span>
-                        <div>{alertDetail.sent_at ? new Date(alertDetail.sent_at).toLocaleString() : 'Chưa gửi'}</div>
-                      </div>
-                    </div>
-
-                    {alertDetail.error_message && (
-                      <div style={{ padding: '12px', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.2)', borderRadius: 'var(--radius-sm)', color: '#ef4444' }}>
-                        Lỗi chuyển phát: {alertDetail.error_message}
-                      </div>
-                    )}
-
-                    {alertDetail.event_url && (
-                      <div style={{ marginTop: '6px' }}>
-                        <a href={alertDetail.event_url} className="btn btn-secondary btn-sm">
-                          <span>Xem sự kiện gốc tại Event Center</span>
-                          <ExternalLink size={12} />
-                        </a>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div>Không thể tải chi tiết cảnh báo này.</div>
-                )}
-              </div>
-
-              <div className="modal-footer">
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => setSelectedAlertId(null)}
-                >
-                  Đóng
-                </button>
-              </div>
+      {detail ? (
+        <div className="monitor-modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setDetail(null); }}>
+          <div className="monitor-modal" role="dialog" aria-modal="true">
+            <div className="monitor-modal-header">
+              <div><h2>Alert Detail</h2><span>{detail.id}</span></div>
+              <button type="button" className="icon-action" onClick={() => setDetail(null)}><FiX /></button>
             </div>
+            {detailLoading ? <LoadingSpinner text="Đang tải chi tiết…" /> : (
+              <div className="detail-list">
+                <DetailRow label="Event relation" value={detail.event_id} />
+                <DetailRow label="Event type" value={detail.event_type} />
+                <DetailRow label="Camera" value={detail.camera_name || detail.camera_id} />
+                <DetailRow label="Target" value={detail.target_name || detail.target_id || detail.plate_number} />
+                <DetailRow label="Status" value={detail.status} />
+                <DetailRow label="Notification status" value={detail.notification_status || detail.delivery_status} />
+                <DetailRow label="Recipient" value={detail.recipient_email || detail.recipient_masked} />
+                <DetailRow label="Retry count" value={detail.retry_count} />
+                <DetailRow label="Last error" value={detail.last_error} />
+                <DetailRow label="Created" value={formatTime(detail.created_at)} />
+                <DetailRow label="Updated" value={formatTime(detail.updated_at)} />
+              </div>
+            )}
           </div>
-        )}
-      </div>
-    </>
+        </div>
+      ) : null}
+    </div>
   );
 }
