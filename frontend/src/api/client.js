@@ -36,9 +36,8 @@ function currentConnection() {
 
 /**
  * Execute an HTTP request with deduplication and caching support.
- *
- * @param {string} endpoint - API endpoint (e.g. '/api/cameras')
- * @param {object} options - Fetch options (method, headers, body, signal, cacheTtlMs, forceRefresh)
+ * staleWhileRevalidateMs lets route remounts render a recently cached response
+ * immediately while one credential-equivalent refresh runs in the background.
  */
 export async function apiRequest(endpoint, options = {}) {
   const {
@@ -47,6 +46,7 @@ export async function apiRequest(endpoint, options = {}) {
     body = null,
     signal = null,
     cacheTtlMs = 0,
+    staleWhileRevalidateMs = 0,
     forceRefresh = false,
     responseType = 'auto',
     reportAuthFailure = true,
@@ -60,28 +60,33 @@ export async function apiRequest(endpoint, options = {}) {
   const canReuse = isGet && responseType === 'auto' && !explicitAuth;
   const cacheKey = `${connection.revision}:${method}:${url}`;
 
-  // Check cache for GET requests
   if (canReuse && cacheTtlMs > 0 && !forceRefresh) {
     const cached = memoryCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < cacheTtlMs) {
-      return cached.data;
+    if (cached) {
+      const age = Date.now() - cached.timestamp;
+      if (age < cacheTtlMs) return cached.data;
+      if (staleWhileRevalidateMs > 0 && age < cacheTtlMs + staleWhileRevalidateMs) {
+        if (!inFlightRequests.has(cacheKey)) {
+          // A route-level AbortController must not cancel the shared background refresh.
+          void apiRequest(endpoint, {
+            ...options,
+            signal: null,
+            forceRefresh: true,
+          }).catch(() => {});
+        }
+        return cached.data;
+      }
     }
   }
 
-  // Deduplicate in-flight GET requests
+  // Preserve existing request deduplication semantics for shareable GET requests.
   if (canReuse && inFlightRequests.has(cacheKey) && !signal) {
     return inFlightRequests.get(cacheKey);
   }
 
-  const defaultHeaders = {
-    'Accept': 'application/json',
-  };
-  if (connection.sessionId) {
-    defaultHeaders['X-Session-Id'] = connection.sessionId;
-  }
-  if (connection.token) {
-    defaultHeaders['Authorization'] = `Bearer ${connection.token}`;
-  }
+  const defaultHeaders = { 'Accept': 'application/json' };
+  if (connection.sessionId) defaultHeaders['X-Session-Id'] = connection.sessionId;
+  if (connection.token) defaultHeaders['Authorization'] = `Bearer ${connection.token}`;
   if (body && typeof body === 'object' && !(body instanceof FormData)) {
     defaultHeaders['Content-Type'] = 'application/json';
   }
@@ -119,34 +124,22 @@ export async function apiRequest(endpoint, options = {}) {
       if (responseType === 'response') return response;
       const contentType = response.headers.get('content-type') || '';
       let data = null;
-      if (contentType.includes('application/json')) {
-        data = await response.json();
-      } else {
-        data = await response.text();
-      }
+      if (contentType.includes('application/json')) data = await response.json();
+      else data = await response.text();
 
       if (currentConnection().revision !== connection.revision) {
         throw new DOMException('Connection changed', 'AbortError');
       }
       if (canReuse && cacheTtlMs > 0) {
-        memoryCache.set(cacheKey, {
-          data,
-          timestamp: Date.now(),
-        });
+        memoryCache.set(cacheKey, { data, timestamp: Date.now() });
       }
-
       return data;
     } finally {
-      if (canReuse) {
-        inFlightRequests.delete(cacheKey);
-      }
+      if (canReuse) inFlightRequests.delete(cacheKey);
     }
   })();
 
-  if (canReuse && !signal) {
-    inFlightRequests.set(cacheKey, fetchPromise);
-  }
-
+  if (canReuse && !signal) inFlightRequests.set(cacheKey, fetchPromise);
   return fetchPromise;
 }
 
@@ -156,8 +149,6 @@ export function invalidateApiCache(prefix = '') {
     return;
   }
   for (const key of memoryCache.keys()) {
-    if (key.includes(prefix)) {
-      memoryCache.delete(key);
-    }
+    if (key.includes(prefix)) memoryCache.delete(key);
   }
 }
