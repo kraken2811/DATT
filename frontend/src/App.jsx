@@ -6,8 +6,8 @@ import { AuthenticationNotice } from './components/AuthenticationNotice';
 import { Sidebar } from './components/Sidebar';
 import { ToastContainer } from './components/ToastContainer';
 import { NotificationToastWatcher } from './components/NotificationToastWatcher';
+import './styles/monitoring-redesign.css';
 
-// Pages
 import { DashboardPage } from './pages/DashboardPage';
 import { CameraManagementPage } from './pages/CameraManagementPage';
 import { CameraViewPage } from './pages/CameraViewPage';
@@ -40,18 +40,17 @@ export default function App() {
 function AppRoutes() {
   const { connectionRevision } = useApp();
   return (
-              <Routes key={connectionRevision}>
-                <Route path="/" element={<DashboardPage />} />
-                <Route path="/dashboard" element={<DashboardPage />} />
-                <Route path="/cameras" element={<CameraManagementPage />} />
-                <Route path="/cameras/:id" element={<CameraViewPage />} />
-                <Route path="/watchlist" element={<WatchlistPage />} />
-                <Route path="/events" element={<EventCenterPage />} />
-                <Route path="/alerts" element={<AlertCenterPage />} />
-                <Route path="/settings" element={<SettingsPage />} />
-                <Route path="/agent" element={<AgentPage />} />
-                {/* Fallback to dashboard */}
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </Routes>
+    <Routes key={connectionRevision}>
+      <Route path="/" element={<DashboardPage />} />
+      <Route path="/dashboard" element={<DashboardPage />} />
+      <Route path="/cameras" element={<CameraManagementPage />} />
+      <Route path="/cameras/:id" element={<CameraViewPage />} />
+      <Route path="/watchlist" element={<WatchlistPage />} />
+      <Route path="/events" element={<EventCenterPage />} />
+      <Route path="/alerts" element={<AlertCenterPage />} />
+      <Route path="/settings" element={<SettingsPage />} />
+      <Route path="/agent" element={<AgentPage />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }
