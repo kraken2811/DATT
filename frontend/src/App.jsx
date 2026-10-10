@@ -7,6 +7,7 @@ import { Sidebar } from './components/Sidebar';
 import { ToastContainer } from './components/ToastContainer';
 import { NotificationToastWatcher } from './components/NotificationToastWatcher';
 import './styles/monitoring-redesign.css';
+import './styles/watchlist-redesign.css';
 
 import { DashboardPage } from './pages/DashboardPage';
 import { CameraManagementPage } from './pages/CameraManagementPage';
