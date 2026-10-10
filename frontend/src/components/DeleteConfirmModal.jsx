@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { AlertTriangle, X } from 'lucide-react';
+import { FiAlertTriangle, FiX } from 'react-icons/fi';
 
 export function DeleteConfirmModal({
   isOpen,
@@ -10,11 +10,9 @@ export function DeleteConfirmModal({
   isDeleting = false,
 }) {
   useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e) => {
-      if (e.key === 'Escape' && !isDeleting) {
-        onClose();
-      }
+    if (!isOpen) return undefined;
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape' && !isDeleting) onClose();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
@@ -23,68 +21,24 @@ export function DeleteConfirmModal({
   if (!isOpen) return null;
 
   return (
-    <div className="modal-overlay" onClick={isDeleting ? undefined : onClose} role="dialog" aria-modal="true">
-      <div
-        className="modal-card"
-        style={{ maxWidth: '440px', width: '90%' }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="modal-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <div
-              style={{
-                width: '36px',
-                height: '36px',
-                borderRadius: '50%',
-                background: 'rgba(239, 68, 68, 0.15)',
-                color: 'var(--status-danger)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-              }}
-            >
-              <AlertTriangle size={20} />
-            </div>
-            <h3 className="modal-title" style={{ fontSize: '1.05rem', margin: 0 }}>
-              {title}
-            </h3>
+    <div className="monitor-modal-backdrop" onMouseDown={(event) => {
+      if (event.target === event.currentTarget && !isDeleting) onClose();
+    }} role="presentation">
+      <div className="monitor-modal delete-confirm-modal" role="dialog" aria-modal="true">
+        <div className="monitor-modal-header">
+          <div className="delete-confirm-title">
+            <FiAlertTriangle size={18} aria-hidden="true" />
+            <div><h2>{title}</h2><span>Thao tác này cần xác nhận</span></div>
           </div>
-          <button
-            type="button"
-            className="btn btn-secondary btn-icon btn-sm"
-            onClick={onClose}
-            disabled={isDeleting}
-            aria-label="Đóng hộp thoại"
-            style={{ width: '32px', height: '32px', minWidth: '32px', minHeight: '32px' }}
-          >
-            <X size={16} />
+          <button type="button" className="icon-action" onClick={onClose} disabled={isDeleting} aria-label="Đóng">
+            <FiX size={15} />
           </button>
         </div>
-
-        <div className="modal-body" style={{ padding: '16px 20px' }}>
-          <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-            {message}
-          </p>
-        </div>
-
-        <div className="modal-footer" style={{ padding: '12px 20px' }}>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={onClose}
-            disabled={isDeleting}
-          >
-            Hủy
-          </button>
-          <button
-            type="button"
-            className="btn btn-danger"
-            onClick={onConfirm}
-            disabled={isDeleting}
-            id="btnConfirmDeleteAction"
-          >
-            {isDeleting ? 'Đang xóa...' : 'Xác nhận xóa'}
+        <div className="delete-confirm-body">{message}</div>
+        <div className="delete-confirm-actions">
+          <button type="button" className="monitor-button secondary" onClick={onClose} disabled={isDeleting}>Hủy</button>
+          <button type="button" className="monitor-button danger" onClick={onConfirm} disabled={isDeleting}>
+            {isDeleting ? 'Đang xóa…' : 'Xóa'}
           </button>
         </div>
       </div>
