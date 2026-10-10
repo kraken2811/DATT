@@ -1,533 +1,448 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { useApp } from '../context/AppContext';
-import { Header } from '../components/Header';
-import { AuthenticatedVideo } from '../components/AuthenticatedVideo';
-import { fetchCameras, fetchPublicCameras, fetchVideoSources } from '../api/cameras';
-import { fetchEvents } from '../api/events';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
-  Users,
-  Car,
-  Zap,
-  Gauge,
-  Clock,
-  Play,
-  Square,
-  RefreshCw,
-  Search,
-  ExternalLink,
-  ShieldAlert,
-} from 'lucide-react';
+  FiActivity,
+  FiCamera,
+  FiChevronRight,
+  FiExternalLink,
+  FiGauge,
+  FiRefreshCw,
+  FiUsers,
+  FiVideo,
+  FiVideoOff,
+  FiZap,
+} from 'react-icons/fi';
+import { AuthenticatedVideo } from '../components/AuthenticatedVideo';
+import { useApp } from '../context/AppContext';
+import { useToast } from '../context/ToastContext';
+import {
+  fetchCameras,
+  fetchPublicCameras,
+  fetchVideoSources,
+  testCameraConnection,
+} from '../api/cameras';
+
+const EMPTY = '—';
+
+function normalizeStatus(value) {
+  const status = String(value || '').toLowerCase();
+  if (['online', 'running', 'live', 'connected', 'active'].includes(status)) return 'online';
+  if (['connecting', 'loading', 'starting'].includes(status)) return 'connecting';
+  if (['offline', 'stopped', 'error', 'disconnected', 'disabled'].includes(status)) return 'offline';
+  return status || 'unknown';
+}
+
+function MetricCard({ label, value, unit, icon: Icon }) {
+  return (
+    <div className="monitor-metric-card">
+      <div className="monitor-metric-label">
+        <span>{label}</span>
+        <Icon size={16} aria-hidden="true" />
+      </div>
+      <div className="monitor-metric-value">
+        {value}
+        {value !== EMPTY && unit ? <span>{unit}</span> : null}
+      </div>
+    </div>
+  );
+}
 
 export function DashboardPage() {
-  const { telemetry, activeCamera, switchActiveCamera, stopActiveCamera } = useApp();
+  const navigate = useNavigate();
+  const { showToast } = useToast();
+  const { telemetry, activeCamera, switchActiveCamera } = useApp();
 
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const streamContainerRef = useRef(null);
-
-  // Quick camera selector drawer / state
-  const [activeTab, setActiveTab] = useState('registered'); // 'registered' | 'cctv' | 'local' | 'custom'
   const [cameras, setCameras] = useState([]);
-  const [cctvCameras, setCctvCameras] = useState([]);
   const [videoSources, setVideoSources] = useState([]);
-  const [cctvProvider, setCctvProvider] = useState('caltrans');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [recentEvents, setRecentEvents] = useState([]);
-  const [isLoadingSources, setIsLoadingSources] = useState(false);
-
-  // Custom stream input
+  const [publicSources, setPublicSources] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [sourcePanel, setSourcePanel] = useState(null);
+  const [selectedVideoId, setSelectedVideoId] = useState('');
+  const [selectedPublicId, setSelectedPublicId] = useState('');
+  const [publicProvider, setPublicProvider] = useState('caltrans');
   const [customUrl, setCustomUrl] = useState('');
   const [customName, setCustomName] = useState('');
   const [customType, setCustomType] = useState('direct_hls');
+  const [testingSource, setTestingSource] = useState(false);
 
-  // Handle Fullscreen & ESC key
   useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.key === 'Escape' && isFullscreen) {
-        setIsFullscreen(false);
+    let mounted = true;
+    const controller = new AbortController();
+
+    Promise.allSettled([
+      fetchCameras({}, controller.signal),
+      fetchVideoSources(controller.signal),
+    ]).then(([cameraResult, sourceResult]) => {
+      if (!mounted) return;
+      if (cameraResult.status === 'fulfilled') {
+        setCameras(cameraResult.value?.cameras || []);
       }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isFullscreen]);
-
-  const toggleFullscreen = () => {
-    setIsFullscreen((prev) => !prev);
-  };
-
-  // Load cameras & video sources in parallel (no sequential waterfall)
-  useEffect(() => {
-    let isMounted = true;
-    const abortCtrl = new AbortController();
-
-    const loadData = async () => {
-      setIsLoadingSources(true);
-      try {
-        const [camsResp, sourcesResp, eventsResp] = await Promise.allSettled([
-          fetchCameras({}, abortCtrl.signal),
-          fetchVideoSources(abortCtrl.signal),
-          fetchEvents({ page: 1, page_size: 5 }, abortCtrl.signal),
-        ]);
-
-        if (!isMounted) return;
-
-        if (camsResp.status === 'fulfilled' && camsResp.value?.cameras) {
-          setCameras(camsResp.value.cameras);
-        }
-        if (sourcesResp.status === 'fulfilled' && sourcesResp.value?.sources) {
-          setVideoSources(sourcesResp.value.sources);
-        }
-        if (eventsResp.status === 'fulfilled' && eventsResp.value?.events) {
-          setRecentEvents(eventsResp.value.events);
-        }
-      } finally {
-        if (isMounted) setIsLoadingSources(false);
+      if (sourceResult.status === 'fulfilled') {
+        setVideoSources(sourceResult.value?.sources || []);
       }
-    };
-
-    loadData();
+      setLoading(false);
+    });
 
     return () => {
-      isMounted = false;
-      abortCtrl.abort();
+      mounted = false;
+      controller.abort();
     };
   }, []);
 
-  // Fetch CCTV cameras when CCTV tab is selected
   useEffect(() => {
-    if (activeTab !== 'cctv') return;
-    let isMounted = true;
-    const abortCtrl = new AbortController();
+    if (sourcePanel?.mode !== 'public') return undefined;
+    let mounted = true;
+    const controller = new AbortController();
 
-    const loadCctv = async () => {
-      try {
-        const resp = await fetchPublicCameras(
-          { provider: cctvProvider, q: searchQuery },
-          abortCtrl.signal
-        );
-        if (isMounted && resp?.cameras) {
-          setCctvCameras(resp.cameras);
+    fetchPublicCameras({ provider: publicProvider }, controller.signal)
+      .then((resp) => {
+        if (mounted) setPublicSources(resp?.cameras || []);
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError' && mounted) {
+          setPublicSources([]);
+          showToast(`Không tải được CCTV công cộng: ${error.message}`, 'error');
         }
-      } catch (err) {
-        if (err.name !== 'AbortError') console.error('Failed to load CCTV:', err);
-      }
-    };
-
-    loadCctv();
+      });
 
     return () => {
-      isMounted = false;
-      abortCtrl.abort();
+      mounted = false;
+      controller.abort();
     };
-  }, [activeTab, cctvProvider, searchQuery]);
+  }, [sourcePanel?.mode, publicProvider, showToast]);
 
+  const activeRegisteredCamera = useMemo(
+    () => cameras.find((camera) => String(camera.id) === String(activeCamera?.id)),
+    [cameras, activeCamera?.id],
+  );
+
+  const activeStatus = normalizeStatus(telemetry?.camera_status);
+  const isLive = Boolean(telemetry?.stream_alive) && activeStatus !== 'offline';
+
+  const metricForCamera = (camera, field, formatter) => {
+    if (String(camera.id) !== String(activeCamera?.id)) return EMPTY;
+    const value = telemetry?.[field];
+    if (value === null || value === undefined || Number.isNaN(value)) return EMPTY;
+    return formatter ? formatter(value) : value;
+  };
+
+  const handleRegisteredSwitch = async (camera) => {
+    await switchActiveCamera(camera);
+  };
+
+  const openSourceMode = async (camera, mode) => {
+    if (mode === 'stream') {
+      await handleRegisteredSwitch(camera);
+      setSourcePanel(null);
+      return;
+    }
+    if (mode === 'local' && camera?.source_type === 'local') {
+      await handleRegisteredSwitch(camera);
+      setSourcePanel(null);
+      return;
+    }
+    setSelectedVideoId('');
+    setSelectedPublicId('');
+    setCustomUrl('');
+    setCustomName(camera?.name || '');
+    setSourcePanel({ camera, mode });
+  };
+
+  const applyAlternateSource = async () => {
+    if (!sourcePanel) return;
+    const { camera, mode } = sourcePanel;
+
+    if (mode === 'local' || mode === 'uploaded') {
+      const source = videoSources.find((item) => String(item.id) === String(selectedVideoId));
+      if (!source) {
+        showToast('Chọn một video có thật từ hệ thống trước khi chuyển nguồn.', 'warning');
+        return;
+      }
+      await switchActiveCamera({
+        name: source.name || source.original_filename || camera.name,
+        source_url: source.storage_path || source.file_path,
+        source_type: 'local',
+        video_source_id: source.id,
+        loop: true,
+      });
+      setSourcePanel(null);
+      return;
+    }
+
+    if (mode === 'public') {
+      const source = publicSources.find((item) => String(item.id) === String(selectedPublicId));
+      if (!source?.stream_url) {
+        showToast('Chọn một camera CCTV công cộng hợp lệ.', 'warning');
+        return;
+      }
+      await switchActiveCamera({
+        name: source.name || camera.name,
+        source_url: source.stream_url,
+        source_type: 'direct_hls',
+        provider: source.provider || publicProvider,
+      });
+      setSourcePanel(null);
+      return;
+    }
+
+    if (mode === 'custom') {
+      if (!customUrl.trim()) {
+        showToast('Nhập URL nguồn trước khi kết nối.', 'warning');
+        return;
+      }
+      await switchActiveCamera({
+        name: customName.trim() || camera.name || 'Custom source',
+        source_url: customUrl.trim(),
+        source_type: customType,
+      });
+      setSourcePanel(null);
+    }
+  };
+
+  const handleTestSource = async () => {
+    const camera = sourcePanel?.camera || activeRegisteredCamera;
+    const sourceType = sourcePanel?.mode === 'custom' ? customType : camera?.source_type;
+    const sourceUrl = sourcePanel?.mode === 'custom'
+      ? customUrl.trim()
+      : (camera?.source_url || camera?.url);
+
+    if (!sourceType || !sourceUrl) {
+      showToast('Backend không cung cấp đủ source type/URL để kiểm tra nguồn này.', 'warning');
+      return;
+    }
+
+    setTestingSource(true);
+    try {
+      const result = await testCameraConnection(sourceType, sourceUrl);
+      const ok = result?.status === 'ok' || result?.success === true || result?.reachable === true;
+      showToast(ok ? 'Nguồn camera phản hồi bình thường.' : 'Backend chưa xác nhận nguồn camera hoạt động.', ok ? 'success' : 'warning');
+    } catch (error) {
+      showToast(`Kiểm tra nguồn thất bại: ${error.message}`, 'error');
+    } finally {
+      setTestingSource(false);
+    }
+  };
+
+  const sourceOptions = [
+    ['stream', 'Stream'],
+    ['local', 'Local'],
+    ['public', 'Public/CCTV'],
+    ['uploaded', 'Uploaded video'],
+    ['custom', 'Custom URL'],
+  ];
 
   return (
-    <>
-      <Header
-        title={activeCamera.name || 'AI Vision Monitor'}
-        onToggleFullscreen={toggleFullscreen}
-        isFullscreen={isFullscreen}
-        isCameraContext={true}
-      />
-
-      <div className="page-container" id="dashboardPage">
-        {/* Real Backend Statistics Bar */}
-        <div className="stats-grid">
-          <div className="stat-card" id="statPeopleCard">
-            <div className="stat-header">
-              <span>Người trong khung hình</span>
-              <Users size={16} />
-            </div>
-            <div className="stat-value" id="statPeopleCount">
-              {telemetry.people_count ?? '—'}
-            </div>
-          </div>
-
-          <div className="stat-card" id="statVehicleCard">
-            <div className="stat-header">
-              <span>Phương tiện phát hiện</span>
-              <Car size={16} />
-            </div>
-            <div className="stat-value" id="statVehicleCount">
-              {telemetry.car_count ?? '—'}
-            </div>
-          </div>
-
-          <div className="stat-card" id="statFpsCard">
-            <div className="stat-header">
-              <span>Tốc độ xử lý (FPS)</span>
-              <Gauge size={16} />
-            </div>
-            <div className="stat-value" id="statFpsValue">
-              {typeof telemetry.stream_fps === 'number'
-                ? telemetry.stream_fps.toFixed(1)
-                : '—'}
-              <span className="stat-unit">fps</span>
-            </div>
-          </div>
-
-          <div className="stat-card" id="statLatencyCard">
-            <div className="stat-header">
-              <span>Độ trễ Pipeline</span>
-              <Zap size={16} />
-            </div>
-            <div className="stat-value" id="statLatencyValue">
-              {typeof telemetry.pipeline_latency_ms === 'number' && telemetry.pipeline_latency_ms > 0
-                ? `${telemetry.pipeline_latency_ms.toFixed(0)}`
-                : 'N/A'}
-              <span className="stat-unit">ms</span>
-            </div>
-          </div>
+    <div className="monitor-page dashboard-monitor" id="dashboardPage">
+      <header className="monitor-page-header">
+        <div>
+          <h1>Dashboard</h1>
+          <p>Giám sát camera và telemetry AI theo dữ liệu backend hiện tại.</p>
         </div>
-
-        {/* Video Stream Monitor Frame */}
-        <div
-          ref={streamContainerRef}
-          className={`stream-wrapper ${isFullscreen ? 'fullscreen' : ''}`}
-          id="mainStreamWrapper"
-        >
-          <AuthenticatedVideo cameraId={activeCamera.id} id="mainVideoStream" label="AI Video Stream" />
-
-          <div className="stream-overlay-top">
-            <div className="stream-badges">
-              <span className="stream-badge" id="badgeActiveCameraName">
-                {activeCamera.name}
-              </span>
-              <span className="stream-badge" id="badgeCameraStatus">
-                {telemetry.camera_status || 'LIVE'}
-              </span>
-            </div>
-          </div>
-
-          <div className="stream-controls">
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={stopActiveCamera}
-              id="btnStopCamera"
-              title="Dừng luồng video"
-            >
-              <Square size={14} />
-              <span>Dừng</span>
-            </button>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={toggleFullscreen}
-              id="btnFullscreenInStream"
-            >
-              {isFullscreen ? 'Thu nhỏ' : 'Toàn màn hình'}
-            </button>
-          </div>
+        <div className={`monitor-connection-pill ${isLive ? 'online' : 'offline'}`}>
+          <FiActivity size={14} aria-hidden="true" />
+          <span>{isLive ? 'Monitoring online' : 'Monitoring unavailable'}</span>
         </div>
+      </header>
 
-        {/* Camera Source Selector Section */}
-        <div className="card" style={{ marginTop: '24px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
-            <h2 style={{ fontSize: '1.1rem', fontWeight: 600 }}>Chuyển đổi Nguồn Camera</h2>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button
-                type="button"
-                className={`btn btn-sm ${activeTab === 'registered' ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => setActiveTab('registered')}
-                id="tabBtnRegistered"
-              >
-                Hệ thống ({cameras.length})
-              </button>
-              <button
-                type="button"
-                className={`btn btn-sm ${activeTab === 'cctv' ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => setActiveTab('cctv')}
-                id="tabBtnCctv"
-              >
-                CCTV Công cộng
-              </button>
-              <button
-                type="button"
-                className={`btn btn-sm ${activeTab === 'local' ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => setActiveTab('local')}
-                id="tabBtnLocal"
-              >
-                Video Tải lên ({videoSources.length})
-              </button>
-              <button
-                type="button"
-                className={`btn btn-sm ${activeTab === 'custom' ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => setActiveTab('custom')}
-                id="tabBtnCustom"
-              >
-                Tùy chỉnh (URL)
-              </button>
-            </div>
-          </div>
+      <section className="monitor-metrics-grid" aria-label="Telemetry camera đang chọn">
+        <MetricCard label="People" icon={FiUsers} value={telemetry?.people_count ?? EMPTY} />
+        <MetricCard label="Vehicles" icon={FiVideo} value={telemetry?.car_count ?? EMPTY} />
+        <MetricCard
+          label="Processing FPS"
+          icon={FiGauge}
+          value={typeof telemetry?.processing_fps === 'number'
+            ? telemetry.processing_fps.toFixed(1)
+            : (typeof telemetry?.stream_fps === 'number' ? telemetry.stream_fps.toFixed(1) : EMPTY)}
+          unit="fps"
+        />
+        <MetricCard
+          label="Pipeline latency"
+          icon={FiZap}
+          value={typeof telemetry?.pipeline_latency_ms === 'number' && telemetry.pipeline_latency_ms > 0
+            ? Math.round(telemetry.pipeline_latency_ms)
+            : EMPTY}
+          unit="ms"
+        />
+      </section>
 
-          {/* Tab 1: Registered Cameras */}
-          {activeTab === 'registered' && (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '12px' }}>
-              {cameras.map((cam) => (
-                <div
-                  key={cam.id}
-                  style={{
-                    background: 'var(--bg-input)',
-                    border: '1px solid var(--border-card)',
-                    borderRadius: 'var(--radius-md)',
-                    padding: '12px 14px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '8px',
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>{cam.name}</span>
-                    <span className="tag-badge" style={{ background: cam.status === 'online' ? 'rgba(16, 185, 129, 0.15)' : 'var(--bg-hover)', color: cam.status === 'online' ? '#10b981' : 'var(--text-muted)' }}>
-                      {cam.status}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    {cam.zone || 'Khu vực chung'} • {cam.source_type}
-                  </div>
-                  <button
-                    type="button"
-                    className="btn btn-primary btn-sm"
-                    style={{ marginTop: '4px' }}
-                    onClick={() => switchActiveCamera(cam)}
-                  >
-                    <Play size={12} />
-                    <span>Chọn Camera</span>
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Tab 2: Public CCTV (Caltrans & Seattle) */}
-          {activeTab === 'cctv' && (
+      <section className="dashboard-workspace-grid">
+        <div className="monitor-card camera-table-card">
+          <div className="monitor-card-header">
             <div>
-              <div style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
-                <select
-                  className="select-field"
-                  value={cctvProvider}
-                  onChange={(e) => setCctvProvider(e.target.value)}
-                >
-                  <option value="caltrans">California Caltrans CCTV</option>
-                  <option value="seattle">Seattle SDOT CCTV</option>
-                </select>
-                <div className="search-input-wrapper">
-                  <Search size={16} className="search-input-icon" />
-                  <input
-                    type="text"
-                    className="input-field with-icon"
-                    placeholder="Tìm kiếm camera theo tên tuyến đường, quận..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                  />
-                </div>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '12px', maxHeight: '380px', overflowY: 'auto' }}>
-                {cctvCameras.map((cam) => (
-                  <div
-                    key={cam.id}
-                    style={{
-                      background: 'var(--bg-input)',
-                      border: '1px solid var(--border-card)',
-                      borderRadius: 'var(--radius-md)',
-                      padding: '12px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '8px',
-                    }}
-                  >
-                    <div style={{ fontWeight: 600, fontSize: '0.85rem' }}>{cam.name}</div>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                      {cam.provider} • {cam.district || cam.city || 'Public'}
-                    </div>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() =>
-                        switchActiveCamera({
-                          name: cam.name,
-                          source_url: cam.stream_url,
-                          source_type: 'direct_hls',
-                          provider: cam.provider,
-                        })
-                      }
-                    >
-                      <Play size={12} />
-                      <span>Kết nối Luồng</span>
-                    </button>
-                  </div>
-                ))}
-              </div>
+              <h2>Camera</h2>
+              <span>{loading ? 'Đang tải…' : `${cameras.length} camera đăng ký`}</span>
             </div>
-          )}
-
-          {/* Tab 3: Local Video Uploads */}
-          {activeTab === 'local' && (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '12px' }}>
-              {videoSources.length === 0 ? (
-                <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)', gridColumn: '1 / -1' }}>
-                  Chưa có video nội bộ nào được tải lên.
-                </div>
-              ) : (
-                videoSources.map((v) => (
-                  <div
-                    key={v.id}
-                    style={{
-                      background: 'var(--bg-input)',
-                      border: '1px solid var(--border-card)',
-                      borderRadius: 'var(--radius-md)',
-                      padding: '12px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '8px',
-                    }}
-                  >
-                    <div style={{ fontWeight: 600, fontSize: '0.85rem' }}>{v.name}</div>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                      {v.file_path}
-                    </div>
-                    <button
-                      type="button"
-                      className="btn btn-primary btn-sm"
-                      onClick={() =>
-                        switchActiveCamera({
-                          name: `Local: ${v.original_filename}`,
-                          source_url: v.storage_path,
-                          source_type: 'local',
-                          video_source_id: v.id,
-                          loop: true,
-                        })
-                      }
-                    >
-                      <Play size={12} />
-                      <span>Phát Lặp lại</span>
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-
-          {/* Tab 4: Custom URL (RTSP/HLS/YouTube) */}
-          {activeTab === 'custom' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxWidth: '600px' }}>
-              <div>
-                <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
-                  Tên hiển thị
-                </label>
-                <input
-                  type="text"
-                  className="input-field"
-                  placeholder="Ví dụ: Camera Cổng Chính"
-                  value={customName}
-                  onChange={(e) => setCustomName(e.target.value)}
-                />
-              </div>
-
-              <div>
-                <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
-                  Loại nguồn
-                </label>
-                <select
-                  className="select-field"
-                  value={customType}
-                  onChange={(e) => setCustomType(e.target.value)}
-                  style={{ width: '100%' }}
-                >
-                  <option value="direct_hls">Direct HLS (.m3u8)</option>
-                  <option value="rtsp">RTSP Stream (rtsp://...)</option>
-                  <option value="youtube">YouTube Live Video URL</option>
-                </select>
-              </div>
-
-              <div>
-                <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '4px' }}>
-                  URL Luồng
-                </label>
-                <input
-                  type="text"
-                  className="input-field"
-                  placeholder="https://... hoặc rtsp://..."
-                  value={customUrl}
-                  onChange={(e) => setCustomUrl(e.target.value)}
-                />
-              </div>
-
-              <button
-                type="button"
-                className="btn btn-primary"
-                style={{ alignSelf: 'flex-start' }}
-                disabled={!customUrl.trim()}
-                onClick={() => {
-                  switchActiveCamera({
-                    name: customName.trim() || 'Custom Stream',
-                    source_url: customUrl.trim(),
-                    source_type: customType,
-                  });
-                }}
-              >
-                <Play size={14} />
-                <span>Kết nối Luồng Tùy chỉnh</span>
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Latest Events Summary */}
-        <div className="card" style={{ marginTop: '24px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <ShieldAlert size={18} style={{ color: 'var(--accent)' }} />
-              <h2 style={{ fontSize: '1.1rem', fontWeight: 600 }}>Sự kiện gần nhất hôm nay</h2>
-            </div>
-            <a href="/events" className="btn btn-secondary btn-sm">
-              <span>Xem tất cả sự kiện</span>
-              <ExternalLink size={12} />
-            </a>
           </div>
 
-          <div className="table-container">
-            <table className="data-table">
+          <div className="monitor-table-wrap">
+            <table className="monitor-table camera-dashboard-table">
               <thead>
                 <tr>
-                  <th>Thời gian</th>
-                  <th>Loại sự kiện</th>
                   <th>Camera</th>
-                  <th>Chi tiết</th>
+                  <th>Status</th>
+                  <th>Source</th>
+                  <th>People</th>
+                  <th>Vehicles</th>
+                  <th>FPS</th>
+                  <th>Latency</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {recentEvents.length === 0 ? (
+                {!loading && cameras.length === 0 ? (
                   <tr>
-                    <td colSpan={4} style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)' }}>
-                      Chưa có sự kiện nào được ghi nhận.
-                    </td>
+                    <td colSpan={8} className="monitor-empty-cell">Không có camera từ backend.</td>
                   </tr>
-                ) : (
-                  recentEvents.map((evt) => (
-                    <tr key={evt.event_id || evt.id}>
-                      <td style={{ whiteSpace: 'nowrap' }}>
-                        {evt.timestamp ? new Date(evt.timestamp).toLocaleTimeString() : 'N/A'}
-                      </td>
+                ) : cameras.map((camera) => {
+                  const isActive = String(camera.id) === String(activeCamera?.id);
+                  const status = isActive ? activeStatus : normalizeStatus(camera.status);
+                  return (
+                    <tr key={camera.id} className={isActive ? 'is-active-row' : ''}>
                       <td>
-                        <span className="tag-badge" style={{ background: 'var(--accent-surface)', color: 'var(--accent)' }}>
-                          {evt.semantic_type || evt.event_type}
-                        </span>
+                        <div className="camera-name-cell">
+                          <FiCamera size={15} aria-hidden="true" />
+                          <div>
+                            <strong>{camera.name || camera.id}</strong>
+                            <span>{camera.zone || camera.location || camera.id}</span>
+                          </div>
+                        </div>
                       </td>
-                      <td>{evt.camera_id || 'N/A'}</td>
+                      <td><span className={`monitor-badge ${status}`}>{status}</span></td>
                       <td>
-                        {evt.plate ? `Biển số: ${evt.plate}` : evt.target_id ? `Target ID: ${evt.target_id.slice(0, 8)}...` : 'Phát hiện đối tượng'}
+                        <select
+                          className="monitor-select compact"
+                          value={sourcePanel?.camera?.id === camera.id ? sourcePanel.mode : 'stream'}
+                          onChange={(event) => openSourceMode(camera, event.target.value)}
+                          aria-label={`Chọn nguồn cho ${camera.name || camera.id}`}
+                        >
+                          {sourceOptions.map(([value, label]) => (
+                            <option key={value} value={value}>{label}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>{metricForCamera(camera, 'people_count')}</td>
+                      <td>{metricForCamera(camera, 'car_count')}</td>
+                      <td>{metricForCamera(camera, 'processing_fps', (value) => Number(value).toFixed(1))}</td>
+                      <td>{metricForCamera(camera, 'pipeline_latency_ms', (value) => `${Math.round(Number(value))} ms`)}</td>
+                      <td>
+                        <div className="monitor-row-actions">
+                          <button type="button" className="icon-action" onClick={() => handleRegisteredSwitch(camera)} title="Chọn camera">
+                            <FiChevronRight size={15} />
+                          </button>
+                          <button type="button" className="icon-action" onClick={() => navigate(`/cameras/${encodeURIComponent(camera.id)}`)} title="Xem camera">
+                            <FiExternalLink size={15} />
+                          </button>
+                        </div>
                       </td>
                     </tr>
-                  ))
-                )}
+                  );
+                })}
               </tbody>
             </table>
           </div>
+
+          {sourcePanel ? (
+            <div className="source-inline-panel">
+              <div className="source-inline-heading">
+                <div>
+                  <strong>{sourcePanel.camera?.name || sourcePanel.camera?.id}</strong>
+                  <span>Chọn nguồn: {sourcePanel.mode}</span>
+                </div>
+                <button type="button" className="text-button" onClick={() => setSourcePanel(null)}>Đóng</button>
+              </div>
+
+              {(sourcePanel.mode === 'local' || sourcePanel.mode === 'uploaded') ? (
+                <select className="monitor-select" value={selectedVideoId} onChange={(e) => setSelectedVideoId(e.target.value)}>
+                  <option value="">Chọn video đã có trên backend</option>
+                  {videoSources.map((source) => (
+                    <option key={source.id} value={source.id}>
+                      {source.name || source.original_filename || source.id}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+
+              {sourcePanel.mode === 'public' ? (
+                <div className="source-panel-grid">
+                  <select className="monitor-select" value={publicProvider} onChange={(e) => setPublicProvider(e.target.value)}>
+                    <option value="caltrans">Caltrans CCTV</option>
+                    <option value="seattle">Seattle SDOT CCTV</option>
+                  </select>
+                  <select className="monitor-select" value={selectedPublicId} onChange={(e) => setSelectedPublicId(e.target.value)}>
+                    <option value="">Chọn camera công cộng</option>
+                    {publicSources.map((source) => (
+                      <option key={source.id} value={source.id}>{source.name || source.id}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
+
+              {sourcePanel.mode === 'custom' ? (
+                <div className="source-panel-grid custom-source-grid">
+                  <input className="monitor-input" value={customName} onChange={(e) => setCustomName(e.target.value)} placeholder="Tên hiển thị" />
+                  <select className="monitor-select" value={customType} onChange={(e) => setCustomType(e.target.value)}>
+                    <option value="direct_hls">HLS</option>
+                    <option value="rtsp">RTSP</option>
+                    <option value="youtube">YouTube</option>
+                  </select>
+                  <input className="monitor-input span-2" value={customUrl} onChange={(e) => setCustomUrl(e.target.value)} placeholder="URL nguồn thực tế" />
+                </div>
+              ) : null}
+
+              <div className="source-panel-actions">
+                {(sourcePanel.mode === 'custom' || sourcePanel.mode === 'local') ? (
+                  <button type="button" className="monitor-button secondary" onClick={handleTestSource} disabled={testingSource}>
+                    <FiRefreshCw size={14} />
+                    {testingSource ? 'Đang kiểm tra…' : 'Test Source'}
+                  </button>
+                ) : null}
+                <button type="button" className="monitor-button primary" onClick={applyAlternateSource}>
+                  Áp dụng nguồn
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
-      </div>
-    </>
+
+        <div className="monitor-card preview-card">
+          <div className="monitor-card-header">
+            <div>
+              <h2>Monitoring preview</h2>
+              <span>{activeCamera?.name || 'Chưa chọn camera'}</span>
+            </div>
+            <span className={`monitor-badge ${isLive ? 'online' : 'offline'}`}>{isLive ? 'online' : 'offline'}</span>
+          </div>
+
+          <div className="dashboard-preview">
+            {isLive ? (
+              <AuthenticatedVideo cameraId={activeCamera?.id} id="mainVideoStream" label={activeCamera?.name || 'Camera feed'} />
+            ) : (
+              <div className="offline-state">
+                <FiVideoOff size={34} aria-hidden="true" />
+                <strong>Camera Offline</strong>
+                <span>{activeCamera?.name || telemetry?.camera_name || 'Chưa có nguồn camera hoạt động'}</span>
+                <div className="offline-actions">
+                  {activeRegisteredCamera ? (
+                    <button type="button" className="monitor-button primary" onClick={() => handleRegisteredSwitch(activeRegisteredCamera)}>
+                      <FiRefreshCw size={14} /> Reconnect
+                    </button>
+                  ) : null}
+                  <button type="button" className="monitor-button secondary" onClick={handleTestSource} disabled={testingSource}>
+                    Test Source
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="preview-status-strip">
+            <span><strong>Camera</strong>{activeCamera?.name || EMPTY}</span>
+            <span><strong>People</strong>{telemetry?.people_count ?? EMPTY}</span>
+            <span><strong>Vehicles</strong>{telemetry?.car_count ?? EMPTY}</span>
+            <span><strong>FPS</strong>{typeof telemetry?.processing_fps === 'number' ? telemetry.processing_fps.toFixed(1) : EMPTY}</span>
+          </div>
+        </div>
+      </section>
+    </div>
   );
 }
