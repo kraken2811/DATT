@@ -138,19 +138,20 @@ class ResilientChatModel:
 
     @staticmethod
     def _is_retriable_error(exc: Exception) -> bool:
-        if ResilientChatModel._is_auth_error(exc) or ResilientChatModel._is_quota_error(exc):
+        if ResilientChatModel._is_auth_error(exc):
             return False
         msg = str(exc).lower()
         exc_type = type(exc).__name__.lower()
         retriable_keywords = [
             "timeout", "timed out", "500", "502", "503", "504",
             "connection", "unavailable", "overloaded", "econnreset",
-            "remote disconnected", "reset by peer"
+            "remote disconnected", "reset by peer", "rate limit", "rate_limit", "429", "too many requests"
         ]
         return any(k in msg or k in exc_type for k in retriable_keywords)
 
     def _invoke_with_retry(self, model: Any, messages: list[BaseMessage], provider: str = "") -> AIMessage:
         last_exception = None
+        has_fallback = self.fallback_model is not None or self.fallback_2_model is not None
         for attempt in range(self.max_retries + 1):
             try:
                 if hasattr(model, "request_timeout"):
@@ -158,8 +159,10 @@ class ResilientChatModel:
                 return model.invoke(messages)
             except Exception as exc:
                 last_exception = exc
-                if self._is_auth_error(exc) or self._is_quota_error(exc):
-                    # Fail fast immediately without retrying or long sleep
+                if self._is_auth_error(exc):
+                    raise exc
+                # If fallback models are available and quota is exhausted, fail fast to next tier immediately
+                if has_fallback and self._is_quota_error(exc):
                     raise exc
 
                 if attempt < self.max_retries and self._is_retriable_error(exc):
@@ -358,6 +361,13 @@ class ResilientChatModel:
         else:
             fb2_exc = LLMUnavailableException("Fallback Level 2 unavailable or in cooldown")
 
+        # If no fallback models configured, attribute failure directly to primary
+        if self.fallback_model is None and self.fallback_2_model is None:
+            raise LLMUnavailableException(
+                f"Primary LLM failed and no fallback configured: {primary_exc}",
+                reason="primary_failed_no_fallback",
+            )
+
         # All providers failed
         raise LLMUnavailableException(
             f"All configured LLM providers failed: Primary ({primary_exc}), "
@@ -448,7 +458,7 @@ def create_raw_model(provider: str, model_name: str, temperature: float) -> Any:
             temperature=temperature,
             api_key=key,
             request_timeout=agent_config.timeout_seconds,
-            max_retries=3,
+            max_retries=1,
         )
 
     if prov == "google_genai":
@@ -460,10 +470,11 @@ def create_raw_model(provider: str, model_name: str, temperature: float) -> Any:
             )
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(
-            model=model_name,
+            model=model_name or "gemini-2.5-flash",
             temperature=temperature,
             google_api_key=key,
             request_timeout=agent_config.timeout_seconds,
+            max_retries=0,
         )
 
     if prov == "openai":

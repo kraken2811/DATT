@@ -16,7 +16,7 @@ class AgentConfig:
 
     # Centralized LLM configuration
     llm_provider: str = os.getenv("DATT_AGENT_LLM_PROVIDER") or os.getenv("AGENT_LLM_PROVIDER", "google_genai")
-    model_name: str = os.getenv("DATT_AGENT_LLM_MODEL") or os.getenv("AGENT_MODEL_NAME", "gemini-3.8-flash")
+    model_name: str = os.getenv("DATT_AGENT_LLM_MODEL") or os.getenv("AGENT_MODEL_NAME", "gemini-2.5-flash")
     temperature: float = float(os.getenv("DATT_AGENT_LLM_TEMPERATURE") or os.getenv("AGENT_TEMPERATURE", "0.1"))
     timeout_seconds: float = float(os.getenv("DATT_AGENT_LLM_TIMEOUT_SECONDS") or os.getenv("AGENT_TIMEOUT_SEC", "30.0"))
     max_retries: int = int(os.getenv("DATT_AGENT_LLM_MAX_RETRIES", "2"))

@@ -6,6 +6,9 @@ from langchain_core.tools import tool
 from src.agent.rag.retrieval import KnowledgeRetriever
 
 
+_knowledge_cache: dict[tuple[str, int, str | None], dict[str, Any]] = {}
+
+
 @tool
 def get_knowledge(
     query: str | None = None,
@@ -42,9 +45,16 @@ def get_knowledge(
         }
 
     bounded_k = max(1, min(10, top_k))
+    cache_key = (clean_q.lower(), bounded_k, document_type)
+    if cache_key in _knowledge_cache:
+        return _knowledge_cache[cache_key]
+
     with KnowledgeRetriever() as retriever:
-        return retriever.retrieve(
+        res = retriever.retrieve(
             query=clean_q,
             top_k=bounded_k,
             document_type=document_type,
         )
+        if isinstance(res, dict) and res.get("status") == "success":
+            _knowledge_cache[cache_key] = res
+        return res
