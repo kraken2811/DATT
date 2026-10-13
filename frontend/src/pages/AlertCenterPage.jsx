@@ -16,12 +16,18 @@ import {
   ExternalLink,
 } from 'lucide-react';
 
+// In-memory module cache for instant (0ms) tab switching
+let cachedAlertsState = {
+  alerts: [],
+  total: 0,
+};
+
 export function AlertCenterPage() {
-  const [alerts, setAlerts] = useState([]);
-  const [total, setTotal] = useState(0);
+  const [alerts, setAlerts] = useState(() => cachedAlertsState.alerts);
+  const [total, setTotal] = useState(() => cachedAlertsState.total);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => cachedAlertsState.alerts.length === 0);
   const [error, setError] = useState(null);
 
   // Filters
@@ -45,7 +51,9 @@ export function AlertCenterPage() {
   }, [searchTerm]);
 
   const loadAlerts = useCallback(async (signal) => {
-    setLoading(true);
+    if (cachedAlertsState.alerts.length === 0) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const resp = await fetchAlerts(
@@ -59,6 +67,10 @@ export function AlertCenterPage() {
         signal
       );
       if (resp && resp.status === 'ok') {
+        cachedAlertsState = {
+          alerts: resp.alerts || [],
+          total: resp.total || 0,
+        };
         setAlerts(resp.alerts || []);
         setTotal(resp.total || 0);
       } else {
@@ -189,11 +201,11 @@ export function AlertCenterPage() {
         </div>
 
         {/* Alerts Table */}
-        {loading ? (
+        {loading && alerts.length === 0 ? (
           <div className="card">
             <LoadingSpinner text="Đang tải danh sách cảnh báo..." />
           </div>
-        ) : error ? (
+        ) : error && alerts.length === 0 ? (
           <ErrorState message={error} onRetry={() => loadAlerts()} />
         ) : alerts.length === 0 ? (
           <div className="card">

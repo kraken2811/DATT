@@ -34,7 +34,8 @@ class BaseEmbeddingService(ABC):
 
 
 class MockEmbeddingService(BaseEmbeddingService):
-    """Deterministic hash-based embedding service for unit tests and offline testing."""
+    """Deterministic hash-based embedding service for isolated unit tests and offline fixtures only.
+    Not selectable in production runtime."""
 
     def __init__(self, dimension: int = 384) -> None:
         self._dim = dimension
@@ -88,17 +89,22 @@ class FastEmbedService(BaseEmbeddingService):
         if not texts:
             return []
         if self._model is False:
-            return MockEmbeddingService(self._dim).embed_documents(texts)
+            raise RuntimeError(
+                f"FastEmbed model '{self._model_name}' failed to initialize. "
+                "Verify fastembed package and model availability. Fake embeddings are disallowed."
+            )
         try:
             embeddings_generator = self._model.embed(texts)
             return [emb.tolist() if hasattr(emb, "tolist") else list(emb) for emb in embeddings_generator]
         except Exception as exc:
-            logger.error("FastEmbed document batch generation error: %s; falling back to Mock", exc)
-            return MockEmbeddingService(self._dim).embed_documents(texts)
+            logger.error("FastEmbed document batch generation error: %s", exc)
+            raise RuntimeError(f"FastEmbed document batch generation error: {exc}") from exc
 
     def embed_query(self, text: str) -> list[float]:
         results = self.embed_documents([text])
-        return results[0] if results else [0.0] * self._dim
+        if not results:
+            raise RuntimeError(f"FastEmbed failed to generate embedding for query: '{text[:50]}...'")
+        return results[0]
 
 
 class OpenAIEmbeddingService(BaseEmbeddingService):
@@ -153,6 +159,16 @@ def get_embedding_service(provider: str | None = None) -> BaseEmbeddingService:
             dimension=agent_config.embedding_dim,
         )
     elif target_provider == "mock":
+        import os
+        is_test = bool(
+            os.getenv("PYTEST_CURRENT_TEST")
+            or os.getenv("DATT_ALLOW_TEST_MOCK") == "1"
+            or os.getenv("CI") == "true"
+        )
+        if not is_test:
+            raise ValueError(
+                "MockEmbeddingService is disabled in production runtime. Configure 'fastembed' or 'openai'."
+            )
         instance = MockEmbeddingService(dimension=agent_config.embedding_dim)
     else:
         # Default: FastEmbed (runs locally via ONNX without API keys)

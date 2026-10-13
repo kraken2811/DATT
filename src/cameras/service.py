@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 from contextlib import contextmanager
 import os
 import threading
-from sqlalchemy import select, or_, update
+from sqlalchemy import select, or_, update, func, case, cast, String
 from src.db.database import Database
 from src.db.models import Camera, VideoSource, utc_now
 
@@ -71,34 +71,90 @@ def serialize(c):
 
 def list_records(filters=None):
     filters = filters or {}
+    now = utc_now()
+
     with database() as db, db.transaction() as s:
-        items = [serialize(c) for c in s.scalars(select(Camera).order_by(Camera.created_at.desc()))]
-    summary = {'total': len(items), **{v: sum(c['status'] == v for c in items) for v in ('online', 'offline', 'disabled')}}
-    result = items
-    for key in ('status', 'source_type', 'zone'):
-        value = filters.get(key)
-        if value and value != 'all': result = [c for c in result if c.get(key) == value]
-    q = (filters.get('search') or filters.get('q') or '').lower().strip()
-    if q: result = [c for c in result if q in ' '.join(str(c.get(k) or '') for k in ('id', 'name', 'zone', 'description')).lower()]
-    total_matching = len(result)
+        # 1. Summary and active camera via single fast SQL query
+        summary_row = s.execute(
+            select(
+                func.count(Camera.id).label('total'),
+                func.count(case(((Camera.enabled.is_(False)), 1))).label('disabled'),
+                func.count(case(((Camera.enabled.is_(True)) & (Camera.active_until > now), 1))).label('online'),
+                func.count(case(((Camera.enabled.is_(True)) & (or_(Camera.active_until.is_(None), Camera.active_until <= now)), 1))).label('offline'),
+            )
+        ).first()
 
-    page = filters.get('page')
-    page_size = filters.get('page_size', filters.get('limit', 25))
-    resp = dict(status='ok', total=total_matching, summary=summary,
-        active_camera_id=next((c['id'] for c in items if c['active']), None))
+        summary = {
+            'total': summary_row.total or 0,
+            'disabled': summary_row.disabled or 0,
+            'online': summary_row.online or 0,
+            'offline': summary_row.offline or 0,
+        }
 
-    if page is not None:
-        try:
-            page = max(1, int(page))
-            page_size = max(1, min(200, int(page_size)))
-        except (ValueError, TypeError):
-            page, page_size = 1, 25
-        start_idx = (page - 1) * page_size
-        resp['cameras'] = result[start_idx:start_idx + page_size]
-        resp['page'] = page
-        resp['page_size'] = page_size
-    else:
-        resp['cameras'] = result
+        active_cam = s.scalar(
+            select(Camera.id).where(Camera.enabled.is_(True), Camera.active_until > now).order_by(Camera.created_at.desc()).limit(1)
+        )
+        active_camera_id = str(active_cam) if active_cam else None
+
+        # 2. SQL Query with filters pushed down
+        query = select(Camera)
+
+        status = filters.get('status')
+        if status and status != 'all':
+            if status == 'disabled':
+                query = query.where(Camera.enabled.is_(False))
+            elif status == 'online':
+                query = query.where(Camera.enabled.is_(True), Camera.active_until > now)
+            elif status == 'offline':
+                query = query.where(Camera.enabled.is_(True), or_(Camera.active_until.is_(None), Camera.active_until <= now))
+
+        source_type = filters.get('source_type')
+        if source_type and source_type != 'all':
+            db_type = 'direct_hls' if source_type == 'hls' else TYPES.get(source_type.lower(), source_type)
+            query = query.where(Camera.source_type == db_type)
+
+        zone = filters.get('zone')
+        if zone and zone != 'all':
+            query = query.where(Camera.location == zone)
+
+        q = (filters.get('search') or filters.get('q') or '').strip()
+        if q:
+            search_like = f"%{q}%"
+            query = query.where(or_(
+                cast(Camera.id, String).ilike(search_like),
+                Camera.name.ilike(search_like),
+                Camera.location.ilike(search_like),
+                Camera.description.ilike(search_like),
+            ))
+
+        total_matching = s.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
+
+        page = filters.get('page')
+        page_size = filters.get('page_size', filters.get('limit', 25))
+
+        resp = dict(
+            status='ok',
+            total=total_matching,
+            summary=summary,
+            active_camera_id=active_camera_id,
+        )
+
+        query = query.order_by(Camera.created_at.desc())
+
+        if page is not None:
+            try:
+                page = max(1, int(page))
+                page_size = max(1, min(200, int(page_size)))
+            except (ValueError, TypeError):
+                page, page_size = 1, 25
+            start_idx = (page - 1) * page_size
+            rows = list(s.scalars(query.offset(start_idx).limit(page_size)))
+            resp['cameras'] = [serialize(c) for c in rows]
+            resp['page'] = page
+            resp['page_size'] = page_size
+        else:
+            rows = list(s.scalars(query))
+            resp['cameras'] = [serialize(c) for c in rows]
 
     return resp
 

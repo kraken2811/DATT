@@ -35,7 +35,12 @@ import {
   Clock,
   RefreshCw,
   Search,
+  Mic,
+  MicOff,
+  Square,
+  Radio,
 } from 'lucide-react';
+import { transcribeAudio } from '../api/client';
 
 const QUICK_PROMPTS = [
   {
@@ -83,12 +88,16 @@ function formatConversationTime(isoString) {
   }
 }
 
+// In-memory module-level thread & conversation caches to make tab switching instantaneous (0ms)
+const globalThreadMessagesCache = new Map();
+let globalConversationsCache = [];
+
 export function AgentPage() {
   const { showToast } = useToast();
 
-  // Conversation list & active thread state
-  const [conversations, setConversations] = useState([]);
-  const [loadingConversations, setLoadingConversations] = useState(false);
+  // Conversation list & active thread state (initialized from fast memory cache)
+  const [conversations, setConversations] = useState(() => globalConversationsCache);
+  const [loadingConversations, setLoadingConversations] = useState(() => globalConversationsCache.length === 0);
   const [searchQuery, setSearchQuery] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     if (typeof window !== 'undefined' && window.innerWidth < 900) {
@@ -97,15 +106,164 @@ export function AgentPage() {
     return true;
   });
 
-  // Active chat state
+  // Active chat state (initialized immediately from cache if available)
   const [threadId, setThreadId] = useState(() => {
     return localStorage.getItem('datt_agent_thread_id') || `thread_${Date.now()}`;
   });
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState(() => {
+    const saved = localStorage.getItem('datt_agent_thread_id');
+    if (saved && globalThreadMessagesCache.has(saved)) {
+      return globalThreadMessagesCache.get(saved);
+    }
+    return [];
+  });
   const [inputValue, setInputValue] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
-  const [apiStatus, setApiStatus] = useState('connecting');
+  const [apiStatus, setApiStatus] = useState('connected');
+
+  // Voice recording state (Whisper Large V3 Turbo)
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const recordingTimerRef = useRef(null);
+  const streamRef = useRef(null);
+
+  // Clean up any ongoing audio recording when component unmounts
+  useEffect(() => {
+    return () => {
+      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        try { mediaRecorderRef.current.stop(); } catch {}
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, []);
+
+  const startRecording = async () => {
+    if (isRecording || isTranscribing || loading) return;
+    if (!navigator?.mediaDevices?.getUserMedia) {
+      showToast('Trình duyệt hiện tại không hỗ trợ ghi âm micro.', 'error');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      audioChunksRef.current = [];
+
+      let mimeType = 'audio/webm';
+      if (typeof MediaRecorder.isTypeSupported === 'function') {
+        if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+          mimeType = 'audio/webm;codecs=opus';
+        } else if (MediaRecorder.isTypeSupported('audio/webm')) {
+          mimeType = 'audio/webm';
+        } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+          mimeType = 'audio/mp4';
+        }
+      }
+
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+        }
+
+        const chunks = audioChunksRef.current;
+        if (chunks.length === 0) {
+          setIsRecording(false);
+          setRecordingDuration(0);
+          return;
+        }
+
+        const audioBlob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+        audioChunksRef.current = [];
+        setIsRecording(false);
+        setRecordingDuration(0);
+
+        if (audioBlob.size < 100) {
+          showToast('Bản ghi âm quá ngắn hoặc không có âm thanh.', 'warning');
+          return;
+        }
+
+        setIsTranscribing(true);
+        try {
+          const resp = await transcribeAudio(audioBlob);
+          if (resp && resp.text && resp.text.trim()) {
+            const transcript = resp.text.trim();
+            setInputValue((prev) => (prev ? `${prev.trim()} ${transcript}` : transcript));
+            showToast('Đã nhận diện giọng nói (Whisper). Bạn có thể kiểm tra trước khi gửi.', 'success');
+          } else {
+            showToast('Không nhận diện được giọng nói trong bản ghi.', 'warning');
+          }
+        } catch (err) {
+          showToast(`Lỗi nhận diện giọng nói: ${err.message || 'Không thể kết nối Whisper'}`, 'error');
+        } finally {
+          setIsTranscribing(false);
+        }
+      };
+
+      recorder.start(250);
+      setIsRecording(true);
+      setRecordingDuration(0);
+
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingDuration((prev) => prev + 1);
+      }, 1000);
+    } catch (err) {
+      console.warn('Microphone permission or hardware error:', err);
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        showToast('Bạn chưa cấp quyền truy cập micro. Vui lòng cho phép quyền trong trình duyệt.', 'error');
+      } else {
+        showToast(`Không thể bật micro: ${err.message || err}`, 'error');
+      }
+    }
+  };
+
+  const stopRecording = () => {
+    if (!isRecording) return;
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+  };
+
+  const cancelRecording = () => {
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.onstop = null; // Prevent triggering transcription
+      if (mediaRecorderRef.current.state !== 'inactive') {
+        try { mediaRecorderRef.current.stop(); } catch {}
+      }
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    audioChunksRef.current = [];
+    setIsRecording(false);
+    setRecordingDuration(0);
+    showToast('Đã hủy ghi âm.', 'info');
+  };
 
   // Inline rename & delete modal state
   const [editingThreadId, setEditingThreadId] = useState(null);
@@ -129,12 +287,22 @@ export function AgentPage() {
     }
   }, [threadId]);
 
+  // Sync thread messages to memory cache
+  useEffect(() => {
+    if (threadId && messages.length > 0) {
+      globalThreadMessagesCache.set(threadId, messages);
+    }
+  }, [threadId, messages]);
+
   // Load conversation registry from PostgreSQL
   const loadConversationsList = useCallback(async () => {
-    setLoadingConversations(true);
+    if (globalConversationsCache.length === 0) {
+      setLoadingConversations(true);
+    }
     try {
       const resp = await listAgentConversations(50, 0);
       if (resp && resp.status === 'success' && Array.isArray(resp.conversations)) {
+        globalConversationsCache = resp.conversations;
         setConversations(resp.conversations);
         return resp.conversations;
       }
@@ -151,14 +319,17 @@ export function AgentPage() {
     loadConversationsList();
   }, [loadConversationsList]);
 
-  // Load conversation history on mount or thread switch
+  // Load conversation history on mount or thread switch (non-blocking if cached)
   useEffect(() => {
     let active = true;
     const currentSeq = ++fetchSeqRef.current;
 
     async function loadHistory() {
       if (!threadId) return;
-      setLoadingHistory(true);
+      const hasCached = globalThreadMessagesCache.has(threadId) && globalThreadMessagesCache.get(threadId).length > 0;
+      if (!hasCached) {
+        setLoadingHistory(true);
+      }
       try {
         const resp = await getAgentConversation(threadId);
         if (!active || fetchSeqRef.current !== currentSeq) return;
@@ -175,13 +346,16 @@ export function AgentPage() {
               toolsCalled: m.tool_calls ? m.tool_calls.map((tc) => tc.name || tc.function?.name || 'tool') : [],
             }));
           if (restored.length > 0) {
+            globalThreadMessagesCache.set(threadId, restored);
             setMessages(restored);
             return;
           }
         }
       } catch (err) {
         if (active && fetchSeqRef.current === currentSeq) {
-          setApiStatus('error');
+          if (!hasCached) {
+            setApiStatus('error');
+          }
           console.warn('Failed to restore conversation history:', err);
         }
       } finally {
@@ -190,7 +364,7 @@ export function AgentPage() {
         }
       }
 
-      if (active && fetchSeqRef.current === currentSeq) {
+      if (active && fetchSeqRef.current === currentSeq && !hasCached) {
         setMessages([
           {
             id: 'welcome',
@@ -249,6 +423,11 @@ export function AgentPage() {
             sources: resp.sources || [],
             toolsCalled: [...new Set(resp.tools_called || [])],
             timestamp: new Date().toLocaleTimeString(),
+            provider: resp.provider || 'google_genai',
+            model: resp.model || '',
+            failoverLevel: resp.failover_level || 0,
+            failoverOccurred: resp.failover_occurred || false,
+            actionSuggestions: resp.action_suggestions || [],
           };
           setMessages((prev) => [...prev, botMsg]);
         } else {
@@ -336,10 +515,33 @@ export function AgentPage() {
     }
   };
 
-  // Switch conversation
+  // Switch conversation instantly (0ms) from memory cache if available
   const handleSelectConversation = (selectedThreadId) => {
     if (selectedThreadId === threadId || loading) return;
+    if (globalThreadMessagesCache.has(selectedThreadId)) {
+      setMessages(globalThreadMessagesCache.get(selectedThreadId));
+      setLoadingHistory(false);
+    }
     setThreadId(selectedThreadId);
+  };
+
+  // Reconnect to Agent backend without reloading entire page
+  const handleReconnect = async () => {
+    setApiStatus('connecting');
+    try {
+      await loadConversationsList();
+      const resp = await getAgentConversation(threadId);
+      if (resp?.status !== 'error') {
+        setApiStatus('connected');
+        showToast('Đã kết nối lại thành công với AI Agent!', 'success');
+      } else {
+        setApiStatus('error');
+        showToast('Chưa thể kết nối lại với AI Agent.', 'error');
+      }
+    } catch {
+      setApiStatus('error');
+      showToast('Kết nối thất bại. Vui lòng thử lại sau ít giây.', 'error');
+    }
   };
 
   // Rename conversation
@@ -638,6 +840,13 @@ export function AgentPage() {
               <span className="title-text">{activeConversation?.title || 'Cuộc trò chuyện mới'}</span>
               <span className="thread-badge" title="Thread ID">{threadId}</span>
             </div>
+            <div
+              className="active-llm-status-pill"
+              title="Cấu hình mô hình AI: Gemini 2.5 Flash (Chính) → Groq GPT-OSS 120B (Dự phòng L1) → Groq Qwen 3.8 27B (Dự phòng L2)"
+            >
+              <span className="status-dot-pulse"></span>
+              <span className="llm-pill-text">Gemini + Groq Dual Fallback</span>
+            </div>
           </div>
 
           {/* Quick Prompts Bar */}
@@ -663,6 +872,47 @@ export function AgentPage() {
               })}
             </div>
           </div>
+
+          {/* Connection Offline Banner with Immediate Reconnection */}
+          {apiStatus === 'error' && (
+            <div
+              className="agent-connection-warning"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '10px 16px',
+                margin: '0 0 8px 0',
+                borderRadius: 'var(--radius-md, 8px)',
+                backgroundColor: 'rgba(239, 68, 68, 0.12)',
+                border: '1px solid rgba(239, 68, 68, 0.28)',
+                color: '#ef4444',
+                fontSize: '0.86rem',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <AlertCircle size={16} />
+                <span>Mất kết nối với AI Agent. Hệ thống sẽ tự kết nối lại khi bạn gửi tin hoặc bấm thử lại.</span>
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={handleReconnect}
+                disabled={loadingHistory || loading}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  backgroundColor: 'rgba(239, 68, 68, 0.2)',
+                  borderColor: 'rgba(239, 68, 68, 0.4)',
+                  color: '#fff',
+                }}
+              >
+                <RefreshCw size={13} className={loadingHistory ? 'spin-icon' : ''} />
+                <span>Thử kết nối lại</span>
+              </button>
+            </div>
+          )}
 
           {/* Message Thread History */}
           <div className="chat-messages-container" id="chatMessages">
@@ -698,7 +948,44 @@ export function AgentPage() {
                         </div>
                       )}
 
+                      {!isUser && (
+                        <div className="provider-model-badge">
+                          {msg.failoverLevel === 1 ? (
+                            <span className="badge-fallback badge-l1" title={`Dự phòng Cấp 1 qua Groq: ${msg.model || 'openai/gpt-oss-120b'}`}>
+                              ⚡ Groq GPT-OSS 120B (Dự phòng L1)
+                            </span>
+                          ) : msg.failoverLevel === 2 ? (
+                            <span className="badge-fallback badge-l2" title={`Dự phòng Cấp 2 qua Groq: ${msg.model || 'qwen/qwen3.8-27b'}`}>
+                              🛡️ Groq Qwen 3.8 27B (Dự phòng L2)
+                            </span>
+                          ) : (
+                            <span className="badge-primary" title={`Mô hình chính: ${msg.model || 'Gemini 2.5 Flash'}`}>
+                              ✨ Gemini 2.5 Flash
+                            </span>
+                          )}
+                        </div>
+                      )}
+
                       <AgentMessageContent content={msg.content} isUser={isUser} />
+
+                      {msg.isError && (
+                        <div style={{ marginTop: '10px' }}>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                            onClick={() => {
+                              const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+                              if (lastUser) {
+                                handleSendMessage(lastUser.content);
+                              }
+                            }}
+                          >
+                            <RefreshCw size={12} />
+                            <span>Thử gửi lại</span>
+                          </button>
+                        </div>
+                      )}
 
                       {msg.sources && msg.sources.length > 0 && (
                         <div className="sources-container">
@@ -722,6 +1009,30 @@ export function AgentPage() {
                                   )}
                                 </div>
                               </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {msg.actionSuggestions && msg.actionSuggestions.length > 0 && (
+                        <div className="action-suggestions-container">
+                          <div className="action-suggestions-header">
+                            <Sparkles size={12} />
+                            <span>Gợi ý thao tác điều tra tiếp theo:</span>
+                          </div>
+                          <div className="action-suggestions-list">
+                            {msg.actionSuggestions.map((sug, sidx) => (
+                              <button
+                                key={sidx}
+                                type="button"
+                                className="action-suggestion-chip"
+                                onClick={() => handleSendMessage(sug.query)}
+                                disabled={loading}
+                                title={sug.query}
+                              >
+                                <ArrowRight size={12} />
+                                <span>{sug.label}</span>
+                              </button>
                             ))}
                           </div>
                         </div>
@@ -756,43 +1067,96 @@ export function AgentPage() {
           </div>
 
           {/* Input Bar */}
-          <form
-            className="chat-input-bar"
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleSendMessage();
-            }}
-          >
-            <input
-              type="text"
-              className="chat-text-input"
-              id="agentMessageInput"
-              placeholder="Hỏi về camera, phương tiện, biển số, khuôn mặt hoặc tra cứu vận hành..."
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
+          <div className="chat-input-wrapper">
+            {isRecording ? (
+              <div className="recording-control-bar" id="recordingControlBar">
+                <div className="recording-status-info">
+                  <span className="recording-pulse-dot"></span>
+                  <span className="recording-time">
+                    Đang ghi âm ({Math.floor(recordingDuration / 60).toString().padStart(2, '0')}:{(recordingDuration % 60).toString().padStart(2, '0')})
+                  </span>
+                </div>
+                <div className="recording-btns">
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-cancel-rec"
+                    id="btnCancelRecording"
+                    onClick={cancelRecording}
+                    title="Hủy ghi âm"
+                  >
+                    <X size={15} />
+                    <span>Hủy</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-stop-rec"
+                    id="btnStopRecording"
+                    onClick={stopRecording}
+                    title="Dừng và nhận diện giọng nói"
+                  >
+                    <Square size={14} />
+                    <span>Xong</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <form
+                className="chat-input-bar"
+                onSubmit={(e) => {
                   e.preventDefault();
                   handleSendMessage();
-                }
-              }}
-              disabled={loading}
-              autoFocus
-            />
-            <button
-              type="submit"
-              className="btn btn-primary btn-send"
-              id="btnSendAgentMessage"
-              onClick={(e) => {
-                e.preventDefault();
-                handleSendMessage();
-              }}
-              disabled={!inputValue.trim() || loading}
-            >
-              <Send size={16} />
-              <span>Gửi</span>
-            </button>
-          </form>
+                }}
+              >
+                <input
+                  type="text"
+                  className="chat-text-input"
+                  id="agentMessageInput"
+                  placeholder={
+                    isTranscribing
+                      ? 'Đang nhận diện giọng nói (Whisper Large V3 Turbo)...'
+                      : 'Hỏi về camera, phương tiện, biển số, khuôn mặt hoặc tra cứu vận hành...'
+                  }
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendMessage();
+                    }
+                  }}
+                  disabled={loading || isTranscribing}
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  className={`btn-icon btn-mic ${isTranscribing ? 'is-loading' : ''}`}
+                  id="btnVoiceInput"
+                  onClick={startRecording}
+                  disabled={loading || isTranscribing}
+                  title="Nhập bằng giọng nói (Whisper Large V3 Turbo)"
+                >
+                  {isTranscribing ? (
+                    <RefreshCw size={17} className="spin-icon" />
+                  ) : (
+                    <Mic size={17} />
+                  )}
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary btn-send"
+                  id="btnSendAgentMessage"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    handleSendMessage();
+                  }}
+                  disabled={!inputValue.trim() || loading || isTranscribing}
+                >
+                  <Send size={16} />
+                  <span>Gửi</span>
+                </button>
+              </form>
+            )}
+          </div>
         </div>
       </div>
 

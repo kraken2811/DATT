@@ -16,7 +16,8 @@ def run(args):
 def load_secrets():
     names = ("DATT_DATABASE_URL", "DATT_STORAGE_BACKEND", "DATT_STORAGE_URL",
              "DATT_STORAGE_OPTIONS", "DATT_STORAGE_CACHE", "SUPABASE_URL",
-             "SUPABASE_SERVICE_ROLE_KEY", "DATT_STORAGE_BUCKET", "SUPABASE_STORAGE_BUCKET")
+             "SUPABASE_SERVICE_ROLE_KEY", "DATT_STORAGE_BUCKET", "SUPABASE_STORAGE_BUCKET",
+             "GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY")
     try:
         from google.colab import userdata
     except ImportError:

@@ -1,4 +1,4 @@
-﻿"""Ordered Colab startup orchestration; business behavior stays in DATT modules/CLI."""
+"""Ordered Colab startup orchestration; business behavior stays in DATT modules/CLI."""
 import contextlib
 import io
 import json
@@ -45,6 +45,14 @@ def load_configuration():
     except ImportError:
         userdata = None
     for name in REQUIRED:
+        if not os.getenv(name) and userdata is not None:
+            try:
+                value = userdata.get(name)
+                if value:
+                    os.environ[name] = value
+            except Exception:
+                pass
+    for name in ('GROQ_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENAI_API_KEY'):
         if not os.getenv(name) and userdata is not None:
             try:
                 value = userdata.get(name)

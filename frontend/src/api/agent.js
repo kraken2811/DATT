@@ -2,6 +2,9 @@ import { apiRequest, invalidateApiCache } from './client';
 
 export async function sendAgentMessage(message, threadId = null, userId = 'operator_ui') {
   invalidateApiCache('/api/agent/conversations');
+  if (threadId) {
+    invalidateApiCache(`/api/agent/conversations/${encodeURIComponent(threadId)}`);
+  }
   return apiRequest('/api/agent/chat', {
     method: 'POST',
     body: {
@@ -21,7 +24,8 @@ export async function listAgentConversations(limit = 50, offset = 0, userId = 'o
 
   return apiRequest(`/api/agent/conversations?${query.toString()}`, {
     method: 'GET',
-    cacheTtlMs: 2000,
+    cacheTtlMs: 15000,
+    staleTtlMs: 300000,
   });
 }
 
@@ -42,7 +46,8 @@ export async function getAgentConversation(threadId, userId = 'operator_ui') {
   const query = userId ? `?user_id=${encodeURIComponent(userId)}` : '';
   return apiRequest(`/api/agent/conversations/${encodeURIComponent(threadId)}${query}`, {
     method: 'GET',
-    cacheTtlMs: 2000,
+    cacheTtlMs: 30000,
+    staleTtlMs: 300000,
   });
 }
 
@@ -61,6 +66,7 @@ export async function renameAgentConversation(threadId, title, userId = 'operato
 export async function deleteAgentConversation(threadId, userId = 'operator_ui') {
   if (!threadId) return { status: 'success' };
   invalidateApiCache('/api/agent/conversations');
+  invalidateApiCache(`/api/agent/conversations/${encodeURIComponent(threadId)}`);
   const query = userId ? `?user_id=${encodeURIComponent(userId)}` : '';
   return apiRequest(`/api/agent/conversations/${encodeURIComponent(threadId)}${query}`, {
     method: 'DELETE',

@@ -347,3 +347,144 @@ class AgentConversation(Identity, Base):
         Index("ix_agent_conversations_user_updated", "user_id", "updated_at"),
         Index("ix_agent_conversations_user_last_msg", "user_id", "last_message_at"),
     )
+
+
+class CrossingEvent(Identity, Base):
+    """Directional passage crossing event for people and vehicles."""
+    __tablename__ = "crossing_events"
+
+    camera_id: Mapped[str] = mapped_column(String(255), index=True)
+    zone_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    object_type: Mapped[str] = mapped_column(String(50), index=True)  # "person" or "vehicle"
+    object_class: Mapped[str] = mapped_column(String(50), default="person")
+    direction: Mapped[str] = mapped_column(String(20), index=True)  # "in" or "out"
+    track_id: Mapped[int] = mapped_column(Integer, index=True)
+    tracking_session_id: Mapped[str] = mapped_column(String(255), index=True)
+    event_time: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, index=True)
+    source_type: Mapped[str] = mapped_column(String(50), default="live")
+    video_source_id: Mapped[UUID | None] = mapped_column(ForeignKey("video_sources.id", ondelete="SET NULL"), nullable=True, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    event_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON_DATA, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+    __table_args__ = (
+        Index("ix_crossing_events_cam_time", "camera_id", "event_time"),
+        Index("ix_crossing_events_type_time", "object_type", "event_time"),
+        Index("ix_crossing_events_zone_time", "zone_id", "event_time"),
+    )
+
+
+class AnalyticsAggregate(Identity, Base):
+    """Pre-computed time-bucket aggregate metrics (15-minute default)."""
+    __tablename__ = "analytics_aggregates"
+
+    camera_id: Mapped[str] = mapped_column(String(255), index=True)
+    zone_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    bucket_start: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    bucket_end: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    timezone: Mapped[str] = mapped_column(String(50), default="Asia/Ho_Chi_Minh")
+    bucket_duration_minutes: Mapped[int] = mapped_column(Integer, default=15)
+    person_in_count: Mapped[int] = mapped_column(Integer, default=0)
+    person_out_count: Mapped[int] = mapped_column(Integer, default=0)
+    vehicle_in_count: Mapped[int] = mapped_column(Integer, default=0)
+    vehicle_out_count: Mapped[int] = mapped_column(Integer, default=0)
+    vehicle_type_breakdown: Mapped[dict[str, Any]] = mapped_column(JSON_DATA, default=dict)
+    average_visible_person_count: Mapped[float] = mapped_column(Float, default=0.0)
+    maximum_visible_person_count: Mapped[int] = mapped_column(Integer, default=0)
+    average_visible_vehicle_count: Mapped[float] = mapped_column(Float, default=0.0)
+    maximum_visible_vehicle_count: Mapped[int] = mapped_column(Integer, default=0)
+    observed_seconds: Mapped[float] = mapped_column(Float, default=0.0)
+    expected_seconds: Mapped[float] = mapped_column(Float, default=900.0)
+    coverage_ratio: Mapped[float] = mapped_column(Float, default=0.0)
+    data_quality_status: Mapped[str] = mapped_column(String(50), default="EXCELLENT")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("camera_id", "zone_id", "bucket_start", name="uq_analytics_aggregates_cam_zone_bucket"),
+        Index("ix_analytics_aggregates_cam_start", "camera_id", "bucket_start"),
+    )
+
+
+class CameraAnalyticsConfig(Identity, Base):
+    """Configuration for camera line crossing, ROI, and analytics thresholds."""
+    __tablename__ = "camera_analytics_configs"
+
+    camera_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    counting_line: Mapped[dict[str, Any] | None] = mapped_column(JSON_DATA, nullable=True)
+    in_direction: Mapped[str] = mapped_column(String(50), default="normal")
+    roi_polygon: Mapped[list[list[float]] | None] = mapped_column(JSON_DATA, nullable=True)
+    supported_classes: Mapped[list[str]] = mapped_column(JSON_DATA, default=lambda: ["person", "car", "motorcycle", "bus", "truck"])
+    min_crossing_distance: Mapped[float] = mapped_column(Float, default=0.015)
+    hysteresis_frames: Mapped[int] = mapped_column(Integer, default=2)
+    capacity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+
+
+class TrafficForecast(Identity, Base):
+    """Computed traffic forecast for tomorrow with prediction intervals and backtest metrics."""
+    __tablename__ = "traffic_forecasts"
+
+    camera_id: Mapped[str] = mapped_column(String(255), index=True)
+    zone_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    target_date: Mapped[str] = mapped_column(String(20), index=True)  # YYYY-MM-DD
+    target_weekday: Mapped[int] = mapped_column(Integer)  # 0..6
+    generated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    model_version: Mapped[str] = mapped_column(String(50), default="weighted_same_weekday_v1")
+    data_quality_status: Mapped[str] = mapped_column(String(50), default="READY")
+    hourly_forecasts: Mapped[list[dict[str, Any]]] = mapped_column(JSON_DATA, default=list)
+    peak_hours: Mapped[list[dict[str, Any]]] = mapped_column(JSON_DATA, default=list)
+    total_forecast_traffic: Mapped[dict[str, Any]] = mapped_column(JSON_DATA, default=dict)
+    historical_days_used: Mapped[int] = mapped_column(Integer, default=0)
+    backtest_metrics: Mapped[dict[str, Any]] = mapped_column(JSON_DATA, default=dict)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("camera_id", "zone_id", "target_date", name="uq_traffic_forecasts_cam_zone_date"),
+        Index("ix_traffic_forecasts_cam_date", "camera_id", "target_date"),
+    )
+
+
+class ForecastAlertRule(Identity, Base):
+    """Rule definition for automated predictive alerts."""
+    __tablename__ = "forecast_alert_rules"
+
+    camera_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    zone_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    alert_type: Mapped[str] = mapped_column(String(50), default="EXPECTED_HIGH_TRAFFIC")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    high_traffic_threshold: Mapped[int] = mapped_column(Integer, default=200)
+    peak_traffic_threshold: Mapped[int] = mapped_column(Integer, default=500)
+    capacity_threshold_ratio: Mapped[float] = mapped_column(Float, default=0.85)
+    min_coverage_ratio: Mapped[float] = mapped_column(Float, default=0.70)
+    recipient_emails: Mapped[list[str]] = mapped_column(JSON_DATA, default=list)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+
+
+class ForecastAlert(Identity, Base):
+    """Generated forecast alert record."""
+    __tablename__ = "forecast_alerts"
+
+    forecast_id: Mapped[UUID | None] = mapped_column(ForeignKey("traffic_forecasts.id", ondelete="CASCADE"), nullable=True, index=True)
+    camera_id: Mapped[str] = mapped_column(String(255), index=True)
+    zone_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    alert_type: Mapped[str] = mapped_column(String(50), index=True)
+    severity: Mapped[str] = mapped_column(String(20), default="HIGH")
+    target_date: Mapped[str] = mapped_column(String(20), index=True)
+    peak_window: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    expected_traffic: Mapped[dict[str, Any]] = mapped_column(JSON_DATA, default=dict)
+    threshold_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recommendation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivery_status: Mapped[str] = mapped_column(String(20), default="pending")
+    recipient: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+    __table_args__ = (
+        Index("ix_forecast_alerts_cam_date", "camera_id", "target_date"),
+        Index("ix_forecast_alerts_status", "delivery_status"),
+    )

@@ -361,16 +361,44 @@ def run_pipeline(
             _t_count_ms = (time.perf_counter() - t_cnt0) * 1000.0
 
             # 5.1 Business Events & Vehicle Passage Tracking
+            active_cam_id = active_cam.id if active_cam else "camera_01"
+            active_video_src_id = getattr(active_cam, "video_source_id", None)
+            active_src_type = "live" if getattr(active_cam, "is_live", True) else "prerecorded"
+            active_zone_id = "zone_1" if is_zone_on else None
+
             event_manager.process_vehicle_frame(
-                camera_id=active_cam.id if active_cam else "camera_01",
+                camera_id=active_cam_id,
                 vehicle_tracks=visible_vehicle_tracks,
                 plate_results=plate_results,
                 in_zone_ids=in_zone_ids,
-                zone_id="zone_1" if is_zone_on else None,
+                zone_id=active_zone_id,
                 frame=frame,
-                video_source_id=getattr(active_cam, "video_source_id", None),
+                video_source_id=active_video_src_id,
                 frame_id=curr_frame_id,
             )
+
+            # 5.2 Line Crossing Analytics (People & Vehicles)
+            now_epoch = time.time()
+            if tracks is not None and getattr(tracks, "tracker_id", None) is not None and len(tracks.tracker_id) > 0:
+                event_manager.process_crossings(
+                    camera_id=active_cam_id,
+                    tracks=tracks,
+                    frame_shape=frame.shape,
+                    zone_id=active_zone_id,
+                    video_source_id=active_video_src_id,
+                    source_type=active_src_type,
+                    current_time=now_epoch,
+                )
+            if visible_vehicle_tracks is not None and getattr(visible_vehicle_tracks, "tracker_id", None) is not None and len(visible_vehicle_tracks.tracker_id) > 0:
+                event_manager.process_crossings(
+                    camera_id=active_cam_id,
+                    tracks=visible_vehicle_tracks,
+                    frame_shape=frame.shape,
+                    zone_id=active_zone_id,
+                    video_source_id=active_video_src_id,
+                    source_type=active_src_type,
+                    current_time=now_epoch,
+                )
             _t_event_build_ms = event_manager.last_event_build_ms
             _t_db_work_ms = event_manager.last_db_work_ms
 

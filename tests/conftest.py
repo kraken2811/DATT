@@ -8,3 +8,4 @@ import os
 
 os.environ.setdefault("DATT_AGENT_LLM_PROVIDER", "mock")
 os.environ.setdefault("DATT_AGENT_LLM_MODEL", "mock")
+os.environ.setdefault("DATT_REQUIRE_PERSISTENCE", "0")

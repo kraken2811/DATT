@@ -48,11 +48,7 @@ def validate_checkpointer(checkpointer):
 
 
 def get_checkpointer(force_memory: bool = False) -> BaseCheckpointSaver:
-    """Create or return checkpointer instance.
-
-    Persistent deployments require PostgresSaver. MemorySaver is permitted only when
-    persistent conversation history is not required.
-    """
+  
     global _checkpointer_instance, _pg_pool
     if _checkpointer_instance is not None and not force_memory:
         return validate_checkpointer(_checkpointer_instance)
@@ -130,7 +126,7 @@ def clear_thread_checkpoint(thread_id: str, user_id: str = "default_user", *, se
         return True
 
     checkpointer = get_checkpointer()
-    if hasattr(checkpointer, "storage") and isinstance(checkpointer.storage, dict):
+    if isinstance(checkpointer, MemorySaver):
         # LangGraph stores pending writes separately from the checkpoint history.
         checkpointer.delete_thread(internal_tid)
         return True

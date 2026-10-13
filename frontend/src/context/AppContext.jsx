@@ -248,6 +248,11 @@ export function AppProvider({ children }) {
     };
   }, [connectionRevision]);
 
+  // Mobile navigation drawer state
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const toggleSidebar = useCallback(() => setSidebarOpen((prev) => !prev), []);
+  const closeSidebar = useCallback(() => setSidebarOpen(false), []);
+
   return (
     <AppContext.Provider
       value={{
@@ -266,6 +271,10 @@ export function AppProvider({ children }) {
         switchActiveCamera,
         stopActiveCamera,
         streamToken: streamTokenRef.current,
+        sidebarOpen,
+        setSidebarOpen,
+        toggleSidebar,
+        closeSidebar,
       }}
     >
       {children}

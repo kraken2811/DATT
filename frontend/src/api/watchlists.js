@@ -14,7 +14,8 @@ export async function fetchTargets(params = {}, signal = null) {
 
   return apiRequest(`/api/targets${qs ? `?${qs}` : ''}`, {
     signal,
-    cacheTtlMs: 3000,
+    cacheTtlMs: 15000,
+    staleTtlMs: 300000,
   });
 }
 
@@ -48,7 +49,8 @@ export function getTargetImageUrl(targetId) {
 export async function fetchTargetDetail(targetId, signal = null) {
   return apiRequest(`/api/targets/${encodeURIComponent(targetId)}`, {
     signal,
-    cacheTtlMs: 5000,
+    cacheTtlMs: 30000,
+    staleTtlMs: 300000,
   });
 }
 
@@ -68,14 +70,16 @@ export async function fetchVehicles(params = {}, signal = null) {
 
   return apiRequest(`/api/watchlist/vehicles${qs ? `?${qs}` : ''}`, {
     signal,
-    cacheTtlMs: 3000,
+    cacheTtlMs: 15000,
+    staleTtlMs: 300000,
   });
 }
 
 export async function fetchVehicleDetail(vehicleId, signal = null) {
   return apiRequest(`/api/watchlist/vehicles/${encodeURIComponent(vehicleId)}`, {
     signal,
-    cacheTtlMs: 5000,
+    cacheTtlMs: 30000,
+    staleTtlMs: 300000,
   });
 }
 

@@ -52,7 +52,10 @@ def main():
         revision = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True,
                                   timeout=10).stdout.strip() or 'unavailable'
         from src.agent.config import agent_config
-        app.state.backend_url = f'http://127.0.0.1:{args.ai_port}'
+        app.state.backend_url = (
+            os.environ.get('AI_SERVER_URL', '').strip().rstrip('/')
+            if args.mode == 'api' else ''
+        ) or f'http://127.0.0.1:{args.ai_port}'
 
         @app.get('/healthz')
         def health():
@@ -67,6 +70,7 @@ def main():
             return {
                 'notification_worker': 'RUNNING' if 'NotificationEmailWorker' in threads else 'STOPPED',
                 'persistence_worker': 'RUNNING' if 'DatabasePersistenceWorker' in threads else 'STOPPED',
+                'forecast_scheduler': 'RUNNING' if 'DailyForecastSchedulerWorker' in threads else 'STOPPED',
             }
 
         marker = runtime_dir() / (args.token + '.stop')

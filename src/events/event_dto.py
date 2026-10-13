@@ -73,3 +73,22 @@ class FaceEventDTO:
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.utcnow)
 
+
+
+@dataclass(frozen=True)
+class CrossingEventDTO:
+    """Immutable snapshot of a line crossing event for database persistence."""
+    id: UUID
+    camera_id: str
+    object_type: str  # 'person' or 'vehicle'
+    object_class: str
+    direction: str  # 'in' or 'out'
+    track_id: int
+    tracking_session_id: str
+    event_time: datetime
+    idempotency_key: str
+    zone_id: str | None = None
+    source_type: str = 'live'
+    video_source_id: UUID | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=datetime.utcnow)

@@ -141,12 +141,28 @@ def get_backend_http_client() -> httpx.AsyncClient:
     return _backend_client
 
 
+@app.on_event("startup")
+def startup_services() -> None:
+    """Initialize background services on application startup."""
+    try:
+        if os.environ.get("DATT_DISABLE_SCHEDULER") != "1":
+            from src.analytics.scheduler import daily_forecast_scheduler
+            daily_forecast_scheduler.start()
+    except Exception as exc:
+        logger.warning("Could not auto-start forecast scheduler: %s", exc)
+
+
 @app.on_event("shutdown")
 async def shutdown_backend_client() -> None:
     global _backend_client
     if _backend_client is not None and not _backend_client.is_closed:
         await _backend_client.aclose()
         _backend_client = None
+    try:
+        from src.analytics.scheduler import daily_forecast_scheduler
+        daily_forecast_scheduler.stop()
+    except Exception:
+        pass
 
 
 # -----------------------------------------------------------------------------
@@ -185,7 +201,9 @@ async def serve_legacy() -> Response:
 @app.get("/", response_class=FileResponse)
 @app.get("/dashboard", response_class=FileResponse)
 @app.get("/watchlist", response_class=FileResponse)
+@app.get("/events", response_class=FileResponse)
 @app.get("/alerts", response_class=FileResponse)
+@app.get("/analytics", response_class=FileResponse)
 @app.get("/settings", response_class=FileResponse)
 @app.get("/agent", response_class=FileResponse)
 @app.get("/cameras/{camera_id}", response_class=FileResponse)
@@ -1465,6 +1483,8 @@ from src.notifications.alerts import router as alerts_router
 app.include_router(alerts_router)
 from src.agent.api import router as agent_router
 app.include_router(agent_router)
+from src.ui.analytics_router import router as analytics_router
+app.include_router(analytics_router)
 
 # Cache mapping event_id -> snapshot_path for fast lookup
 event_snapshot_cache: dict[str, str] = {}

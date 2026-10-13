@@ -284,6 +284,8 @@ def respond(messages, tools):
                 'face_history_name': person.get('name'),
                 'face_history_latest_event_id': latest_eid,
                 'face_history_question': original_question,
+                'latest_event_id': latest_eid,
+                'latest_event_data': latest_event,
             },
         )
 
@@ -296,5 +298,7 @@ def respond(messages, tools):
             'face_history_name': person.get('name'),
             'face_history_latest_event_id': latest_eid,
             'face_history_question': original_question,
+            'latest_event_id': latest_eid,
+            'latest_event_data': latest_event,
         },
     )

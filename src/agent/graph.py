@@ -96,6 +96,7 @@ def run_agent_message(
         "tool_cycles": 0,
         "total_tool_calls": 0,
         "error": None,
+        "investigation_context": None,
     }
 
     try:
@@ -119,21 +120,35 @@ def run_agent_message(
     reply_content = ""
     tools_called = []
     sources = []
+    active_provider = None
+    active_model = None
+    failover_occurred = False
+    failover_level = 0
 
     for msg in messages:
-        if isinstance(msg, AIMessage) and msg.content:
-            if isinstance(msg.content, list):
-                text_parts = []
-                for part in msg.content:
-                    if isinstance(part, dict) and "text" in part:
-                        text_parts.append(part["text"])
-                    elif isinstance(part, str):
-                        text_parts.append(part)
-                    else:
-                        text_parts.append(str(part))
-                reply_content = "\n".join(text_parts)
-            else:
-                reply_content = str(msg.content)
+        if isinstance(msg, AIMessage):
+            if "llm_provider" in msg.additional_kwargs:
+                active_provider = msg.additional_kwargs["llm_provider"]
+            if "llm_model" in msg.additional_kwargs:
+                active_model = msg.additional_kwargs["llm_model"]
+            if msg.additional_kwargs.get("failover_occurred"):
+                failover_occurred = True
+            if "failover_level" in msg.additional_kwargs:
+                failover_level = msg.additional_kwargs["failover_level"]
+
+            if msg.content:
+                if isinstance(msg.content, list):
+                    text_parts = []
+                    for part in msg.content:
+                        if isinstance(part, dict) and "text" in part:
+                            text_parts.append(part["text"])
+                        elif isinstance(part, str):
+                            text_parts.append(part)
+                        else:
+                            text_parts.append(str(part))
+                    reply_content = "\n".join(text_parts)
+                else:
+                    reply_content = str(msg.content)
         elif isinstance(msg, ToolMessage):
             tool_name = getattr(msg, "name", "tool")
             if tool_name not in tools_called:
@@ -153,6 +168,15 @@ def run_agent_message(
                 except Exception:
                     pass
 
+    from src.agent.investigation.recommendations import generate_action_suggestions
+
+    final_inv_ctx = final_state.get("investigation_context")
+    action_suggestions = generate_action_suggestions(
+        investigation_context=final_inv_ctx,
+        tools_called=tools_called,
+        last_reply=reply_content,
+    )
+
     if final_state.get("error") == "llm_unavailable":
         return {
             "status": "llm_unavailable",
@@ -160,6 +184,12 @@ def run_agent_message(
             "reply": reply_content or "Dịch vụ mô hình ngôn ngữ (LLM) hiện không khả dụng. Vui lòng thử lại sau.",
             "tools_called": tools_called,
             "sources": sources,
+            "provider": active_provider,
+            "model": active_model,
+            "failover_occurred": failover_occurred,
+            "failover_level": failover_level,
+            "action_suggestions": action_suggestions,
+            "investigation_context": final_inv_ctx,
         }
 
     return {
@@ -168,4 +198,10 @@ def run_agent_message(
         "reply": reply_content or "Yêu cầu đã được thực thi thành công.",
         "tools_called": tools_called,
         "sources": sources,
+        "provider": active_provider,
+        "model": active_model,
+        "failover_occurred": failover_occurred,
+        "failover_level": failover_level,
+        "action_suggestions": action_suggestions,
+        "investigation_context": final_inv_ctx,
     }

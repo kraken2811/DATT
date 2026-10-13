@@ -18,8 +18,18 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.agent.config import agent_config
 from src.agent.face_history import respond as respond_face_history
+from src.agent.investigation.memory import InvestigationMemoryManager
 from src.agent.prompts import SYSTEM_PROMPT
-from src.agent.response_formatting import current_turn, format_tool_messages
+from src.agent.response_formatting import (
+    current_turn,
+    format_tool_messages,
+    extract_event_info_for_followup,
+    format_single_vehicle_event,
+    format_single_face_event,
+    DETAIL_TECHNICAL,
+    DETAIL_CONCISE,
+    DETAIL_EXPLANATION,
+)
 from src.agent.state import AgentState
 from src.agent.security import operational_auth_required
 from src.agent.tools import ALL_AGENT_TOOLS
@@ -56,8 +66,37 @@ def find_prior_face_context(messages: list[BaseMessage]) -> tuple[str | None, st
     return None, None, None
 
 
+def find_prior_event_context(messages: list[BaseMessage]) -> tuple[str | None, dict | None]:
+    """Find latest event ID and event data from prior turns in the conversation."""
+    for m in reversed(messages):
+        if isinstance(m, AIMessage):
+            kw = m.additional_kwargs or {}
+            eid = kw.get("latest_event_id") or kw.get("face_history_latest_event_id") or kw.get("event_id")
+            edata = kw.get("latest_event_data") or kw.get("latest_event")
+            if eid or edata:
+                resolved_eid = str(eid) if eid else (str(edata.get("event_id")) if isinstance(edata, dict) and edata.get("event_id") else None)
+                return resolved_eid, edata
+        elif isinstance(m, ToolMessage):
+            try:
+                data = json.loads(m.content)
+                if isinstance(data, dict):
+                    if "event" in data and isinstance(data["event"], dict):
+                        ev = data["event"]
+                        eid = ev.get("event_id") or ev.get("source_event_id") or ev.get("id")
+                        return str(eid) if eid else None, ev
+                    events = data.get("events")
+                    if isinstance(events, list) and events and isinstance(events[0], dict):
+                        ev = events[0]
+                        eid = ev.get("event_id") or ev.get("source_event_id") or ev.get("id")
+                        return str(eid) if eid else None, ev
+            except Exception:
+                pass
+    return None, None
+
+
 class MockChatModel:
-    """Deterministic rule-based mock chat model for tests and offline environments."""
+    """Deterministic rule-based mock chat model for isolated unit tests and offline fixtures only.
+    Not selectable in production runtime."""
 
     def __init__(self, tools: list[Any] | None = None) -> None:
         self.tools = {t.name: t for t in (tools or ALL_AGENT_TOOLS)}
@@ -111,7 +150,13 @@ class MockChatModel:
                     ],
                 )
 
-            return AIMessage(content=format_tool_messages(messages))
+            eid, edata = extract_event_info_for_followup(results)
+            extra_kw = {}
+            if eid:
+                extra_kw['latest_event_id'] = eid
+            if edata:
+                extra_kw['latest_event_data'] = edata
+            return AIMessage(content=format_tool_messages(messages), additional_kwargs=extra_kw)
 
         lower_q = content.lower()
         try:
@@ -145,6 +190,100 @@ class MockChatModel:
                     if match:
                         return AIMessage(content=f"Mã ca trực (secret marker) của bạn là: {match.group(0)}")
             return AIMessage(content="Tôi không có thông tin về secret marker hoặc mã ca trực nào trong phiên hội thoại này.")
+
+        # Follow-up: Ask for event ID ("Cho tôi ID sự kiện đó", "ID sự kiện là gì")
+        if any(p in lower_q for p in ("id sự kiện", "id su kien", "mã sự kiện", "ma su kien", "cho tôi id", "cho toi id", "id của sự kiện", "id cua su kien", "id đó", "id do", "event id", "event_id")):
+            eid, edata = find_prior_event_context(messages)
+            if eid:
+                return AIMessage(
+                    content=f"ID sự kiện vừa tra cứu là: `{eid}`.",
+                    additional_kwargs={"latest_event_id": eid, "latest_event_data": edata},
+                )
+
+        # Follow-up: Deeper examination ("Xem kỹ hơn", "Debug sự kiện", "Xem chi tiết sự kiện đó")
+        if any(p in lower_q for p in ("xem kỹ hơn", "xem ky hon", "xem chi tiết hơn", "xem chi tiet hon", "debug sự kiện", "debug su kien", "chi tiết sự kiện", "chi tiet su kien", "xem kỹ sự kiện", "xem ky su kien")):
+            eid, edata = find_prior_event_context(messages)
+            if eid and "get_event" in self.tools:
+                return AIMessage(
+                    content="",
+                    tool_calls=[{"name": "get_event", "args": {"event_id": eid}, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+                    additional_kwargs={"latest_event_id": eid, "latest_event_data": edata},
+                )
+            elif edata:
+                if edata.get('plate') or edata.get('event_type') in ('plate', 'vehicle', 'passage'):
+                    content_str = format_single_vehicle_event(edata, detail_level=DETAIL_TECHNICAL, user_question=content)
+                else:
+                    content_str = format_single_face_event(edata, detail_level=DETAIL_TECHNICAL, user_question=content)
+                return AIMessage(
+                    content=content_str,
+                    additional_kwargs={"latest_event_id": eid, "latest_event_data": edata},
+                )
+
+        # Shift Handover Report generation
+        if any(w in lower_q for w in ("ca trực", "bàn giao ca", "ca sáng", "ca chiều", "ca tối", "ca đêm")):
+            if "generate_shift_handover_report" in self.tools:
+                st = "current"
+                if "sáng" in lower_q:
+                    st = "morning"
+                elif "chiều" in lower_q:
+                    st = "afternoon"
+                elif "tối" in lower_q or "đêm" in lower_q:
+                    st = "night"
+                cam_id = op_filters.get("camera_id")
+                return AIMessage(
+                    content="",
+                    tool_calls=[{"name": "generate_shift_handover_report", "args": {"shift_type": st, "camera_id": cam_id}, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+                )
+
+        # Anomaly Detection
+        if any(w in lower_q for w in ("bất thường", "đột biến", "tăng vọt", "giảm sâu", "đông bất thường")):
+            if "detect_traffic_anomalies" in self.tools:
+                hrs = 2
+                match_h = re.search(r"(\d+)\s*(?:tiếng|giờ|h)\b", lower_q)
+                if match_h:
+                    hrs = int(match_h.group(1))
+                cam_id = op_filters.get("camera_id")
+                return AIMessage(
+                    content="",
+                    tool_calls=[{"name": "detect_traffic_anomalies", "args": {"time_window_hours": hrs, "camera_id": cam_id}, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+                )
+
+        # Vehicle Investigation
+        plate_in_q = extract_plate(content)
+        is_investigation_q = (
+            "điều tra" in lower_q
+            or "hành trình" in lower_q
+            or "timeline" in lower_q
+            or ("ở đâu" in lower_q and ("camera" in lower_q or "watchlist" in lower_q or "cảnh báo" in lower_q))
+            or ("lần đầu" in lower_q and ("sau đó" in lower_q or "camera" in lower_q or "watchlist" in lower_q))
+        )
+        if plate_in_q and is_investigation_q and "investigate_vehicle" in self.tools:
+            norm_p = normalize_plate(plate_in_q)
+            tr = "today" if ("hôm nay" in lower_q or "hom nay" in lower_q) else ("yesterday" if "hôm qua" in lower_q else None)
+            return AIMessage(
+                content="",
+                tool_calls=[{"name": "investigate_vehicle", "args": {"plate_number": norm_p, "from_time": tr}, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+            )
+
+        # Face Investigation
+        if ("điều tra" in lower_q or "hành trình" in lower_q) and ("khuôn mặt" in lower_q or "người" in lower_q or "đối tượng" in lower_q) and "investigate_face" in self.tools:
+            name_cand = None
+            m_name = re.search(r"(?:đối tượng|người|khuôn mặt)\s+([A-Za-zÀ-ỹ\s]+)", content, re.IGNORECASE)
+            if m_name:
+                name_cand = m_name.group(1).strip()
+            return AIMessage(
+                content="",
+                tool_calls=[{"name": "investigate_face", "args": {"name": name_cand, "from_time": "today"}, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+            )
+
+        # Follow-up: "Thế hôm qua thì sao?"
+        if "hôm qua" in lower_q and any(w in lower_q for w in ("thì sao", "có không", "xuất hiện không", "thế còn")):
+            prior_p, _ = find_prior_vehicle_context(messages)
+            if prior_p and "investigate_vehicle" in self.tools:
+                return AIMessage(
+                    content="",
+                    tool_calls=[{"name": "investigate_vehicle", "args": {"plate_number": prior_p, "from_time": "yesterday"}, "id": f"call_{uuid.uuid4().hex[:8]}"}],
+                )
 
         # Operational Report generation
         if (
@@ -221,7 +360,12 @@ class MockChatModel:
                 return AIMessage(content="", tool_calls=calls)
 
         # Contextual Follow-up Alert / Notification
-        if any(w in lower_q for w in ("cảnh báo", "email", "mail", "thông báo")) and any(w in lower_q for w in ("có không", "gửi chưa", "thành công", "thất bại", "vậy có", "phát sinh", "không?")):
+        has_notif_intent = any(w in lower_q for w in ("cảnh báo", "email", "mail", "thông báo"))
+        has_followup_question = (
+            ("gửi" in lower_q and "chưa" in lower_q)
+            or any(w in lower_q for w in ("có không", "gửi chưa", "chưa", "thành công", "thất bại", "vậy có", "phát sinh", "không?"))
+        )
+        if has_notif_intent and has_followup_question:
             prior_p, prior_n = find_prior_vehicle_context(messages)
             if prior_p:
                 if any(w in lower_q for w in ("email", "mail", "thông báo")) and "get_notifications_status" in self.tools:
@@ -561,8 +705,21 @@ def agent_node(state: AgentState) -> dict[str, Any]:
     else:
         messages = raw_messages
 
-    # 2. Context trimming
+    # Context trimming
     trimmed = trim_messages(messages, max_count=agent_config.max_history_messages)
+
+    # Resolve structured investigation memory context
+    current_question = ""
+    for m in reversed(raw_messages):
+        if isinstance(m, HumanMessage) and not str(m.content).startswith("[Hệ thống: Hạn mức"):
+            current_question = str(m.content)
+            break
+
+    inv_ctx = InvestigationMemoryManager.resolve_context(
+        existing_context=state.get("investigation_context"),
+        messages=raw_messages,
+        current_question=current_question,
+    )
 
     # 3. Check execution budget
     cycles = state.get("tool_cycles", 0)
@@ -591,17 +748,21 @@ def agent_node(state: AgentState) -> dict[str, Any]:
 
     try:
         response = llm.invoke(trimmed)
-        return {"messages": [response]}
+        extra = response.additional_kwargs or {}
+        extra["investigation_context"] = inv_ctx
+        response.additional_kwargs = extra
+        return {"messages": [response], "investigation_context": inv_ctx}
     except LLMUnavailableException as exc:
         logger.error("LLM unavailable: %s", exc)
         return {
             "messages": [
                 AIMessage(
                     content="Dịch vụ mô hình ngôn ngữ (LLM) hiện không khả dụng. Vui lòng thử lại sau.",
-                    additional_kwargs={"status": "llm_unavailable", "reason": getattr(exc, "reason", "error")},
+                    additional_kwargs={"status": "llm_unavailable", "reason": getattr(exc, "reason", "error"), "investigation_context": inv_ctx},
                 )
             ],
             "error": "llm_unavailable",
+            "investigation_context": inv_ctx,
         }
 
 
@@ -620,6 +781,7 @@ def tool_node(state: AgentState) -> dict[str, Any]:
     tool_counts = dict(state.get("tool_call_counts", {}))
     repeated_count = state.get("repeated_tool_calls", 0)
     total_calls = state.get("total_tool_calls", 0)
+    inv_ctx = dict(state.get("investigation_context") or {})
 
     tool_results: list[ToolMessage] = []
     seen_in_batch: set[str] = set()
@@ -729,6 +891,12 @@ def tool_node(state: AgentState) -> dict[str, Any]:
         total_calls += 1
         try:
             res = target_tool.invoke(call_args)
+            inv_ctx = InvestigationMemoryManager.update_from_tool_results(
+                context=inv_ctx,
+                tool_name=call_name,
+                tool_args=call_args,
+                tool_result=res,
+            )
             if call_name in sensitive_tools and isinstance(res, dict) and res.get('status') == 'error':
                 # Older operational tools may wrap driver exceptions in their message.
                 # Keep the structured result while excluding private connection details
@@ -758,6 +926,7 @@ def tool_node(state: AgentState) -> dict[str, Any]:
         "repeated_tool_calls": repeated_count,
         "tool_cycles": state.get("tool_cycles", 0) + 1,
         "total_tool_calls": total_calls,
+        "investigation_context": inv_ctx,
     }
 
 

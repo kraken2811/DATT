@@ -1,17 +1,21 @@
 import os
 import logging
+import threading
 from pathlib import Path
 from contextlib import contextmanager
 from collections.abc import Iterator
 
 from sqlalchemy import create_engine, event
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import QueuePool
+
+_shared_engines: dict[tuple[str, bool], tuple[Engine, sessionmaker]] = {}
+_engine_lock = threading.Lock()
 
 
 class Database:
-    def __init__(self, url: str | None = None, *, echo: bool = False):
+    def __init__(self, url: str | None = None, *, echo: bool = False, shared: bool = True):
         if not url:
             url = os.environ.get("DATT_DATABASE_URL")
         if not url:
@@ -37,20 +41,47 @@ class Database:
             raise RuntimeError("Persistent deployment requires PostgreSQL; SQLite is only for local/test use")
         if parsed.drivername in ("postgres", "postgresql"):
             parsed = parsed.set(drivername="postgresql+psycopg")
-        # API handlers create short-lived Database instances. A separate idle
-        # pool per instance exhausts Supabase's session-pooler connection limit.
-        # Let the external pooler own pooling and release each DBAPI connection
-        # when its transaction ends. Keep SQLite's existing pooling semantics.
-        options = {"poolclass": NullPool} if parsed.get_backend_name() == "postgresql" else {}
-        self.engine = create_engine(parsed, echo=echo, pool_pre_ping=True, **options)
-        if parsed.get_backend_name() == "sqlite":
-            @event.listens_for(self.engine, "connect")
-            def configure_sqlite(connection, _record):
-                cursor = connection.cursor()
-                cursor.execute("PRAGMA foreign_keys=ON")
-                cursor.execute("PRAGMA busy_timeout=5000")
-                cursor.close()
-        self._sessions = sessionmaker(self.engine, expire_on_commit=False)
+
+        self._is_shared = shared
+        self.url = parsed
+
+        if shared:
+            cache_key = (str(parsed), echo)
+            with _engine_lock:
+                if cache_key not in _shared_engines:
+                    _shared_engines[cache_key] = self._create_engine_and_sessions(parsed, echo=echo)
+                self.engine, self._sessions = _shared_engines[cache_key]
+        else:
+            self.engine, self._sessions = self._create_engine_and_sessions(parsed, echo=echo)
+
+    @staticmethod
+    def _create_engine_and_sessions(parsed, *, echo: bool = False) -> tuple[Engine, sessionmaker]:
+        backend = parsed.get_backend_name()
+        if backend == "postgresql":
+            # Process-level bounded pool: eliminates repeated TCP/TLS/auth roundtrips
+            # while strictly capping total pooler connections at 5 (+5 max overflow).
+            engine = create_engine(
+                parsed,
+                echo=echo,
+                poolclass=QueuePool,
+                pool_size=5,
+                max_overflow=5,
+                pool_timeout=15.0,
+                pool_recycle=300,
+                pool_pre_ping=True,
+            )
+        else:
+            engine = create_engine(parsed, echo=echo, pool_pre_ping=True)
+            if backend == "sqlite":
+                @event.listens_for(engine, "connect")
+                def configure_sqlite(connection, _record):
+                    cursor = connection.cursor()
+                    cursor.execute("PRAGMA foreign_keys=ON")
+                    cursor.execute("PRAGMA busy_timeout=5000")
+                    cursor.close()
+
+        sessions = sessionmaker(engine, expire_on_commit=False)
+        return engine, sessions
 
     @contextmanager
     def transaction(self) -> Iterator[Session]:
@@ -63,4 +94,18 @@ class Database:
             yield session
 
     def dispose(self) -> None:
-        self.engine.dispose()
+        """Dispose the underlying engine if this instance owns an unshared engine.
+
+        For shared instances (default), engine disposal is deferred to process
+        termination or Database.dispose_shared() to preserve the warm pool.
+        """
+        if not self._is_shared:
+            self.engine.dispose()
+
+    @classmethod
+    def dispose_shared(cls) -> None:
+        """Explicitly dispose all shared engines (useful in test teardown)."""
+        with _engine_lock:
+            for engine, _ in _shared_engines.values():
+                engine.dispose()
+            _shared_engines.clear()

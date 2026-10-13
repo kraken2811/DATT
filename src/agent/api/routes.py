@@ -1,10 +1,15 @@
 """API routes for DATT LangGraph Single AI Agent and persistent conversation management."""
 import asyncio
 import logging
+import os
+from pathlib import Path
+import shutil
+import tempfile
+import time
 from typing import Any
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -20,6 +25,7 @@ from src.agent.conversations import (
     touch_conversation,
 )
 from src.agent.graph import run_agent_message
+from src.agent.guard import check_prompt_safety
 from src.agent.memory.checkpoint import clear_thread_checkpoint, get_checkpointer, make_thread_config
 
 logger = logging.getLogger("datt.agent.api")
@@ -58,6 +64,22 @@ class ChatResponse(BaseModel):
     reply: str
     tools_called: list[str] = Field(default_factory=list)
     sources: list[dict[str, Any]] = Field(default_factory=list)
+    provider: str | None = Field(default=None, description="Active LLM provider used")
+    model: str | None = Field(default=None, description="Active LLM model name")
+    failover_occurred: bool = Field(default=False, description="Whether failover from primary to fallback occurred")
+    failover_level: int = Field(default=0, description="Failover tier: 0=Primary, 1=Level 1 (GPT-OSS), 2=Level 2 (Qwen)")
+    action_suggestions: list[dict[str, Any]] = Field(default_factory=list, description="Recommended next-best investigation actions")
+    investigation_context: dict[str, Any] | None = Field(default=None, description="Active structured investigation memory")
+
+
+class TranscribeResponse(BaseModel):
+    status: str
+    text: str
+    duration: float | None = None
+    duration_sec: float | None = None
+    language: str = "vi"
+    latency_sec: float = 0.0
+    model: str = "whisper-large-v3-turbo"
 
 
 class CreateConversationRequest(BaseModel):
@@ -83,25 +105,53 @@ async def chat_endpoint(payload: ChatRequest, request: Request) -> ChatResponse:
     )
 
     thread_id = (payload.thread_id or "").strip() or f"thread_{uuid.uuid4().hex[:12]}"
-    db = database()
 
-    # Verify conversation ownership and update/register registry
+    # Verify conversation ownership and update/register registry in background thread
+    def _verify_and_create() -> str:
+        db = database()
+        try:
+            with db.transaction() as session:
+                existing = get_conversation_record(session, thread_id)
+                if existing and existing.user_id != verified_user:
+                    return "forbidden"
+                if not existing:
+                    create_conversation(session, verified_user, thread_id=thread_id)
+                return "ok"
+        finally:
+            db.dispose()
+
     try:
-        with db.transaction() as session:
-            existing = get_conversation_record(session, thread_id)
-            if existing and existing.user_id != verified_user:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Forbidden: Cannot send messages to another user's conversation thread.",
-                )
-            if not existing:
-                create_conversation(session, verified_user, thread_id=thread_id)
+        check_status = await asyncio.to_thread(_verify_and_create)
+        if check_status == "forbidden":
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: Cannot send messages to another user's conversation thread.",
+            )
     except HTTPException:
         raise
     except Exception as exc:
         raise registry_unavailable(exc) from None
-    finally:
-        db.dispose()
+
+    # Security check: Prompt Guard evaluation before LLM execution
+    if agent_config.prompt_guard_enabled:
+        guard_res = await asyncio.to_thread(check_prompt_safety, payload.message)
+        if guard_res.get("is_injection") and agent_config.prompt_guard_block:
+            logger.warning(
+                "Prompt Guard flagged untrusted input in thread %s (score=%.4f)",
+                thread_id,
+                guard_res.get("score", 0.0),
+            )
+            return ChatResponse(
+                status="flagged",
+                thread_id=thread_id,
+                reply="Yêu cầu bị từ chối: Hệ thống phát hiện câu lệnh có dấu hiệu vi phạm an toàn thông tin hoặc can thiệp chỉ dẫn hệ thống (Prompt Injection).",
+                tools_called=[],
+                sources=[],
+                provider="prompt_guard",
+                model=agent_config.prompt_guard_model,
+                failover_occurred=False,
+                failover_level=0,
+            )
 
     # Offload blocking LangGraph execution to worker thread
     try:
@@ -116,15 +166,19 @@ async def chat_endpoint(payload: ChatRequest, request: Request) -> ChatResponse:
     if result.get('status') == 'error':
         raise HTTPException(status_code=503, detail='Agent/history service is unavailable.')
 
-    # Update conversation activity & title
-    try:
+    # Update conversation activity & title in background thread
+    def _touch_record() -> None:
         db = database()
-        with db.transaction() as session:
-            touch_conversation(session, thread_id, verified_user, user_message=payload.message)
+        try:
+            with db.transaction() as session:
+                touch_conversation(session, thread_id, verified_user, user_message=payload.message)
+        finally:
+            db.dispose()
+
+    try:
+        await asyncio.to_thread(_touch_record)
     except Exception as exc:
         raise registry_unavailable(exc) from None
-    finally:
-        db.dispose()
 
     status = result.get("status", "success")
     if status in ("error", "llm_unavailable"):
@@ -134,6 +188,12 @@ async def chat_endpoint(payload: ChatRequest, request: Request) -> ChatResponse:
             reply=result.get("reply", "Dịch vụ mô hình ngôn ngữ (LLM) hiện không khả dụng. Vui lòng thử lại sau."),
             tools_called=[],
             sources=[],
+            provider=result.get("provider"),
+            model=result.get("model"),
+            failover_occurred=result.get("failover_occurred", False),
+            failover_level=result.get("failover_level", 0),
+            action_suggestions=result.get("action_suggestions", []),
+            investigation_context=result.get("investigation_context"),
         )
 
     return ChatResponse(
@@ -142,7 +202,85 @@ async def chat_endpoint(payload: ChatRequest, request: Request) -> ChatResponse:
         reply=result.get("reply", ""),
         tools_called=result.get("tools_called", []),
         sources=result.get("sources", []),
+        provider=result.get("provider"),
+        model=result.get("model"),
+        failover_occurred=result.get("failover_occurred", False),
+        failover_level=result.get("failover_level", 0),
+        action_suggestions=result.get("action_suggestions", []),
+        investigation_context=result.get("investigation_context"),
     )
+
+
+@router.post("/transcribe", response_model=TranscribeResponse)
+async def transcribe_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+) -> TranscribeResponse:
+    """Transcribe audio recording to Vietnamese text using Groq Whisper Large V3 Turbo."""
+    resolve_authenticated_user(request)
+
+    if not agent_config.voice_enabled:
+        raise HTTPException(status_code=403, detail="Voice features are currently disabled by configuration.")
+
+    key = agent_config.groq_api_key or os.getenv("GROQ_API_KEY")
+    if not key:
+        raise HTTPException(status_code=503, detail="Voice service unavailable: GROQ_API_KEY is not configured.")
+
+    allowed_exts = {".webm", ".mp3", ".wav", ".m4a", ".ogg", ".mp4", ".flac"}
+    suffix = Path(file.filename or "audio.webm").suffix.lower() or ".webm"
+    if suffix not in allowed_exts:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported audio format '{suffix}'. Supported: {', '.join(sorted(allowed_exts))}",
+        )
+
+    start_t = time.time()
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        with open(tmp_path, "wb") as f_out:
+            shutil.copyfileobj(file.file, f_out)
+
+        file_size = tmp_path.stat().st_size
+        if file_size == 0:
+            raise HTTPException(status_code=400, detail="Empty audio file provided.")
+        if file_size > 25 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail=f"Audio file size ({file_size} bytes) exceeds 25MB limit.")
+
+        from groq import Groq
+        groq_client = Groq(api_key=key, timeout=30.0)
+
+        with open(tmp_path, "rb") as audio_file:
+            transcription = await asyncio.to_thread(
+                groq_client.audio.transcriptions.create,
+                model=agent_config.whisper_model,
+                file=audio_file,
+                language="vi",
+                response_format="verbose_json",
+            )
+
+        duration = getattr(transcription, "duration", None)
+        text = getattr(transcription, "text", "") or ""
+        latency = round(time.time() - start_t, 3)
+
+        return TranscribeResponse(
+            status="success",
+            text=text.strip(),
+            duration=duration,
+            duration_sec=duration,
+            language="vi",
+            latency_sec=latency,
+            model=agent_config.whisper_model,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Audio transcription error: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Whisper transcription failed: {exc}") from exc
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 @router.post("/conversations")
@@ -194,21 +332,25 @@ async def list_conversations_endpoint(
         client_claimed_session=session_id,
     )
 
-    db = database()
+    def _fetch_list():
+        db = database()
+        try:
+            with db.transaction() as session:
+                return list_conversations(session, user_id=auth_user, limit=limit, offset=offset)
+        finally:
+            db.dispose()
+
     try:
-        with db.transaction() as session:
-            items, total = list_conversations(session, user_id=auth_user, limit=limit, offset=offset)
-            return {
-                "status": "success",
-                "user_id": auth_user,
-                "total": total,
-                "count": len(items),
-                "conversations": [serialize_conversation(c) for c in items],
-            }
+        items, total = await asyncio.to_thread(_fetch_list)
+        return {
+            "status": "success",
+            "user_id": auth_user,
+            "total": total,
+            "count": len(items),
+            "conversations": [serialize_conversation(c) for c in items],
+        }
     except Exception as exc:
         raise registry_unavailable(exc) from None
-    finally:
-        db.dispose()
 
 
 @router.get("/conversations/{thread_id}")
@@ -220,59 +362,49 @@ async def get_conversation(
 ) -> dict[str, Any]:
     """Retrieve message history and metadata for a conversation thread strictly isolated by verified user."""
     auth_user, authenticated = resolve_authenticated_user(request, client_claimed_user=user_id, client_claimed_session=session_id)
-    db = database()
 
-    # 1. Check registry and verify ownership
-    title = "Cuộc trò chuyện mới"
-    created_at = None
-    updated_at = None
-    try:
-        with db.transaction() as session:
-            conv = get_conversation_record(session, thread_id)
-            if conv:
+    # 1. Check registry and verify ownership in background thread
+    def _fetch_conv_record():
+        db = database()
+        try:
+            with db.transaction() as session:
+                conv = get_conversation_record(session, thread_id)
+                if not conv:
+                    return None, "Cuộc trò chuyện mới", None, None
                 if conv.user_id != auth_user:
-                    # Anonymous session handles are local to their verified client namespace.
-                    # Conceal other anonymous sessions without ever reading their checkpoint.
                     if not authenticated and conv.user_id.startswith('unauth_'):
-                        return missing_conversation(thread_id, auth_user)
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Forbidden: Cannot access another user's conversation thread.",
-                    )
-                title = conv.title
-                created_at = conv.created_at.isoformat() if conv.created_at else None
-                updated_at = conv.updated_at.isoformat() if conv.updated_at else None
+                        return "unauth_conceal", "Cuộc trò chuyện mới", None, None
+                    return "forbidden", "Cuộc trò chuyện mới", None, None
+                t = conv.title
+                c_at = conv.created_at.isoformat() if conv.created_at else None
+                u_at = conv.updated_at.isoformat() if conv.updated_at else None
+                return "found", t, c_at, u_at
+        finally:
+            db.dispose()
+
+    try:
+        conv_status, title, created_at, updated_at = await asyncio.to_thread(_fetch_conv_record)
+        if conv_status == "forbidden":
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: Cannot access another user's conversation thread.",
+            )
+        if conv_status == "unauth_conceal" or conv_status is None:
+            return missing_conversation(thread_id, auth_user)
     except HTTPException:
         raise
     except Exception as exc:
         raise registry_unavailable(exc) from None
-    finally:
-        db.dispose()
 
-    if conv is None:
-        return missing_conversation(thread_id, auth_user)
-
-    # 2. Retrieve LangGraph checkpoint state
-    config = make_thread_config(thread_id, user_id=auth_user)
-
-    try:
+    # 2. Retrieve LangGraph checkpoint state in background thread
+    def _fetch_checkpoint_msgs():
+        config = make_thread_config(thread_id, user_id=auth_user)
         checkpointer = get_checkpointer()
         checkpoint_tuple = checkpointer.get_tuple(config)
         if not checkpoint_tuple or not checkpoint_tuple.checkpoint:
-            return {
-                "status": "success" if conv else "not_found",
-                "thread_id": thread_id,
-                "user_id": auth_user,
-                "title": title,
-                "created_at": created_at,
-                "updated_at": updated_at,
-                "message_count": 0,
-                "messages": [],
-            }
-
+            return []
         channel_values = checkpoint_tuple.checkpoint.get("channel_values", {})
         raw_msgs = channel_values.get("messages", [])
-
         serialized = []
         for m in raw_msgs:
             m_type = getattr(m, "type", m.__class__.__name__)
@@ -292,7 +424,10 @@ async def get_conversation(
             if msg_id:
                 msg_obj["id"] = msg_id
             serialized.append(msg_obj)
+        return serialized
 
+    try:
+        serialized = await asyncio.to_thread(_fetch_checkpoint_msgs)
         return {
             "status": "success",
             "thread_id": thread_id,
@@ -378,3 +513,4 @@ async def delete_conversation(
         "user_id": auth_user,
         "cleared": cleared,
     }
+

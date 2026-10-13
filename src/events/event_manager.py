@@ -10,7 +10,8 @@ import numpy as np
 
 from src.events.policy import ThresholdEpisodes, MEANINGFUL_EVENTS
 from src.events.db_worker import DatabaseWorker
-from src.events.event_dto import BusinessEventDTO, FaceEventDTO, VehiclePassageDTO
+from src.events.event_dto import BusinessEventDTO, FaceEventDTO, VehiclePassageDTO, CrossingEventDTO
+from src.counter.line_crossing import LineCrossingCounter
 from src.events.event_storage import EventStorage, event_storage
 from src.runtime.shared_state import SharedRuntimeState, shared_state
 from src.utils.logger import logger
@@ -131,6 +132,21 @@ class VehiclePassage:
 VehicleSession = VehiclePassage
 
 
+class ActivePassagesDict(dict):
+    """Dictionary supporting both (camera_id, track_id) tuple keys and track_id int keys for backward compatibility."""
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            for (c_id, t_id), val in self.items():
+                if t_id == key:
+                    return val
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        if isinstance(key, int):
+            return any(t_id == key for (c_id, t_id) in self.keys())
+        return super().__contains__(key)
+
+
 class EventManager:
     """Detects and asynchronously persists business events and vehicle passages."""
 
@@ -155,9 +171,10 @@ class EventManager:
         self._candidate_since: float = 0.0
         self._last_report_time: float = time.time()
 
-        self._active_passages: dict[tuple[str, int], VehiclePassage] = {}
+        self._active_passages: dict[tuple[str, int], VehiclePassage] = ActivePassagesDict()
         self._episodes = ThresholdEpisodes()
         self._emitted_face_tracks: set[str] = set()
+        self._crossing_counters: dict[str, LineCrossingCounter] = {}
         self.last_event_build_ms: float = 0.0
         self.last_db_work_ms: float = 0.0
 
@@ -362,6 +379,117 @@ class EventManager:
 
         return emitted
 
+
+    def get_crossing_counter(self, camera_id: str, zone_id: str | None = None) -> LineCrossingCounter:
+        if camera_id not in self._crossing_counters:
+            counter = None
+            try:
+                from src.db.database import Database
+                from src.db.models import CameraAnalyticsConfig
+                from sqlalchemy import select
+
+                db = Database()
+                with db.transaction() as session:
+                    cfg = session.scalar(select(CameraAnalyticsConfig).where(CameraAnalyticsConfig.camera_id == str(camera_id)))
+                    if cfg:
+                        cl = cfg.counting_line or {}
+                        p1 = tuple(cl.get("p1", [0.1, 0.5]))
+                        p2 = tuple(cl.get("p2", [0.9, 0.5]))
+                        roi = [tuple(pt) for pt in cfg.roi_polygon] if cfg.roi_polygon else None
+                        counter = LineCrossingCounter(
+                            camera_id=camera_id,
+                            line_p1=p1,
+                            line_p2=p2,
+                            in_direction=cfg.in_direction or "normal",
+                            roi_polygon=roi,
+                            supported_classes=cfg.supported_classes,
+                            min_crossing_distance=cfg.min_crossing_distance or 0.015,
+                            hysteresis_frames=cfg.hysteresis_frames or 2,
+                            zone_id=zone_id,
+                            enabled=cfg.enabled,
+                        )
+            except Exception:
+                counter = None
+
+            if counter is None:
+                counter = LineCrossingCounter(camera_id=camera_id, zone_id=zone_id)
+            self._crossing_counters[camera_id] = counter
+        return self._crossing_counters[camera_id]
+
+    def configure_crossing_counter(
+        self,
+        camera_id: str,
+        line_p1: tuple[float, float] = (0.1, 0.5),
+        line_p2: tuple[float, float] = (0.9, 0.5),
+        in_direction: str = "normal",
+        roi_polygon: list[tuple[float, float]] | None = None,
+        supported_classes: list[str] | None = None,
+        zone_id: str | None = None,
+        enabled: bool = True,
+    ) -> LineCrossingCounter:
+        counter = LineCrossingCounter(
+            camera_id=camera_id,
+            line_p1=line_p1,
+            line_p2=line_p2,
+            in_direction=in_direction,
+            roi_polygon=roi_polygon,
+            supported_classes=supported_classes,
+            zone_id=zone_id,
+            enabled=enabled,
+        )
+        self._crossing_counters[camera_id] = counter
+        return counter
+
+    def process_crossings(
+        self,
+        camera_id: str,
+        tracks: Any,
+        frame_shape: tuple[int, ...] | None = None,
+        zone_id: str | None = None,
+        video_source_id: Any = None,
+        source_type: str = "live",
+        current_time: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Process tracks against the configured counting line and enqueue crossing events asynchronously."""
+        counter = self.get_crossing_counter(camera_id, zone_id)
+        crossings = counter.update(
+            tracks=tracks,
+            frame_shape=frame_shape,
+            video_source_id=_parse_uuid(video_source_id),
+            source_type=source_type,
+            current_time=current_time,
+        )
+        emitted = []
+        for c in crossings:
+            dto = CrossingEventDTO(
+                id=c.id,
+                camera_id=c.camera_id,
+                zone_id=c.zone_id,
+                object_type=c.object_type,
+                object_class=c.object_class,
+                direction=c.direction,
+                track_id=c.track_id,
+                tracking_session_id=c.tracking_session_id,
+                event_time=c.event_time,
+                source_type=c.source_type,
+                video_source_id=c.video_source_id,
+                idempotency_key=c.idempotency_key,
+                metadata=c.metadata,
+            )
+            self.db_worker.enqueue_crossing_event(dto, is_critical=False)
+            emitted.append({
+                "type": "CROSSING_EVENT",
+                "id": str(c.id),
+                "camera_id": c.camera_id,
+                "zone_id": c.zone_id,
+                "object_type": c.object_type,
+                "object_class": c.object_class,
+                "direction": c.direction,
+                "track_id": c.track_id,
+                "event_time": c.event_time.isoformat(),
+            })
+        return emitted
+
     def reset(self):
         """Finalize pending vehicle sessions and end continuity on a source reset."""
         for passage in self._active_passages.values():
@@ -369,6 +497,8 @@ class EventManager:
         self._active_passages.clear()
         self._episodes.reset()
         self._emitted_face_tracks.clear()
+        for counter in self._crossing_counters.values():
+            counter.reset()
 
 
 

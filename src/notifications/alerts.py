@@ -63,7 +63,28 @@ def query(session, params, ident=None):
         raise ValueError('INVALID_PAGINATION') from None
     if page < 1 or not 1 <= size <= 200:
         raise ValueError('INVALID_PAGINATION')
-    total = session.scalar(select(func.count()).select_from(q.subquery())) if not ident else 0
+
+    raw_total = params.get('include_total', True)
+    if isinstance(raw_total, str):
+        include_total = raw_total.strip().lower() not in ('false', '0', 'no', 'f')
+    else:
+        include_total = bool(raw_total)
+
+    if not ident and include_total:
+        if not search:
+            count_q = select(func.count(Notification.id))
+            if status and status != 'all':
+                count_q = count_q.where(Notification.status == status)
+            if kind and kind != 'all':
+                count_q = count_q.where(Notification.event_id.is_not(None) if kind == EVENT_TYPES[0]
+                                        else Notification.plate_event_id.is_not(None))
+            if camera and camera != 'all':
+                count_q = count_q.where(Notification.camera_id.in_(camera_aliases(camera)))
+            total = session.scalar(count_q) or 0
+        else:
+            total = session.scalar(select(func.count()).select_from(q.subquery())) or 0
+    else:
+        total = 0 if ident else None
     q = q.order_by(Notification.created_at.desc(), Notification.id.desc())
     rows = session.execute(q.limit(1) if ident else q.offset((page - 1) * size).limit(size)).all()
     if ident and not rows:

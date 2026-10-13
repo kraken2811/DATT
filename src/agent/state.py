@@ -19,3 +19,6 @@ class AgentState(MessagesState):
     tool_cycles: int
     total_tool_calls: int
     error: str | None
+
+    # Structured investigation memory
+    investigation_context: dict[str, Any] | None

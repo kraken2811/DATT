@@ -142,6 +142,11 @@ def query(session,params,ident=None):
     try: page=int(params.get('page',1));size=int(params.get('page_size',params.get('limit',50)))
     except ValueError: raise ValueError('INVALID_PAGINATION') from None
     if page<1 or not 1<=size<=200: raise ValueError('INVALID_PAGINATION')
-    total=session.scalar(select(func.count()).select_from(q.order_by(None).subquery()))
+    raw_total = params.get('include_total', True)
+    if isinstance(raw_total, str):
+        include_total = raw_total.strip().lower() not in ('false', '0', 'no', 'f')
+    else:
+        include_total = bool(raw_total)
+    total = session.scalar(select(func.count()).select_from(q.order_by(None).subquery())) if include_total else None
     rows=session.execute(q.offset((page-1)*size).limit(size)).all()
     return dict(status='ok',events=[serialize(r) for r in rows],page=page,page_size=size,total=total)

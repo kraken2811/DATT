@@ -476,3 +476,21 @@ __all__ = [
     "TargetEmbeddingRepository",
 ]
 
+
+from .analytics_repository import (
+    CrossingEventRepository,
+    AnalyticsAggregateRepository,
+    CameraAnalyticsConfigRepository,
+    TrafficForecastRepository,
+    ForecastAlertRuleRepository,
+    ForecastAlertRepository,
+)
+
+__all__.extend([
+    "CrossingEventRepository",
+    "AnalyticsAggregateRepository",
+    "CameraAnalyticsConfigRepository",
+    "TrafficForecastRepository",
+    "ForecastAlertRuleRepository",
+    "ForecastAlertRepository",
+])

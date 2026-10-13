@@ -1,12 +1,17 @@
-﻿from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import QueuePool
 from src.db.database import Database
 
-def test_postgres_does_not_retain_idle_connections():
-    db = Database('postgresql://test:test@localhost/test')
+def test_postgres_uses_bounded_shared_pool():
+    db1 = Database('postgresql://test:test@localhost/test')
+    db2 = Database('postgresql://test:test@localhost/test')
     try:
-        assert isinstance(db.engine.pool, NullPool)
+        assert isinstance(db1.engine.pool, QueuePool)
+        assert db1.engine.pool.size() == 5
+        assert db1.engine.pool._max_overflow == 5
+        # Verify both instances share the process-level engine
+        assert db1.engine is db2.engine
     finally:
-        db.dispose()
+        Database.dispose_shared()
 
 def test_sqlite_memory_keeps_database_between_transactions(monkeypatch):
     from sqlalchemy import text
@@ -19,4 +24,4 @@ def test_sqlite_memory_keeps_database_between_transactions(monkeypatch):
         with db.transaction() as session:
             assert session.scalar(text('SELECT id FROM demo')) == 1
     finally:
-        db.dispose()
+        Database.dispose_shared()

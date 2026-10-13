@@ -551,3 +551,148 @@ def get_traffic_analytics(
         return {"status": "error", "message": f"Failed to compute traffic analytics: {exc}"}
     finally:
         db.dispose()
+
+
+@tool
+def get_historical_analytics(
+    camera_id: str | None = None,
+    zone_id: str | None = None,
+    object_type: str | None = None,
+    time_range: str | None = "7_days",
+    from_time: str | None = None,
+    to_time: str | None = None,
+    group_by: str = "hour",
+    compare_with: str | None = "previous_period",
+) -> dict[str, Any]:
+    """Truy vấn phân tích lịch sử lưu lượng thực tế cho người (visitor traffic) và phương tiện (vehicle traffic).
+
+    Sử dụng công cụ này khi người dùng hỏi:
+    - 'Camera nào có nhiều người đi qua nhất trong 7 ngày qua?'
+    - 'Thứ Bảy và Chủ nhật khu vực nào đông hơn?'
+    - 'So sánh lưu lượng hôm nay với hôm qua / tuần này với tuần trước'
+    - 'Phân tích lưu lượng khách/xe tại khu vực cổng chính'
+
+    Args:
+        camera_id: Mã định danh camera (e.g. 'CAM01', UUID, hoặc None nếu xem tất cả camera).
+        zone_id: Mã khu vực (zone) nếu muốn lọc theo phân vùng.
+        object_type: 'person' (khách/người), 'vehicle' (xe), hoặc None (tất cả).
+        time_range: Khoảng thời gian: 'today', 'yesterday', '7_days', '30_days', 'this_week', 'last_week'.
+        from_time: Thời điểm bắt đầu ISO nếu truy vấn tùy chỉnh.
+        to_time: Thời điểm kết thúc ISO nếu truy vấn tùy chỉnh.
+        group_by: Chiều tổng hợp: 'hour' (theo giờ), 'day' (theo ngày), 'weekday' (theo thứ), 'camera' (theo camera), 'type' (theo loại xe).
+        compare_with: Mốc đối chứng so sánh: 'previous_period', 'yesterday', 'last_week'.
+
+    Returns:
+        Dữ liệu đo lường thực tế từ CrossingEvent và AnalyticsAggregate với phân loại IN/OUT,
+        thống kê giờ cao điểm, so sánh ngày thường vs cuối tuần, và xếp hạng camera.
+    """
+    from src.analytics.service import HistoricalAnalyticsService
+    svc = HistoricalAnalyticsService()
+    return svc.get_historical_analytics(
+        camera_id=camera_id,
+        zone_id=zone_id,
+        object_type=object_type,
+        time_range=time_range,
+        from_time=from_time,
+        to_time=to_time,
+        group_by=group_by,
+        compare_with=compare_with,
+    )
+
+
+@tool
+def get_peak_traffic_hours(
+    camera_id: str | None = None,
+    zone_id: str | None = None,
+    object_type: str | None = None,
+    days_back: int = 14,
+) -> dict[str, Any]:
+    """Xác định khung giờ cao điểm điển hình và lặp lại định kỳ trong lịch sử.
+
+    Sử dụng công cụ này khi người dùng hỏi:
+    - 'Ở khu vực cổng chính, giờ nào thường đông khách nhất?'
+    - 'Bãi xe A thường đông vào khung giờ nào?'
+    - 'Khung giờ cao điểm thường rơi vào lúc mấy giờ?'
+
+    Args:
+        camera_id: Mã camera hoặc None cho toàn hệ thống.
+        zone_id: Mã khu vực.
+        object_type: 'person' hoặc 'vehicle'.
+        days_back: Số ngày lịch sử dùng để thống kê quy luật (mặc định 14 ngày).
+
+    Returns:
+        Khung giờ cao điểm điển hình, mức lưu lượng trung bình mỗi ngày, cường độ cao điểm.
+    """
+    from src.analytics.service import HistoricalAnalyticsService
+    svc = HistoricalAnalyticsService()
+    return svc.get_peak_traffic_hours(
+        camera_id=camera_id,
+        zone_id=zone_id,
+        object_type=object_type,
+        days_back=days_back,
+    )
+
+
+@tool
+def get_tomorrow_forecast(
+    camera_id: str,
+    target_date: str | None = None,
+    zone_id: str | None = None,
+    object_type: str | None = None,
+) -> dict[str, Any]:
+    """Dự báo lưu lượng giao thông/khách cho ngày mai dựa trên mô hình thống kê cùng thứ trong tuần.
+
+    Sử dụng công cụ này khi người dùng hỏi:
+    - 'Ngày mai camera cổng chính dự kiến đông lúc nào?'
+    - 'Ngày mai có bao nhiêu lượt xe/người qua camera này?'
+    - 'Có đủ dữ liệu để dự báo ngày mai không?'
+
+    Args:
+        camera_id: Mã camera cần dự báo (bắt buộc).
+        target_date: Ngày dự báo YYYY-MM-DD (mặc định là ngày mai theo giờ ICT).
+        zone_id: Phân vùng cụ thể nếu có.
+        object_type: 'person' hoặc 'vehicle'.
+
+    Returns:
+        Dự báo tổng lưu lượng, khoảng tin cậy 80% (prediction interval), khung giờ cao điểm dự kiến,
+        và trạng thái chất lượng dữ liệu (READY, LIMITED_DATA, INSUFFICIENT_DATA, STALE_DATA).
+        Nếu trạng thái là INSUFFICIENT_DATA, hệ thống trả lời rõ chưa đủ dữ liệu thay vì tự tạo số liệu.
+    """
+    from src.analytics.forecasting import TomorrowForecastEngine
+    engine = TomorrowForecastEngine()
+    return engine.forecast_tomorrow(
+        camera_id=camera_id,
+        target_date_str=target_date,
+        zone_id=zone_id,
+        object_type=object_type,
+        save_to_db=True,
+    )
+
+
+@tool
+def get_predictive_alerts(
+    camera_id: str | None = None,
+    target_date: str | None = None,
+) -> dict[str, Any]:
+    """Tra cứu các cảnh báo dự báo lưu lượng trước cho ngày mai và nguy cơ quá tải sức chứa.
+
+    Sử dụng công cụ này khi người dùng hỏi:
+    - 'Ngày mai có khu vực nào có nguy cơ quá tải không?'
+    - 'Tại sao hệ thống đưa ra cảnh báo này?'
+    - 'Có cảnh báo lưu lượng nào cho ngày mai không?'
+
+    Args:
+        camera_id: Mã camera hoặc None để tra cứu toàn bộ cảnh báo ngày mai.
+        target_date: Ngày dự báo YYYY-MM-DD (mặc định là ngày mai).
+
+    Returns:
+        Danh sách cảnh báo dự báo trước (EXPECTED_PEAK_TRAFFIC, EXPECTED_HIGH_TRAFFIC,
+        EXPECTED_CAPACITY_RISK, FORECAST_DATA_INSUFFICIENT), mức độ nghiêm trọng, lý do và đề xuất vận hành.
+    """
+    from src.analytics.alerts import PredictiveAlertService
+    svc = PredictiveAlertService()
+    if camera_id:
+        alerts = svc.evaluate_forecast_alerts(camera_id=camera_id, target_date_str=target_date)
+        return {"status": "success", "camera_id": camera_id, "alerts": alerts}
+    else:
+        return svc.generate_all_tomorrow_forecasts_and_alerts()

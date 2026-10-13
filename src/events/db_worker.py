@@ -30,8 +30,9 @@ from src.db.repositories import (
     PlateEventRepository,
     VehicleEventRepository,
     VehiclePassageRepository,
+    CrossingEventRepository,
 )
-from src.events.event_dto import BusinessEventDTO, FaceEventDTO, VehiclePassageDTO
+from src.events.event_dto import BusinessEventDTO, FaceEventDTO, VehiclePassageDTO, CrossingEventDTO
 from src.events.policy import MEANINGFUL_EVENTS
 from src.recognition.color_extractor import analyze_vehicle_color
 
@@ -114,6 +115,18 @@ class DatabaseWorker:
         if dto.event_type not in MEANINGFUL_EVENTS:
             return True
         task = ("BUSINESS_EVENT", dto, snapshot.copy() if snapshot is not None else None)
+        success = self._put_task(task, is_critical=is_critical)
+        self.enqueue_latencies.append((time.perf_counter() - t0) * 1000.0)
+        return success
+
+    def enqueue_crossing_event(
+        self,
+        dto: CrossingEventDTO,
+        is_critical: bool = False,
+    ) -> bool:
+        """Enqueue a CrossingEventDTO non-blockingly."""
+        t0 = time.perf_counter()
+        task = ("CROSSING_EVENT", dto, None)
         success = self._put_task(task, is_critical=is_critical)
         self.enqueue_latencies.append((time.perf_counter() - t0) * 1000.0)
         return success
@@ -211,6 +224,7 @@ class DatabaseWorker:
         passages_by_key: dict[str, tuple[VehiclePassageDTO, Any]] = {}
         events: list[tuple[BusinessEventDTO, Any]] = []
         face_events_list: list[tuple[FaceEventDTO, Any]] = []
+        crossing_events_list: list[tuple[CrossingEventDTO, Any]] = []
 
         for task_type, item, aux in batch:
             if task_type == "PASSAGE":
@@ -225,6 +239,8 @@ class DatabaseWorker:
                     events.append((item, aux))
             elif task_type == "FACE_EVENT":
                 face_events_list.append((item, aux))
+            elif task_type == "CROSSING_EVENT":
+                crossing_events_list.append((item, aux))
 
 
         try:
@@ -473,6 +489,27 @@ class DatabaseWorker:
                             logger.warning("[NOTIFICATIONS] enqueue failed; check migration/configuration")
 
 
+
+
+                # Persist crossing events idempotently
+                if crossing_events_list:
+                    crossing_repo = CrossingEventRepository(session)
+                    for c_dto, _ in crossing_events_list:
+                        crossing_repo.insert_idempotent(
+                            id=c_dto.id,
+                            camera_id=c_dto.camera_id,
+                            zone_id=c_dto.zone_id,
+                            object_type=c_dto.object_type,
+                            object_class=c_dto.object_class,
+                            direction=c_dto.direction,
+                            track_id=c_dto.track_id,
+                            tracking_session_id=c_dto.tracking_session_id,
+                            event_time=c_dto.event_time,
+                            source_type=c_dto.source_type,
+                            video_source_id=c_dto.video_source_id,
+                            idempotency_key=c_dto.idempotency_key,
+                            metadata=c_dto.metadata,
+                        )
 
             write_ms = (time.perf_counter() - t_w0) * 1000.0
             self.last_write_ms = write_ms

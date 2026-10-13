@@ -524,9 +524,15 @@ def respond(messages: list, tools: dict) -> AIMessage | None:
             'Trường thiếu được ghi là chưa có dữ liệu.'
         )
 
+        latest_eid = latest_event.get('event_id') or latest_event.get('source_event_id') or latest_event.get('id')
         return AIMessage(
             content=answer + interval_text + '\n\nChi tiết các lần ghi nhận:\n' + '\n'.join(event_facts) + more_notice + disclaimer,
-            additional_kwargs={'vehicle_history_plate': norm_plate, 'vehicle_history_name': display_name},
+            additional_kwargs={
+                'vehicle_history_plate': norm_plate,
+                'vehicle_history_name': display_name,
+                'latest_event_id': latest_eid,
+                'latest_event_data': latest_event,
+            },
         )
 
     return None

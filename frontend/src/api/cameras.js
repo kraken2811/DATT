@@ -15,14 +15,16 @@ export async function fetchCameras(params = {}, signal = null) {
   const qs = query.toString();
   return apiRequest(`/api/cameras${qs ? `?${qs}` : ''}`, {
     signal,
-    cacheTtlMs: 5000,
+    cacheTtlMs: 15000,
+    staleTtlMs: 300000,
   });
 }
 
 export async function fetchCameraDetail(id, signal = null) {
   return apiRequest(`/api/cameras/${encodeURIComponent(id)}`, {
     signal,
-    cacheTtlMs: 5000,
+    cacheTtlMs: 15000,
+    staleTtlMs: 300000,
   });
 }
 
@@ -72,7 +74,8 @@ export async function fetchPublicCameras(params = {}, signal = null) {
 export async function fetchVideoSources(signal = null) {
   return apiRequest('/video_sources', {
     signal,
-    cacheTtlMs: 5000,
+    cacheTtlMs: 15000,
+    staleTtlMs: 300000,
   });
 }
 

@@ -33,6 +33,14 @@ import {
   Eye,
 } from 'lucide-react';
 
+// In-memory module cache for instant (0ms) tab switching
+let cachedWatchlistState = {
+  faceTargets: [],
+  faceTotal: 0,
+  vehicles: [],
+  vehicleTotal: 0,
+};
+
 export function WatchlistPage() {
   const { showToast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -47,13 +55,13 @@ export function WatchlistPage() {
   // ==========================================
   // FACE WATCHLIST STATE
   // ==========================================
-  const [faceTargets, setFaceTargets] = useState([]);
-  const [faceTotal, setFaceTotal] = useState(0);
+  const [faceTargets, setFaceTargets] = useState(() => cachedWatchlistState.faceTargets);
+  const [faceTotal, setFaceTotal] = useState(() => cachedWatchlistState.faceTotal);
   const [facePage, setFacePage] = useState(1);
   const [facePageSize, setFacePageSize] = useState(24);
   const [faceSearch, setFaceSearch] = useState('');
   const [faceDebouncedSearch, setFaceDebouncedSearch] = useState('');
-  const [faceLoading, setFaceLoading] = useState(true);
+  const [faceLoading, setFaceLoading] = useState(() => cachedWatchlistState.faceTargets.length === 0);
   const [faceError, setFaceError] = useState(null);
 
   // Add Target Modal State
@@ -74,7 +82,9 @@ export function WatchlistPage() {
   }, [faceSearch]);
 
   const loadFaceTargets = useCallback(async (signal) => {
-    setFaceLoading(true);
+    if (cachedWatchlistState.faceTargets.length === 0) {
+      setFaceLoading(true);
+    }
     setFaceError(null);
     try {
       const resp = await fetchTargets(
@@ -86,6 +96,8 @@ export function WatchlistPage() {
         signal
       );
       if (resp && resp.status === 'ok') {
+        cachedWatchlistState.faceTargets = resp.targets || [];
+        cachedWatchlistState.faceTotal = resp.total || 0;
         setFaceTargets(resp.targets || []);
         setFaceTotal(resp.total || 0);
       } else {
@@ -234,15 +246,15 @@ export function WatchlistPage() {
   // ==========================================
   // VEHICLE WATCHLIST STATE
   // ==========================================
-  const [vehicles, setVehicles] = useState([]);
-  const [vehicleTotal, setVehicleTotal] = useState(0);
+  const [vehicles, setVehicles] = useState(() => cachedWatchlistState.vehicles);
+  const [vehicleTotal, setVehicleTotal] = useState(() => cachedWatchlistState.vehicleTotal);
   const [vehiclePage, setVehiclePage] = useState(1);
   const [vehiclePageSize, setVehiclePageSize] = useState(25);
   const [vehicleSearch, setVehicleSearch] = useState('');
   const [vehicleDebouncedSearch, setVehicleDebouncedSearch] = useState('');
   const [vehicleTypeFilter, setVehicleTypeFilter] = useState('all');
   const [vehicleStatusFilter, setVehicleStatusFilter] = useState('all');
-  const [vehicleLoading, setVehicleLoading] = useState(true);
+  const [vehicleLoading, setVehicleLoading] = useState(() => cachedWatchlistState.vehicles.length === 0);
   const [vehicleError, setVehicleError] = useState(null);
 
   // Add / Edit Vehicle Modal State
@@ -267,7 +279,9 @@ export function WatchlistPage() {
   }, [vehicleSearch]);
 
   const loadVehicles = useCallback(async (signal) => {
-    setVehicleLoading(true);
+    if (cachedWatchlistState.vehicles.length === 0) {
+      setVehicleLoading(true);
+    }
     setVehicleError(null);
     try {
       const resp = await fetchVehicles(
@@ -281,6 +295,8 @@ export function WatchlistPage() {
         signal
       );
       if (resp && resp.status === 'ok') {
+        cachedWatchlistState.vehicles = resp.vehicles || [];
+        cachedWatchlistState.vehicleTotal = resp.total || 0;
         setVehicles(resp.vehicles || []);
         setVehicleTotal(resp.total || 0);
       } else {
@@ -459,11 +475,11 @@ export function WatchlistPage() {
               </div>
             </div>
 
-            {faceLoading ? (
+            {faceLoading && faceTargets.length === 0 ? (
               <div className="card">
                 <LoadingSpinner text="Đang tải danh sách khuôn mặt từ DB..." />
               </div>
-            ) : faceError ? (
+            ) : faceError && faceTargets.length === 0 ? (
               <ErrorState message={faceError} onRetry={() => loadFaceTargets()} />
             ) : faceTargets.length === 0 ? (
               <div className="card">
@@ -647,11 +663,11 @@ export function WatchlistPage() {
               </div>
             </div>
 
-            {vehicleLoading ? (
+            {vehicleLoading && vehicles.length === 0 ? (
               <div className="card">
                 <LoadingSpinner text="Đang tải danh sách phương tiện..." />
               </div>
-            ) : vehicleError ? (
+            ) : vehicleError && vehicles.length === 0 ? (
               <ErrorState message={vehicleError} onRetry={() => loadVehicles()} />
             ) : vehicles.length === 0 ? (
               <div className="card">

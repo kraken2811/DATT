@@ -18,6 +18,11 @@ import {
   Film,
 } from 'lucide-react';
 
+// In-memory module cache for instant (0ms) tab switching
+let cachedDashboardCameras = [];
+let cachedDashboardVideoSources = [];
+let cachedDashboardRecentEvents = [];
+
 export function DashboardPage() {
   const navigate = useNavigate();
 
@@ -27,14 +32,14 @@ export function DashboardPage() {
   // Source selection state (pure frontend selection - does NOT trigger backend pipeline)
   const [selectedSource, setSelectedSource] = useState(null);
 
-  // Registered system cameras
-  const [cameras, setCameras] = useState([]);
-  const [isLoadingCameras, setIsLoadingCameras] = useState(true);
+  // Registered system cameras (initialized from module cache for instant display)
+  const [cameras, setCameras] = useState(() => cachedDashboardCameras);
+  const [isLoadingCameras, setIsLoadingCameras] = useState(() => cachedDashboardCameras.length === 0);
   const [camerasError, setCamerasError] = useState(null);
 
-  // Local uploaded videos
-  const [videoSources, setVideoSources] = useState([]);
-  const [isLoadingSources, setIsLoadingSources] = useState(true);
+  // Local uploaded videos (initialized from module cache)
+  const [videoSources, setVideoSources] = useState(() => cachedDashboardVideoSources);
+  const [isLoadingSources, setIsLoadingSources] = useState(() => cachedDashboardVideoSources.length === 0);
   const [sourcesError, setSourcesError] = useState(null);
 
   // Public CCTV cameras
@@ -50,9 +55,9 @@ export function DashboardPage() {
   const [customType, setCustomType] = useState('direct_hls');
   const [customUrl, setCustomUrl] = useState('');
 
-  // Recent events (Event Center API)
-  const [recentEvents, setRecentEvents] = useState([]);
-  const [isLoadingEvents, setIsLoadingEvents] = useState(true);
+  // Recent events (initialized from module cache)
+  const [recentEvents, setRecentEvents] = useState(() => cachedDashboardRecentEvents);
+  const [isLoadingEvents, setIsLoadingEvents] = useState(() => cachedDashboardRecentEvents.length === 0);
   const [eventsError, setEventsError] = useState(null);
 
   // Debounce CCTV search input
@@ -63,13 +68,16 @@ export function DashboardPage() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  // 1. Fetch Registered Cameras independently
+  // 1. Fetch Registered Cameras independently (non-blocking if cached)
   const loadCameras = useCallback(async (signal) => {
-    setIsLoadingCameras(true);
+    if (cachedDashboardCameras.length === 0) {
+      setIsLoadingCameras(true);
+    }
     setCamerasError(null);
     try {
       const resp = await fetchCameras({}, signal);
       if (resp && resp.status === 'ok') {
+        cachedDashboardCameras = resp.cameras || [];
         setCameras(resp.cameras || []);
       } else {
         throw new Error(resp?.detail || 'Không thể tải danh sách camera hệ thống');
@@ -83,13 +91,16 @@ export function DashboardPage() {
     }
   }, []);
 
-  // 2. Fetch Video Sources independently
+  // 2. Fetch Video Sources independently (non-blocking if cached)
   const loadVideoSources = useCallback(async (signal) => {
-    setIsLoadingSources(true);
+    if (cachedDashboardVideoSources.length === 0) {
+      setIsLoadingSources(true);
+    }
     setSourcesError(null);
     try {
       const resp = await fetchVideoSources(signal);
       if (resp && resp.sources) {
+        cachedDashboardVideoSources = resp.sources || [];
         setVideoSources(resp.sources || []);
       }
     } catch (err) {
@@ -101,13 +112,16 @@ export function DashboardPage() {
     }
   }, []);
 
-  // 3. Fetch Recent Events independently
+  // 3. Fetch Recent Events independently (non-blocking if cached)
   const loadRecentEvents = useCallback(async (signal) => {
-    setIsLoadingEvents(true);
+    if (cachedDashboardRecentEvents.length === 0) {
+      setIsLoadingEvents(true);
+    }
     setEventsError(null);
     try {
-      const resp = await fetchEvents({ page: 1, page_size: 5 }, signal);
+      const resp = await fetchEvents({ page: 1, page_size: 5, include_total: false }, signal);
       if (resp && resp.status === 'ok') {
+        cachedDashboardRecentEvents = resp.events || [];
         setRecentEvents(resp.events || []);
       } else {
         throw new Error(resp?.detail || 'Không thể tải danh sách sự kiện gần nhất');
@@ -330,9 +344,9 @@ export function DashboardPage() {
           {/* TAB 1: Registered Cameras */}
           {activeTab === 'registered' && (
             <div>
-              {isLoadingCameras ? (
+              {isLoadingCameras && cameras.length === 0 ? (
                 <LoadingSpinner text="Đang tải danh sách camera hệ thống..." />
-              ) : camerasError ? (
+              ) : camerasError && cameras.length === 0 ? (
                 <ErrorState message={camerasError} onRetry={() => loadCameras()} />
               ) : cameras.length === 0 ? (
                 <EmptyState
@@ -595,9 +609,9 @@ export function DashboardPage() {
           {/* TAB 3: Local Video Uploads */}
           {activeTab === 'local' && (
             <div>
-              {isLoadingSources ? (
+              {isLoadingSources && videoSources.length === 0 ? (
                 <LoadingSpinner text="Đang tải danh sách video nội bộ..." />
-              ) : sourcesError ? (
+              ) : sourcesError && videoSources.length === 0 ? (
                 <ErrorState message={sourcesError} onRetry={() => loadVideoSources()} />
               ) : videoSources.length === 0 ? (
                 <EmptyState
@@ -827,9 +841,9 @@ export function DashboardPage() {
             </Link>
           </div>
 
-          {isLoadingEvents ? (
+          {isLoadingEvents && recentEvents.length === 0 ? (
             <LoadingSpinner text="Đang tải các sự kiện gần nhất..." />
-          ) : eventsError ? (
+          ) : eventsError && recentEvents.length === 0 ? (
             <ErrorState message={eventsError} onRetry={() => loadRecentEvents()} />
           ) : recentEvents.length === 0 ? (
             <EmptyState

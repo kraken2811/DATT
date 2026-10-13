@@ -19,14 +19,55 @@ class AgentConfig:
     model_name: str = os.getenv("DATT_AGENT_LLM_MODEL") or os.getenv("AGENT_MODEL_NAME", "gemini-3.8-flash")
     temperature: float = float(os.getenv("DATT_AGENT_LLM_TEMPERATURE") or os.getenv("AGENT_TEMPERATURE", "0.1"))
     timeout_seconds: float = float(os.getenv("DATT_AGENT_LLM_TIMEOUT_SECONDS") or os.getenv("AGENT_TIMEOUT_SEC", "30.0"))
-    max_retries: int = int(os.getenv("DATT_AGENT_LLM_MAX_RETRIES", "3"))
+    max_retries: int = int(os.getenv("DATT_AGENT_LLM_MAX_RETRIES", "2"))
+    circuit_breaker_cooldown_sec: float = float(os.getenv("DATT_AGENT_CIRCUIT_BREAKER_COOLDOWN_SEC", "60.0"))
 
-    # Optional Fallback LLM
-    fallback_provider: str | None = os.getenv("DATT_AGENT_LLM_FALLBACK_PROVIDER")
-    fallback_model: str | None = os.getenv("DATT_AGENT_LLM_FALLBACK_MODEL")
+    # Multi-Level Fallback LLM (Automatic Groq failover when GROQ_API_KEY is present)
+    # Level 1 Fallback (Default: Groq GPT-OSS 120B)
+    fallback_1_provider: str | None = (
+        os.getenv("DATT_AGENT_LLM_FALLBACK_1_PROVIDER")
+        or os.getenv("DATT_AGENT_LLM_FALLBACK_PROVIDER")
+        or ("groq" if os.getenv("GROQ_API_KEY") else None)
+    )
+    fallback_1_model: str | None = (
+        os.getenv("DATT_AGENT_LLM_FALLBACK_1_MODEL")
+        or os.getenv("DATT_AGENT_LLM_FALLBACK_MODEL")
+        or os.getenv("AGENT_FALLBACK_MODEL_NAME")
+        or ("openai/gpt-oss-120b" if (os.getenv("DATT_AGENT_LLM_FALLBACK_1_PROVIDER") == "groq" or os.getenv("DATT_AGENT_LLM_FALLBACK_PROVIDER") == "groq" or os.getenv("GROQ_API_KEY")) else None)
+    )
+
+    # Level 2 Fallback (Default: Groq Qwen 3.8 27B)
+    fallback_2_provider: str | None = (
+        os.getenv("DATT_AGENT_LLM_FALLBACK_2_PROVIDER")
+        or ("groq" if os.getenv("GROQ_API_KEY") else None)
+    )
+    fallback_2_model: str | None = (
+        os.getenv("DATT_AGENT_LLM_FALLBACK_2_MODEL")
+        or ("qwen/qwen3.8-27b" if (os.getenv("DATT_AGENT_LLM_FALLBACK_2_PROVIDER") == "groq" or os.getenv("GROQ_API_KEY")) else None)
+    )
+
+    # Backwards compatibility aliases
+    @property
+    def fallback_provider(self) -> str | None:
+        return self.fallback_1_provider
+
+    @property
+    def fallback_model(self) -> str | None:
+        return self.fallback_1_model
+
+    # Voice & Whisper settings
+    voice_enabled: bool = os.getenv("DATT_AGENT_VOICE_ENABLED", "true").lower() in ("true", "1", "yes")
+    whisper_model: str = os.getenv("DATT_AGENT_WHISPER_MODEL", "whisper-large-v3-turbo")
+
+    # Prompt Guard security settings
+    prompt_guard_enabled: bool = os.getenv("DATT_AGENT_PROMPT_GUARD_ENABLED", "true").lower() in ("true", "1", "yes")
+    prompt_guard_model: str = os.getenv("DATT_AGENT_PROMPT_GUARD_MODEL", "meta-llama/llama-prompt-guard-2-22m")
+    prompt_guard_threshold: float = float(os.getenv("DATT_AGENT_PROMPT_GUARD_THRESHOLD", "0.85"))
+    prompt_guard_block: bool = os.getenv("DATT_AGENT_PROMPT_GUARD_BLOCK", "true").lower() in ("true", "1", "yes")
 
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
     gemini_api_key: str | None = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    groq_api_key: str | None = os.getenv("GROQ_API_KEY")
 
     # Execution limits & safety
     recursion_limit: int = int(os.getenv("AGENT_RECURSION_LIMIT", "15"))

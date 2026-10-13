@@ -47,6 +47,8 @@ export async function apiRequest(endpoint, options = {}) {
     body = null,
     signal = null,
     cacheTtlMs = 0,
+    staleTtlMs: customStaleTtlMs,
+    swr = true,
     forceRefresh = false,
     responseType = 'auto',
     reportAuthFailure = true,
@@ -60,19 +62,7 @@ export async function apiRequest(endpoint, options = {}) {
   const canReuse = isGet && responseType === 'auto' && !explicitAuth;
   const cacheKey = `${connection.revision}:${method}:${url}`;
 
-  // Check cache for GET requests
-  if (canReuse && cacheTtlMs > 0 && !forceRefresh) {
-    const cached = memoryCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < cacheTtlMs) {
-      return cached.data;
-    }
-  }
-
-  // Deduplicate in-flight GET requests
-  if (canReuse && inFlightRequests.has(cacheKey) && !signal) {
-    return inFlightRequests.get(cacheKey);
-  }
-
+  const staleTtlMs = customStaleTtlMs ?? (cacheTtlMs > 0 ? Math.max(cacheTtlMs * 10, 60000) : 60000);
   const defaultHeaders = {
     'Accept': 'application/json',
   };
@@ -88,6 +78,48 @@ export async function apiRequest(endpoint, options = {}) {
 
   const requestHeaders = new Headers(defaultHeaders);
   new Headers(headers).forEach((value, name) => requestHeaders.set(name, value));
+
+  // Check cache and SWR for GET requests
+  if (canReuse && !forceRefresh) {
+    const cached = memoryCache.get(cacheKey);
+    if (cached) {
+      const age = Date.now() - cached.timestamp;
+      // 1. Fresh cache hit: return immediately
+      if (cacheTtlMs > 0 && age < cacheTtlMs) {
+        return cached.data;
+      }
+      // 2. Stale cache hit (within stale window): return stale data immediately and revalidate in background
+      if (swr && age < staleTtlMs) {
+        if (!inFlightRequests.has(cacheKey)) {
+          const bgHeaders = new Headers(requestHeaders);
+          const bgPromise = (async () => {
+            try {
+              const bgResp = await fetch(url, {
+                method,
+                headers: bgHeaders,
+              });
+              if (bgResp.ok && currentConnection().revision === connection.revision) {
+                const ct = bgResp.headers.get('content-type') || '';
+                const bgData = ct.includes('application/json') ? await bgResp.json() : await bgResp.text();
+                memoryCache.set(cacheKey, { data: bgData, timestamp: Date.now() });
+              }
+            } catch {
+              // Ignore background refresh errors
+            } finally {
+              inFlightRequests.delete(cacheKey);
+            }
+          })();
+          inFlightRequests.set(cacheKey, bgPromise);
+        }
+        return cached.data;
+      }
+    }
+  }
+
+  // Deduplicate in-flight GET requests
+  if (canReuse && inFlightRequests.has(cacheKey) && !signal) {
+    return inFlightRequests.get(cacheKey);
+  }
 
   const fetchPromise = (async () => {
     try {
@@ -128,7 +160,7 @@ export async function apiRequest(endpoint, options = {}) {
       if (currentConnection().revision !== connection.revision) {
         throw new DOMException('Connection changed', 'AbortError');
       }
-      if (canReuse && cacheTtlMs > 0) {
+      if (canReuse && (cacheTtlMs > 0 || (swr && staleTtlMs > 0))) {
         memoryCache.set(cacheKey, {
           data,
           timestamp: Date.now(),
@@ -160,4 +192,18 @@ export function invalidateApiCache(prefix = '') {
       memoryCache.delete(key);
     }
   }
+}
+
+/**
+ * Upload voice recording to backend speech-to-text service (Whisper).
+ * @param {Blob|File} audioBlob - Recorded audio blob
+ * @returns {Promise<{status: string, text: string, duration?: number, language?: string}>}
+ */
+export async function transcribeAudio(audioBlob) {
+  const formData = new FormData();
+  formData.append('file', audioBlob, 'recording.webm');
+  return apiRequest('/api/agent/transcribe', {
+    method: 'POST',
+    body: formData,
+  });
 }

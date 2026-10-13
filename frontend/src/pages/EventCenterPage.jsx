@@ -14,12 +14,18 @@ import {
   Download,
 } from 'lucide-react';
 
+// In-memory module cache for instant (0ms) tab switching
+let cachedEventCenterState = {
+  events: [],
+  total: 0,
+};
+
 export function EventCenterPage() {
-  const [events, setEvents] = useState([]);
-  const [total, setTotal] = useState(0);
+  const [events, setEvents] = useState(() => cachedEventCenterState.events);
+  const [total, setTotal] = useState(() => cachedEventCenterState.total);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => cachedEventCenterState.events.length === 0);
   const [error, setError] = useState(null);
 
   // Filters
@@ -45,7 +51,9 @@ export function EventCenterPage() {
   }, [searchTerm]);
 
   const loadEvents = useCallback(async (signal) => {
-    setLoading(true);
+    if (cachedEventCenterState.events.length === 0) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const resp = await fetchEvents(
@@ -62,6 +70,10 @@ export function EventCenterPage() {
       );
 
       if (resp && resp.status === 'ok') {
+        cachedEventCenterState = {
+          events: resp.events || [],
+          total: resp.total || 0,
+        };
         setEvents(resp.events || []);
         setTotal(resp.total || 0);
       } else {
@@ -199,11 +211,11 @@ export function EventCenterPage() {
         </div>
 
         {/* Content Area */}
-        {loading ? (
+        {loading && events.length === 0 ? (
           <div className="card">
             <LoadingSpinner text="Đang tải danh sách sự kiện từ cơ sở dữ liệu..." />
           </div>
-        ) : error ? (
+        ) : error && events.length === 0 ? (
           <ErrorState message={error} onRetry={() => loadEvents()} />
         ) : events.length === 0 ? (
           <div className="card">

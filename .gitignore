@@ -67,3 +67,5 @@ datt-colab-*.zip
 data/camera_registry.json
 data/vehicle_watchlist.json
 models/ppvehicle/
+benchmark_*.json
+gemini_audit_results.json
