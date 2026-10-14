@@ -12,6 +12,7 @@ Verifies:
 """
 
 import json
+import os
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -247,7 +248,7 @@ def test_rag_runtime_provider_info_and_fallback():
         assert "AIza" not in str(v)
 
     # Explicit credential requirement when provider is google_genai without key
-    with patch("src.agent.config.agent_config.gemini_api_key", None):
+    with patch("src.agent.config.agent_config.gemini_api_key", None), patch.dict(os.environ, {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}):
         with pytest.raises(LLMUnavailableException):
             create_raw_model("google_genai", "gemini-2.5-flash", 0.1)
 

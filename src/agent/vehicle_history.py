@@ -107,8 +107,12 @@ def vehicle_history_subject(question: str, messages: list | None = None) -> dict
     q_norm = normalized(question)
 
     # Ignore pure documentation / troubleshooting questions unless vehicle history is explicitly asked
-    if any(word in q_norm for word in ('huong dan', 'tai lieu', 'cau hinh', 'kien truc')):
-        if not any(w in q_norm for w in ('bien so', '30a-', 'lich su xe', 'xe xuat hien')):
+    doc_cues = (
+        'huong dan', 'tai lieu', 'cau hinh', 'kien truc', 'lam sao', 'lam the nao',
+        'cach nao', 'cach tim', 'cach tim kiem', 'cach tra cuu', 'cach su dung', 'cach dung'
+    )
+    if any(word in q_norm for word in doc_cues):
+        if not any(w in q_norm for w in ('bien so 30', '30a-', 'lich su xe', 'xe xuat hien')):
             return None
 
     # Exclude pure face queries

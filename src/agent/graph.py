@@ -168,14 +168,41 @@ def run_agent_message(
                 except Exception:
                     pass
 
+    # If the LLM did not produce a text reply (e.g. only tool calls or empty content),
+    # synthesize a grounded response deterministically from the tool executions.
+    if not reply_content or not reply_content.strip():
+        tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
+        if tool_msgs:
+            from src.agent.response_formatting import format_tool_messages
+            full_turn_msgs = [user_message] + list(messages)
+            synthesized = format_tool_messages(full_turn_msgs)
+            if synthesized and synthesized.strip():
+                reply_content = synthesized.strip()
+
+    if not reply_content or not reply_content.strip():
+        reply_content = "Hiện chưa thể xác minh thông tin từ hệ thống hoặc dữ liệu công cụ chưa khả dụng. Vui lòng thử lại với yêu cầu chi tiết hơn."
+
     from src.agent.investigation.recommendations import generate_action_suggestions
 
+    user_text = user_message.content if hasattr(user_message, "content") else str(user_message)
     final_inv_ctx = final_state.get("investigation_context")
     action_suggestions = generate_action_suggestions(
         investigation_context=final_inv_ctx,
         tools_called=tools_called,
         last_reply=reply_content,
+        user_query=user_text,
+        messages=messages,
     )
+
+    # Persist action_suggestions and investigation_context in the last AIMessage checkpoint
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            extra = dict(msg.additional_kwargs or {})
+            extra["action_suggestions"] = action_suggestions
+            if final_inv_ctx:
+                extra["investigation_context"] = final_inv_ctx
+            msg.additional_kwargs = extra
+            break
 
     if final_state.get("error") == "llm_unavailable":
         return {
@@ -195,7 +222,7 @@ def run_agent_message(
     return {
         "status": "success",
         "thread_id": thread_id,
-        "reply": reply_content or "Yêu cầu đã được thực thi thành công.",
+        "reply": reply_content,
         "tools_called": tools_called,
         "sources": sources,
         "provider": active_provider,

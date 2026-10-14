@@ -407,8 +407,11 @@ class MockChatModel:
 
         # If tools are disabled (budget exhausted or unbound), synthesize directly
         if not tools_enabled:
+            tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
+            if tool_msgs:
+                return AIMessage(content=format_tool_messages(messages))
             return AIMessage(
-                content="Dựa trên các thông tin đã thu thập được từ hệ thống, yêu cầu của bạn đã được ghi nhận."
+                content="Hiện chưa thể xác minh thông tin từ hệ thống hoặc dữ liệu công cụ chưa khả dụng."
             )
 
         # 5. Hybrid question: Camera status first, then documentation
@@ -602,6 +605,13 @@ class MockChatModel:
             or "cách thêm" in lower_q
             or "cách tạo" in lower_q
             or "cách đăng ký" in lower_q
+            or "làm sao" in lower_q
+            or "làm thế nào" in lower_q
+            or "làm cách nào" in lower_q
+            or "cách tìm" in lower_q
+            or "cách tìm kiếm" in lower_q
+            or "cách tra cứu" in lower_q
+            or "cách lọc" in lower_q
         ):
             return AIMessage(
                 content="",

@@ -110,15 +110,15 @@ def classify_doc_intent(query: str) -> dict[str, Any]:
     domain = "ALL"
     terms = ["hướng dẫn sử dụng", "thao tác người dùng"]
 
-    if any(w in norm_q for w in ("camera", "cam", "nguon", "stream", "giam sat", "toan man hinh", "fullscreen")):
+    if any(w in norm_q for w in ("event", "su kien", "event center", "tra cuu su kien", "loc su kien", "tim kiem su kien")):
+        domain = "EVENT_CENTER"
+        terms.extend(["Event Center", "tra cứu sự kiện", "lọc sự kiện", "ảnh bằng chứng", "tìm kiếm sự kiện"])
+    elif any(w in norm_q for w in ("camera", "cam", "nguon", "stream", "giam sat", "toan man hinh", "fullscreen")):
         domain = "CAMERA"
         terms.extend(["quản lý camera", "giám sát trực tiếp", "chọn camera", "xem camera"])
     elif any(w in norm_q for w in ("watchlist", "khuon mat", "bien so", "them nguoi", "dang ky", "upload", "anh")):
         domain = "WATCHLIST"
         terms.extend(["Face Watchlist", "Vehicle Watchlist", "thêm đối tượng", "đăng ký"])
-    elif any(w in norm_q for w in ("event", "su kien", "event center", "tra cuu su kien", "loc su kien")):
-        domain = "EVENT_CENTER"
-        terms.extend(["Event Center", "tra cứu sự kiện", "lọc sự kiện", "ảnh bằng chứng"])
     elif any(w in norm_q for w in ("alert", "canh bao", "alert center", "email", "thong bao", "toast")):
         domain = "ALERT_CENTER"
         terms.extend(["Alert Center", "cảnh báo email", "Global Toast Alert"])

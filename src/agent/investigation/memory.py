@@ -144,13 +144,32 @@ class InvestigationMemoryManager:
 
         # 4. Check for camera filter updates
         cam_match = re.search(r"\bcamera\s+([\w-]+)\b", current_question, re.IGNORECASE)
+        is_camera_followup = any(w in q_norm for w in ("camera nao", "con camera", "nhung camera", "di qua camera", "camera nay", "camera do"))
         if cam_match:
             cam_val = cam_match.group(1).strip()
             if cam_val.lower() not in ("nao", "gi", "nay", "do"):
                 ctx["camera_scope"] = [cam_val]
+        elif not is_camera_followup:
+            # Standalone turn without explicit camera follow-up resets camera filter
+            ctx["camera_scope"] = []
 
-        # 5. Fallback inspection from prior messages if current_entity is missing
-        if not ctx.get("current_entity") and messages:
+        # Check for standalone documentation / how-to inquiry
+        doc_patterns = (
+            "lam sao", "lam the nao", "cach nao", "huong dan", "tai lieu",
+            "cach su dung", "cach dung", "cach tim", "cach tim kiem", "cach tra cuu",
+            "cach xem", "cach them", "cach tao", "cach dang ky", "khac phuc",
+            "xu ly the nao", "quy tac", "chinh sach", "cau hinh", "kien truc",
+            "how to", "troubleshoot", "datt la gi", "tong quan", "cai dat", "trien khai"
+        )
+        is_doc_query = any(p in q_norm for p in doc_patterns)
+        if is_doc_query and not found_plate and not cam_match:
+            # Standalone documentation / how-to inquiry resets operational entity & camera filters
+            ctx["current_entity"] = None
+            ctx["camera_scope"] = []
+            ctx["investigation_goal"] = "documentation_query"
+
+        # 5. Fallback inspection from prior messages if current_entity is missing and not a doc query
+        if not ctx.get("current_entity") and messages and not is_doc_query:
             for m in reversed(messages):
                 if isinstance(m, AIMessage):
                     kw = m.additional_kwargs or {}
@@ -190,7 +209,6 @@ class InvestigationMemoryManager:
         # 6. Detect follow-up intent types
         is_alert_followup = any(w in q_norm for w in ("canh bao", "alert", "co canh bao"))
         is_email_followup = any(w in q_norm for w in ("email", "gui email", "thong bao chua", "gui chua", "da gui"))
-        is_camera_followup = any(w in q_norm for w in ("camera nao", "con camera", "nhung camera", "di qua camera"))
         is_date_followup = any(w in q_norm for w in ("thi sao", "con hom", "the con"))
 
         if is_alert_followup:
@@ -216,9 +234,79 @@ class InvestigationMemoryManager:
         ctx = dict(context)
         ctx["last_tool_name"] = tool_name
 
+        executed = list(ctx.get("executed_tools") or [])
+        if tool_name not in executed:
+            executed.append(tool_name)
+        ctx["executed_tools"] = executed
+
         if isinstance(tool_result, dict):
+            # If tool was search_watchlist
+            if tool_name == "search_watchlist":
+                face_wl = tool_result.get("face_watchlist") or []
+                veh_wl = tool_result.get("vehicle_watchlist") or []
+                id_res = tool_result.get("identity_resolution") or {}
+
+                if face_wl or id_res.get("status") in ("resolved", "ambiguous"):
+                    if id_res.get("status") == "resolved" and id_res.get("target_id"):
+                        resolved_name = id_res.get("target_name") or (face_wl[0].get("name") if face_wl else None)
+                        ctx["current_entity"] = {
+                            "type": "face",
+                            "plate": None,
+                            "normalized_plate": None,
+                            "target_id": id_res["target_id"],
+                            "name": resolved_name,
+                        }
+                        ctx["candidate_entities"] = None
+                    elif len(face_wl) == 1:
+                        target = face_wl[0]
+                        ctx["current_entity"] = {
+                            "type": "face",
+                            "plate": None,
+                            "normalized_plate": None,
+                            "target_id": target.get("id"),
+                            "name": target.get("name"),
+                        }
+                        ctx["candidate_entities"] = None
+                    elif len(face_wl) > 1:
+                        query_name = tool_args.get("target") or tool_args.get("query") or tool_args.get("candidate_name") or (face_wl[0].get("name") if face_wl else None)
+                        cands = [{"id": f.get("id"), "name": f.get("name"), "type": "face"} for f in face_wl[:5]]
+                        ctx["current_entity"] = {
+                            "type": "face_ambiguous",
+                            "plate": None,
+                            "normalized_plate": None,
+                            "target_id": None,
+                            "name": query_name,
+                            "candidates": cands,
+                        }
+                        ctx["candidate_entities"] = cands
+
+                elif veh_wl:
+                    if len(veh_wl) == 1:
+                        veh = veh_wl[0]
+                        p_val = veh.get("plate_number")
+                        ctx["current_entity"] = {
+                            "type": "vehicle",
+                            "plate": p_val,
+                            "normalized_plate": veh.get("normalized_plate") or (normalize_plate(p_val) if p_val else None),
+                            "target_id": veh.get("id"),
+                            "name": veh.get("display_name"),
+                        }
+                        ctx["candidate_entities"] = None
+                    else:
+                        query_p = tool_args.get("plate_number") or tool_args.get("plate") or tool_args.get("query")
+                        cands = [{"id": v.get("id"), "plate": v.get("plate_number"), "name": v.get("display_name"), "type": "vehicle"} for v in veh_wl[:5]]
+                        ctx["current_entity"] = {
+                            "type": "vehicle_ambiguous",
+                            "plate": query_p,
+                            "normalized_plate": normalize_plate(query_p) if query_p else None,
+                            "target_id": None,
+                            "name": None,
+                            "candidates": cands,
+                        }
+                        ctx["candidate_entities"] = cands
+
             # If tool was investigate_vehicle
-            if tool_name == "investigate_vehicle":
+            elif tool_name == "investigate_vehicle":
                 wl_record = (tool_result.get("summary") or {}).get("watchlist_record")
                 ctx["current_entity"] = {
                     "type": "vehicle",
@@ -251,6 +339,25 @@ class InvestigationMemoryManager:
                 alerts = tool_result.get("alerts", [])
                 if alerts:
                     ctx["last_alert_id"] = alerts[0].get("alert_id")
+
+            # If tool was get_camera_status or get_camera
+            elif tool_name in ("get_camera_status", "get_camera"):
+                cam_id = tool_result.get("camera_id") or tool_args.get("camera_id")
+                if cam_id:
+                    ctx["camera_scope"] = [cam_id]
+                    ctx["last_camera_status"] = tool_result.get("operational_status") or tool_result.get("status")
+                    ctx["last_camera_source_type"] = tool_result.get("source_type")
+
+            # If tool was traffic analytics or statistics
+            elif tool_name in ("get_traffic_analytics", "get_event_statistics", "get_peak_traffic_hours"):
+                cam_id = tool_args.get("camera_id") or tool_result.get("camera_id")
+                if cam_id:
+                    ctx["camera_scope"] = [cam_id]
+
+            # If tool was detect_traffic_anomalies
+            elif tool_name == "detect_traffic_anomalies":
+                if tool_args.get("camera_id"):
+                    ctx["camera_scope"] = [tool_args["camera_id"]]
 
             # If tool was get_alerts
             elif tool_name == "get_alerts":

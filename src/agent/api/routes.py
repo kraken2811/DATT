@@ -542,6 +542,9 @@ async def get_conversation(
             msg_id = getattr(m, "id", None)
             if msg_id:
                 msg_obj["id"] = msg_id
+            add_kwargs = getattr(m, "additional_kwargs", None)
+            if add_kwargs:
+                msg_obj["additional_kwargs"] = add_kwargs
             serialized.append(msg_obj)
         return serialized
 

@@ -22,7 +22,6 @@ import {
   FileText,
   AlertCircle,
   HelpCircle,
-  Layers,
   ArrowRight,
   Plus,
   MessageSquare,
@@ -120,8 +119,26 @@ export function AgentPage() {
   const [processingThreads, setProcessingThreads] = useState({});
   const isCurrentThreadProcessing = Boolean(processingThreads[threadId]);
   const loading = isCurrentThreadProcessing;
+  const [processingElapsedSec, setProcessingElapsedSec] = useState(0);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [apiStatus, setApiStatus] = useState('connected');
+
+  // Track elapsed processing time while an Agent request is actively executing
+  useEffect(() => {
+    let timer = null;
+    if (isCurrentThreadProcessing) {
+      const startTime = Date.now();
+      setProcessingElapsedSec(0);
+      timer = setInterval(() => {
+        setProcessingElapsedSec(Math.floor((Date.now() - startTime) / 1000));
+      }, 1000);
+    } else {
+      setProcessingElapsedSec(0);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [isCurrentThreadProcessing]);
 
   // Per-thread draft storage & abort controllers
   const draftsByThreadRef = useRef({});
@@ -340,16 +357,45 @@ export function AgentPage() {
         if (!active || fetchSeqRef.current !== currentSeq) return;
         setApiStatus(resp?.status === 'error' ? 'error' : 'connected');
         if (resp && resp.messages && resp.messages.length > 0) {
-          const restored = resp.messages
-            .filter((m) => m.type === 'human' || m.type === 'ai' || m.type === 'AIMessage' || m.type === 'HumanMessage')
-            .map((m, idx) => ({
-              id: m.id || `restored_${idx}`,
-              role: (m.type === 'human' || m.type === 'HumanMessage') ? 'user' : 'assistant',
-              content: m.content,
-              timestamp: '',
-              sources: [],
-              toolsCalled: m.tool_calls ? m.tool_calls.map((tc) => tc.name || tc.function?.name || 'tool') : [],
-            }));
+          const restored = [];
+          let pendingTools = [];
+          for (const m of resp.messages) {
+            const isHuman = m.type === 'human' || m.type === 'HumanMessage';
+            const isAI = m.type === 'ai' || m.type === 'AIMessage';
+            const isTool = m.type === 'tool' || m.type === 'ToolMessage';
+            if (isTool) {
+              const tName = m.name || 'tool';
+              if (!pendingTools.includes(tName)) pendingTools.push(tName);
+            } else if (isHuman) {
+              pendingTools = [];
+              restored.push({
+                id: m.id || `restored_${restored.length}`,
+                role: 'user',
+                content: m.content,
+                timestamp: '',
+                sources: [],
+                toolsCalled: [],
+              });
+            } else if (isAI) {
+              const calls = (m.tool_calls || []).map((tc) => tc.name || tc.function?.name || 'tool');
+              for (const c of calls) {
+                if (!pendingTools.includes(c)) pendingTools.push(c);
+              }
+              const hasContent = Boolean(m.content && String(m.content).trim());
+              if (hasContent) {
+                restored.push({
+                  id: m.id || `restored_${restored.length}`,
+                  role: 'assistant',
+                  content: m.content,
+                  timestamp: '',
+                  sources: [],
+                  toolsCalled: [...pendingTools],
+                  actionSuggestions: m.additional_kwargs?.action_suggestions || [],
+                });
+                pendingTools = [];
+              }
+            }
+          }
           if (restored.length > 0) {
             globalThreadMessagesCache.set(threadId, restored);
             setMessages(restored);
@@ -1001,18 +1047,6 @@ export function AgentPage() {
 
                   <div className="message-content-wrapper">
                     <div className="message-bubble">
-                      {msg.toolsCalled && msg.toolsCalled.length > 0 && (
-                        <div className="tools-badge-list">
-                          <Layers size={12} />
-                          <span>Công cụ đã dùng:</span>
-                          {[...new Set(msg.toolsCalled)].map((tc, tidx) => (
-                            <span key={tidx} className="tool-tag">
-                              {tc}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-
                       <AgentMessageContent content={msg.content} isUser={isUser} />
 
                       {msg.isError && (
@@ -1103,7 +1137,9 @@ export function AgentPage() {
                     <span className="dot"></span>
                     <span className="dot"></span>
                     <span className="dot"></span>
-                    <span className="loading-caption">AI Agent đang tra cứu và suy luận...</span>
+                    <span className="loading-caption">
+                      Đang xử lý yêu cầu...{processingElapsedSec > 0 ? ` (${processingElapsedSec}s)` : ''}
+                    </span>
                   </div>
                 </div>
               </div>
