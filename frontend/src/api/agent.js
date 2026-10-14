@@ -1,6 +1,6 @@
 import { apiRequest, invalidateApiCache } from './client';
 
-export async function sendAgentMessage(message, threadId = null, userId = 'operator_ui') {
+export async function sendAgentMessage(message, threadId = null, userId = 'operator_ui', options = {}) {
   invalidateApiCache('/api/agent/conversations');
   if (threadId) {
     invalidateApiCache(`/api/agent/conversations/${encodeURIComponent(threadId)}`);
@@ -12,6 +12,7 @@ export async function sendAgentMessage(message, threadId = null, userId = 'opera
       thread_id: threadId,
       user_id: userId,
     },
+    signal: options?.signal,
   });
 }
 

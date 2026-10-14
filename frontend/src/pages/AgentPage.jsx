@@ -15,7 +15,6 @@ import {
   User,
   Send,
   Trash2,
-  Sparkles,
   BookOpen,
   Camera,
   Activity,
@@ -118,9 +117,15 @@ export function AgentPage() {
     return [];
   });
   const [inputValue, setInputValue] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [processingThreads, setProcessingThreads] = useState({});
+  const isCurrentThreadProcessing = Boolean(processingThreads[threadId]);
+  const loading = isCurrentThreadProcessing;
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [apiStatus, setApiStatus] = useState('connected');
+
+  // Per-thread draft storage & abort controllers
+  const draftsByThreadRef = useRef({});
+  const abortControllersRef = useRef(new Map());
 
   // Voice recording state (Whisper Large V3 Turbo)
   const [isRecording, setIsRecording] = useState(false);
@@ -145,7 +150,7 @@ export function AgentPage() {
   }, []);
 
   const startRecording = async () => {
-    if (isRecording || isTranscribing || loading) return;
+    if (isRecording || isTranscribing) return;
     if (!navigator?.mediaDevices?.getUserMedia) {
       showToast('Trình duyệt hiện tại không hỗ trợ ghi âm micro.', 'error');
       return;
@@ -392,14 +397,32 @@ export function AgentPage() {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages, loading]);
+  }, [messages, isCurrentThreadProcessing]);
+
+  // Stop active response safely
+  const handleStopResponse = (targetThreadId = threadId) => {
+    const controller = abortControllersRef.current.get(targetThreadId);
+    if (controller) {
+      try {
+        controller.abort();
+      } catch {}
+      abortControllersRef.current.delete(targetThreadId);
+    }
+    setProcessingThreads((prev) => {
+      const next = { ...prev };
+      delete next[targetThreadId];
+      return next;
+    });
+  };
 
   // Handle sending message
   const handleSendMessage = async (textToSend) => {
     const text = (textToSend || inputValue).trim();
-    if (!text || loading) return;
+    if (!text) return;
 
     const currentThreadId = threadId;
+    if (processingThreads[currentThreadId]) return;
+
     const userMsg = {
       id: `user_${Date.now()}`,
       role: 'user',
@@ -409,62 +432,100 @@ export function AgentPage() {
 
     setMessages((prev) => [...prev, userMsg]);
     setInputValue('');
-    setLoading(true);
+    if (draftsByThreadRef.current) {
+      delete draftsByThreadRef.current[currentThreadId];
+    }
+    setProcessingThreads((prev) => ({ ...prev, [currentThreadId]: true }));
+
+    const abortController = new AbortController();
+    abortControllersRef.current.set(currentThreadId, abortController);
 
     try {
-      const resp = await sendAgentMessage(text, currentThreadId);
+      const resp = await sendAgentMessage(text, currentThreadId, 'operator_ui', {
+        signal: abortController.signal,
+      });
       setApiStatus('connected');
-      if (activeThreadRef.current === currentThreadId) {
-        if (resp && resp.status === 'success') {
-          const botMsg = {
-            id: `bot_${Date.now()}`,
-            role: 'assistant',
-            content: resp.reply,
-            sources: resp.sources || [],
-            toolsCalled: [...new Set(resp.tools_called || [])],
-            timestamp: new Date().toLocaleTimeString(),
-            provider: resp.provider || 'google_genai',
-            model: resp.model || '',
-            failoverLevel: resp.failover_level || 0,
-            failoverOccurred: resp.failover_occurred || false,
-            actionSuggestions: resp.action_suggestions || [],
-          };
-          setMessages((prev) => [...prev, botMsg]);
-        } else {
-          const errorMsg = {
-            id: `err_${Date.now()}`,
-            role: 'assistant',
-            isError: true,
-            content: resp?.reply || 'Hệ thống gặp sự cố khi xử lý tin nhắn. Vui lòng thử lại.',
-            timestamp: new Date().toLocaleTimeString(),
-          };
-          setMessages((prev) => [...prev, errorMsg]);
-          showToast(resp?.reply || 'Không thể nhận phản hồi từ AI Agent', 'error');
-        }
-      }
-      // Refresh conversation registry in background to reflect updated title and timestamps
-      loadConversationsList();
-    } catch (err) {
-      setApiStatus('error');
-      if (activeThreadRef.current === currentThreadId) {
-        const errorMsg = {
+
+      let botMsg = null;
+      if (resp && resp.status === 'success') {
+        botMsg = {
+          id: `bot_${Date.now()}`,
+          role: 'assistant',
+          content: resp.reply,
+          sources: resp.sources || [],
+          toolsCalled: [...new Set(resp.tools_called || [])],
+          timestamp: new Date().toLocaleTimeString(),
+          provider: resp.provider || 'google_genai',
+          model: resp.model || '',
+          failoverLevel: resp.failover_level || 0,
+          failoverOccurred: resp.failover_occurred || false,
+          actionSuggestions: resp.action_suggestions || [],
+        };
+      } else {
+        botMsg = {
           id: `err_${Date.now()}`,
           role: 'assistant',
           isError: true,
-          content: `Không thể kết nối đến AI Agent: ${err.message || err}`,
+          content: resp?.reply || 'Hệ thống gặp sự cố khi xử lý tin nhắn. Vui lòng thử lại.',
           timestamp: new Date().toLocaleTimeString(),
         };
+      }
+
+      // Update in-memory cache for this thread
+      const prevCached = globalThreadMessagesCache.get(currentThreadId) || [];
+      globalThreadMessagesCache.set(currentThreadId, [
+        ...prevCached.filter((m) => m.id !== userMsg.id),
+        userMsg,
+        botMsg,
+      ]);
+
+      if (activeThreadRef.current === currentThreadId) {
+        setMessages((prev) => [...prev, botMsg]);
+        if (resp && resp.status !== 'success') {
+          showToast(resp?.reply || 'Không thể nhận phản hồi từ AI Agent', 'error');
+        }
+      }
+      loadConversationsList();
+    } catch (err) {
+      if (err.name === 'AbortError' || abortController.signal.aborted) {
+        // Safe user-requested stop: do not render error bubble or error toast
+        return;
+      }
+      setApiStatus('error');
+      const errorMsg = {
+        id: `err_${Date.now()}`,
+        role: 'assistant',
+        isError: true,
+        content: `Không thể kết nối đến AI Agent: ${err.message || err}`,
+        timestamp: new Date().toLocaleTimeString(),
+      };
+      const prevCached = globalThreadMessagesCache.get(currentThreadId) || [];
+      globalThreadMessagesCache.set(currentThreadId, [
+        ...prevCached.filter((m) => m.id !== userMsg.id),
+        userMsg,
+        errorMsg,
+      ]);
+
+      if (activeThreadRef.current === currentThreadId) {
         setMessages((prev) => [...prev, errorMsg]);
       }
       showToast(err.message || 'Lỗi mạng khi kết nối AI Agent', 'error');
     } finally {
-      setLoading(false);
+      abortControllersRef.current.delete(currentThreadId);
+      setProcessingThreads((prev) => {
+        const next = { ...prev };
+        delete next[currentThreadId];
+        return next;
+      });
     }
   };
 
   // Create a new conversation: MUST PRESERVE OLD THREADS (NEVER CALL DELETE!)
   const handleCreateNewConversation = async () => {
-    if (loading) return;
+    if (threadId) {
+      draftsByThreadRef.current[threadId] = inputValue;
+    }
+    setInputValue('');
     try {
       const resp = await createAgentConversation();
       if (resp && resp.status === 'success' && resp.conversation) {
@@ -517,7 +578,13 @@ export function AgentPage() {
 
   // Switch conversation instantly (0ms) from memory cache if available
   const handleSelectConversation = (selectedThreadId) => {
-    if (selectedThreadId === threadId || loading) return;
+    if (selectedThreadId === threadId) return;
+    // Preserve draft text correctly when switching conversations
+    if (threadId) {
+      draftsByThreadRef.current[threadId] = inputValue;
+    }
+    setInputValue(draftsByThreadRef.current[selectedThreadId] || '');
+
     if (globalThreadMessagesCache.has(selectedThreadId)) {
       setMessages(globalThreadMessagesCache.get(selectedThreadId));
       setLoadingHistory(false);
@@ -634,7 +701,6 @@ export function AgentPage() {
               type="button"
               className="btn btn-secondary"
               onClick={handleCreateNewConversation}
-              disabled={loading}
               id="btnNewConversation"
               title="Tạo cuộc trò chuyện mới mà không xóa lịch sử cũ"
             >
@@ -671,7 +737,6 @@ export function AgentPage() {
               type="button"
               className="btn btn-primary btn-new-chat-sidebar"
               onClick={handleCreateNewConversation}
-              disabled={loading}
               id="btnSidebarNewChat"
             >
               <Plus size={16} />
@@ -852,7 +917,7 @@ export function AgentPage() {
           {/* Quick Prompts Bar */}
           <div className="quick-prompts-bar">
             <div className="quick-prompts-label">
-              <Sparkles size={14} /> Gợi ý thao tác nhanh:
+              Gợi ý thao tác nhanh:
             </div>
             <div className="quick-prompts-list">
               {QUICK_PROMPTS.map((qp, idx) => {
@@ -863,7 +928,7 @@ export function AgentPage() {
                     type="button"
                     className="quick-prompt-chip"
                     onClick={() => handleSendMessage(qp.prompt)}
-                    disabled={loading}
+                    disabled={isCurrentThreadProcessing}
                   >
                     <IconComponent size={14} />
                     <span>{qp.label}</span>
@@ -948,24 +1013,6 @@ export function AgentPage() {
                         </div>
                       )}
 
-                      {!isUser && (
-                        <div className="provider-model-badge">
-                          {msg.failoverLevel === 1 ? (
-                            <span className="badge-fallback badge-l1" title={`Dự phòng Cấp 1 qua Groq: ${msg.model || 'openai/gpt-oss-120b'}`}>
-                              ⚡ Groq GPT-OSS 120B (Dự phòng L1)
-                            </span>
-                          ) : msg.failoverLevel === 2 ? (
-                            <span className="badge-fallback badge-l2" title={`Dự phòng Cấp 2 qua Groq: ${msg.model || 'qwen/qwen3.8-27b'}`}>
-                              🛡️ Groq Qwen 3.8 27B (Dự phòng L2)
-                            </span>
-                          ) : (
-                            <span className="badge-primary" title={`Mô hình chính: ${msg.model || 'Gemini 2.5 Flash'}`}>
-                              ✨ Gemini 2.5 Flash
-                            </span>
-                          )}
-                        </div>
-                      )}
-
                       <AgentMessageContent content={msg.content} isUser={isUser} />
 
                       {msg.isError && (
@@ -1017,7 +1064,6 @@ export function AgentPage() {
                       {msg.actionSuggestions && msg.actionSuggestions.length > 0 && (
                         <div className="action-suggestions-container">
                           <div className="action-suggestions-header">
-                            <Sparkles size={12} />
                             <span>Gợi ý thao tác điều tra tiếp theo:</span>
                           </div>
                           <div className="action-suggestions-list">
@@ -1027,7 +1073,7 @@ export function AgentPage() {
                                 type="button"
                                 className="action-suggestion-chip"
                                 onClick={() => handleSendMessage(sug.query)}
-                                disabled={loading}
+                                disabled={isCurrentThreadProcessing}
                                 title={sug.query}
                               >
                                 <ArrowRight size={12} />
@@ -1047,7 +1093,7 @@ export function AgentPage() {
               );
             })}
 
-            {loading && (
+            {isCurrentThreadProcessing && (
               <div className="chat-message-row assistant-row loading-row">
                 <div className="message-avatar bot-avatar">
                   <Bot size={18} />
@@ -1104,7 +1150,9 @@ export function AgentPage() {
                 className="chat-input-bar"
                 onSubmit={(e) => {
                   e.preventDefault();
-                  handleSendMessage();
+                  if (!isCurrentThreadProcessing) {
+                    handleSendMessage();
+                  }
                 }}
               >
                 <input
@@ -1117,14 +1165,22 @@ export function AgentPage() {
                       : 'Hỏi về camera, phương tiện, biển số, khuôn mặt hoặc tra cứu vận hành...'
                   }
                   value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setInputValue(val);
+                    if (threadId) {
+                      draftsByThreadRef.current[threadId] = val;
+                    }
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
-                      handleSendMessage();
+                      if (!isCurrentThreadProcessing) {
+                        handleSendMessage();
+                      }
                     }
                   }}
-                  disabled={loading || isTranscribing}
+                  disabled={isTranscribing}
                   autoFocus
                 />
                 <button
@@ -1132,7 +1188,7 @@ export function AgentPage() {
                   className={`btn-icon btn-mic ${isTranscribing ? 'is-loading' : ''}`}
                   id="btnVoiceInput"
                   onClick={startRecording}
-                  disabled={loading || isTranscribing}
+                  disabled={isTranscribing}
                   title="Nhập bằng giọng nói (Whisper Large V3 Turbo)"
                 >
                   {isTranscribing ? (
@@ -1141,19 +1197,37 @@ export function AgentPage() {
                     <Mic size={17} />
                   )}
                 </button>
-                <button
-                  type="submit"
-                  className="btn btn-primary btn-send"
-                  id="btnSendAgentMessage"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    handleSendMessage();
-                  }}
-                  disabled={!inputValue.trim() || loading || isTranscribing}
-                >
-                  <Send size={16} />
-                  <span>Gửi</span>
-                </button>
+                {isCurrentThreadProcessing ? (
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-send is-stopping"
+                    id="btnSendAgentMessage"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      handleStopResponse(threadId);
+                    }}
+                    aria-label="Dừng phản hồi"
+                    title="Dừng phản hồi"
+                  >
+                    <Square size={16} fill="currentColor" stroke="none" />
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    className="btn btn-primary btn-send"
+                    id="btnSendAgentMessage"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      handleSendMessage();
+                    }}
+                    disabled={!inputValue.trim() || isTranscribing}
+                    aria-label="Gửi tin nhắn"
+                    title="Gửi tin nhắn"
+                  >
+                    <Send size={16} />
+                    <span>Gửi</span>
+                  </button>
+                )}
               </form>
             )}
           </div>

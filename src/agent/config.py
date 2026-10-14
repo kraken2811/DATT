@@ -22,28 +22,36 @@ class AgentConfig:
     max_retries: int = int(os.getenv("DATT_AGENT_LLM_MAX_RETRIES", "2"))
     circuit_breaker_cooldown_sec: float = float(os.getenv("DATT_AGENT_CIRCUIT_BREAKER_COOLDOWN_SEC", "60.0"))
 
-    # Multi-Level Fallback LLM (Automatic Groq failover when GROQ_API_KEY is present)
-    # Level 1 Fallback (Default: Groq GPT-OSS 120B)
+    # Multi-Level Fallback LLM (Automatic OpenRouter/Groq failover)
+    # Level 1 Fallback (Default: OpenRouter if key present, else Groq GPT-OSS 120B)
     fallback_1_provider: str | None = (
         os.getenv("DATT_AGENT_LLM_FALLBACK_1_PROVIDER")
         or os.getenv("DATT_AGENT_LLM_FALLBACK_PROVIDER")
-        or ("groq" if os.getenv("GROQ_API_KEY") else None)
+        or ("openrouter" if (os.getenv("OPENROUTER_API_KEY") or os.getenv("DATT_AGENT_LLM_API_KEY")) else ("groq" if os.getenv("GROQ_API_KEY") else None))
     )
     fallback_1_model: str | None = (
         os.getenv("DATT_AGENT_LLM_FALLBACK_1_MODEL")
         or os.getenv("DATT_AGENT_LLM_FALLBACK_MODEL")
         or os.getenv("AGENT_FALLBACK_MODEL_NAME")
-        or ("openai/gpt-oss-120b" if (os.getenv("DATT_AGENT_LLM_FALLBACK_1_PROVIDER") == "groq" or os.getenv("DATT_AGENT_LLM_FALLBACK_PROVIDER") == "groq" or os.getenv("GROQ_API_KEY")) else None)
+        or (
+            "openrouter/free"
+            if (
+                os.getenv("DATT_AGENT_LLM_FALLBACK_1_PROVIDER") == "openrouter"
+                or os.getenv("DATT_AGENT_LLM_FALLBACK_PROVIDER") == "openrouter"
+                or (not os.getenv("DATT_AGENT_LLM_FALLBACK_1_PROVIDER") and not os.getenv("DATT_AGENT_LLM_FALLBACK_PROVIDER") and (os.getenv("OPENROUTER_API_KEY") or os.getenv("DATT_AGENT_LLM_API_KEY")))
+            )
+            else ("openai/gpt-oss-120b" if (os.getenv("DATT_AGENT_LLM_FALLBACK_1_PROVIDER") == "groq" or os.getenv("DATT_AGENT_LLM_FALLBACK_PROVIDER") == "groq" or os.getenv("GROQ_API_KEY")) else None)
+        )
     )
 
-    # Level 2 Fallback (Default: Groq Qwen 3.8 27B)
+    # Level 2 Fallback (Default: Groq Qwen 3.8 27B / GPT-OSS 120B)
     fallback_2_provider: str | None = (
         os.getenv("DATT_AGENT_LLM_FALLBACK_2_PROVIDER")
         or ("groq" if os.getenv("GROQ_API_KEY") else None)
     )
     fallback_2_model: str | None = (
         os.getenv("DATT_AGENT_LLM_FALLBACK_2_MODEL")
-        or ("qwen/qwen3.8-27b" if (os.getenv("DATT_AGENT_LLM_FALLBACK_2_PROVIDER") == "groq" or os.getenv("GROQ_API_KEY")) else None)
+        or ("openai/gpt-oss-120b" if (os.getenv("DATT_AGENT_LLM_FALLBACK_2_PROVIDER") == "groq" or os.getenv("GROQ_API_KEY")) else None)
     )
 
     # Backwards compatibility aliases
@@ -68,10 +76,17 @@ class AgentConfig:
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
     gemini_api_key: str | None = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     groq_api_key: str | None = os.getenv("GROQ_API_KEY")
+    openrouter_api_key: str | None = os.getenv("OPENROUTER_API_KEY") or os.getenv("DATT_AGENT_LLM_API_KEY")
+    openai_base_url: str | None = (
+        os.getenv("OPENROUTER_BASE_URL")
+        or os.getenv("OPENAI_BASE_URL")
+        or os.getenv("OPENAI_API_BASE")
+        or os.getenv("DATT_AGENT_LLM_BASE_URL")
+    )
 
     # Execution limits & safety
     recursion_limit: int = int(os.getenv("AGENT_RECURSION_LIMIT", "15"))
-    execution_timeout_sec: float = float(os.getenv("AGENT_TIMEOUT_SEC", "30.0"))
+    execution_timeout_sec: float = float(os.getenv("DATT_AGENT_EXECUTION_TIMEOUT_SEC") or os.getenv("AGENT_TIMEOUT_SEC", "45.0"))
     tool_timeout_sec: float = float(os.getenv("AGENT_TOOL_TIMEOUT_SEC", "10.0"))
     max_tool_repeats: int = int(os.getenv("AGENT_MAX_TOOL_REPEATS", "2"))
     max_tool_cycles: int = int(os.getenv("DATT_AGENT_MAX_TOOL_CYCLES") or os.getenv("AGENT_MAX_TOOL_CYCLES", "4"))

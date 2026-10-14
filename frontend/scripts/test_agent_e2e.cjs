@@ -71,6 +71,9 @@ const server = http.createServer(async (req, res) => {
     const payload = JSON.parse(body);
     if (mode === 'http-error') return json(404, { detail: 'Agent route unavailable' });
     if (mode === 'llm-error') return json(200, { status: 'llm_unavailable', reply: 'Mock provider unavailable' });
+    if (mode === 'slow') {
+      await new Promise(r => setTimeout(r, 2500));
+    }
     history.set(payload.thread_id, [...(history.get(payload.thread_id) || []), { type: 'human', content: payload.message }, { type: 'ai', content: 'Mock reply' }]);
     return json(200, { status: 'success', reply: 'Mock reply', thread_id: payload.thread_id });
   }
@@ -102,15 +105,58 @@ const server = http.createServer(async (req, res) => {
     await page.waitForFunction(() => document.querySelector('#chatMessages').textContent.includes('Restored answer'));
     assert.ok(await page.$('#agentPage .header-right button'), 'New conversation action is visible');
     assert.equal(await page.$eval('#headerStatusBadge', el => el.textContent.trim()), 'AGENT API ONLINE');
+
+    // Verify decorative sparkles and per-message model badges are removed
+    assert.equal(await page.$('.provider-model-badge'), null, 'Per-message model badges must be removed');
+    assert.equal(await page.$('.quick-prompts-label svg'), null, 'Sparkles icon removed from quick prompts label');
+
     const send = async (text) => {
       await page.type('#agentMessageInput', text);
       await page.click('#btnSendAgentMessage');
-      await page.waitForFunction(() => !document.querySelector('#agentMessageInput').disabled);
+      await page.waitForFunction(() => !document.querySelector('.loading-row'));
     };
     await send('Hello');
     await page.waitForFunction(() => document.querySelector('#chatMessages').textContent.includes('Mock reply'));
     await page.reload({ waitUntil: 'networkidle0' });
     assert.ok(await page.$eval('#chatMessages', el => el.textContent.includes('Mock reply')), 'Sent messages restored after reload');
+
+    // TEST PHASE 2, 3, 4, 5, 6: ACTIVE INPUT, STOP BUTTON, VOICE AVAILABILITY & RE-SEND
+    mode = 'slow';
+    await page.type('#agentMessageInput', 'Question A slow');
+    await page.click('#btnSendAgentMessage');
+
+    // Immediately verify processing state
+    await page.waitForSelector('#btnSendAgentMessage.is-stopping');
+    const stopAriaLabel = await page.$eval('#btnSendAgentMessage', el => el.getAttribute('aria-label'));
+    assert.equal(stopAriaLabel, 'Dừng phản hồi', 'Stop button accessible aria-label');
+    const stopBtnText = await page.$eval('#btnSendAgentMessage', el => el.textContent.trim());
+    assert.equal(stopBtnText, '', 'Stop button must be icon-only without visible text');
+    const inputDisabled = await page.$eval('#agentMessageInput', el => el.disabled);
+    assert.equal(inputDisabled, false, 'Text input MUST remain editable while agent is processing');
+    const micDisabled = await page.$eval('#btnVoiceInput', el => el.disabled);
+    assert.equal(micDisabled, false, 'Microphone MUST remain enabled while agent is processing');
+
+    // Type Question B draft while agent is still processing Question A
+    await page.type('#agentMessageInput', 'Question B draft');
+    const typedDraft = await page.$eval('#agentMessageInput', el => el.value);
+    assert.equal(typedDraft, 'Question B draft', 'Typed draft preserved while processing');
+
+    // Click Stop button to interrupt active request safely
+    await page.click('#btnSendAgentMessage');
+    await page.waitForFunction(() => !document.querySelector('.loading-row'));
+
+    // Verify after stop state
+    const afterStopAria = await page.$eval('#btnSendAgentMessage', el => el.getAttribute('aria-label'));
+    assert.equal(afterStopAria, 'Gửi tin nhắn', 'Button reverts to Send icon after stop');
+    const preservedDraft = await page.$eval('#agentMessageInput', el => el.value);
+    assert.equal(preservedDraft, 'Question B draft', 'Current draft preserved after stopping response');
+
+    // Now submit Question B successfully
+    mode = 'success';
+    await page.click('#btnSendAgentMessage');
+    await page.waitForFunction(() => document.querySelector('#chatMessages').textContent.includes('Question B draft'));
+    await page.waitForFunction(() => !document.querySelector('.loading-row'));
+
     mode = 'http-error';
     await send('Trigger HTTP error');
     await page.waitForFunction(() => [...document.querySelectorAll('.toast-item.error')].some(el => el.textContent.includes('Agent route unavailable')));
@@ -125,9 +171,27 @@ const server = http.createServer(async (req, res) => {
     // Toasts occupy the top-right corner; dismiss them before clicking the header action.
     await page.$$eval('.toast-close-btn', buttons => buttons.forEach(button => button.click()));
     await page.waitForFunction(() => !document.querySelector('#agentPage .header-right button').disabled);
+
+    // Test Draft Preservation across conversation switching
+    await page.type('#agentMessageInput', 'Draft in previous conversation');
     await page.click('#agentPage .header-right button');
     await page.waitForFunction(old => localStorage.getItem('datt_agent_thread_id') !== old, {}, previous);
     await page.waitForSelector('.toast-item.info');
+
+    // In new conversation, input is empty
+    const newConvInput = await page.$eval('#agentMessageInput', el => el.value);
+    assert.equal(newConvInput, '', 'New conversation has clean input');
+
+    // Switch back to previous conversation in sidebar
+    await page.click('.conversation-item:not(.active)');
+    await page.waitForFunction(prevId => localStorage.getItem('datt_agent_thread_id') === prevId, {}, previous);
+    const restoredDraft = await page.$eval('#agentMessageInput', el => el.value);
+    assert.equal(restoredDraft, 'Draft in previous conversation', 'Draft correctly preserved when switching conversations');
+    await page.$eval('#agentMessageInput', el => { el.value = ''; el.dispatchEvent(new Event('input', { bubbles: true })); });
+
+    // Switch back to the newly created conversation
+    await page.click('.conversation-item:not(.active)');
+    await page.waitForFunction(prevId => localStorage.getItem('datt_agent_thread_id') !== prevId, {}, previous);
 
     // FEATURE B Requirement: Creating a new conversation must NEVER invoke DELETE
     assert.equal(requests.some(req => req.method === 'DELETE' && req.path.endsWith(previous)), false, 'New conversation must NEVER call DELETE');
@@ -153,7 +217,7 @@ const server = http.createServer(async (req, res) => {
     assert.ok(requests.some(req => req.path.startsWith('/remote/api/agent/conversations')), 'Saved API base URL is honored');
     assert.ok(requests.filter(req => req.path.includes('/api/agent/')).every(req => req.session), 'Stable session header accompanies Agent requests');
     assert.deepEqual(errors, [], 'No uncaught JavaScript errors');
-    console.log('Agent browser regressions PASS: history, chat, HTTP/provider error toasts, persistent multi-thread continuity (never DELETE on new chat), explicit delete, API status, base URL, session headers');
+    console.log('Agent browser regressions PASS: active input while processing, icon-only stop, draft preservation across switching, mic availability, sparkles/model badges removal, history, error toasts, multi-thread continuity');
   } finally {
     if (browser) await browser.close();
     await new Promise(resolve => server.close(resolve));

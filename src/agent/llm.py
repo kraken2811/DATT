@@ -411,6 +411,10 @@ def get_active_provider_info() -> dict[str, Any]:
     has_gemini = bool(agent_config.gemini_api_key and agent_config.gemini_api_key.strip())
     has_openai = bool(agent_config.openai_api_key and agent_config.openai_api_key.strip())
     has_groq = bool(agent_config.groq_api_key and agent_config.groq_api_key.strip())
+    has_openrouter = bool(
+        (agent_config.openrouter_api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("DATT_AGENT_LLM_API_KEY"))
+        and str(agent_config.openrouter_api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("DATT_AGENT_LLM_API_KEY")).strip()
+    )
 
     if cfg_provider == "google_genai":
         actual = "google_genai" if has_gemini else "unavailable (missing GEMINI_API_KEY)"
@@ -418,6 +422,8 @@ def get_active_provider_info() -> dict[str, Any]:
         actual = "groq" if has_groq else "unavailable (missing GROQ_API_KEY)"
     elif cfg_provider == "openai":
         actual = "openai" if has_openai else "unavailable (missing OPENAI_API_KEY)"
+    elif cfg_provider == "openrouter":
+        actual = "openrouter" if has_openrouter else "unavailable (missing OPENROUTER_API_KEY)"
     elif cfg_provider == "mock":
         actual = "mock (test-only fixture)"
     else:
@@ -438,6 +444,7 @@ def get_active_provider_info() -> dict[str, Any]:
         "has_gemini_key": has_gemini,
         "has_openai_key": has_openai,
         "has_groq_key": has_groq,
+        "has_openrouter_key": has_openrouter,
     }
 
 
@@ -477,20 +484,40 @@ def create_raw_model(provider: str, model_name: str, temperature: float) -> Any:
             max_retries=0,
         )
 
-    if prov == "openai":
-        key = agent_config.openai_api_key or os.getenv("OPENAI_API_KEY")
+    if prov in ("openai", "openrouter"):
+        key = (
+            (agent_config.openrouter_api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("DATT_AGENT_LLM_API_KEY"))
+            if prov == "openrouter"
+            else (agent_config.openai_api_key or os.getenv("OPENAI_API_KEY"))
+        )
         if not key:
+            key_name = "OPENROUTER_API_KEY" if prov == "openrouter" else "OPENAI_API_KEY"
             raise LLMUnavailableException(
-                "OPENAI_API_KEY is required when DATT_AGENT_LLM_PROVIDER=openai",
+                f"{key_name} is required when DATT_AGENT_LLM_PROVIDER={prov}",
                 reason="missing_credentials",
             )
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=model_name,
-            temperature=temperature,
-            api_key=key,
-            request_timeout=agent_config.timeout_seconds,
+        base_url = (
+            agent_config.openai_base_url
+            or os.getenv("OPENROUTER_BASE_URL")
+            or os.getenv("OPENAI_BASE_URL")
+            or os.getenv("OPENAI_API_BASE")
+            or os.getenv("DATT_AGENT_LLM_BASE_URL")
         )
+        if prov == "openrouter" and not base_url:
+            base_url = "https://openrouter.ai/api/v1"
+        elif base_url and "openrouter.ai" in base_url and not base_url.endswith("/v1"):
+            base_url = base_url.rstrip("/") + "/api/v1"
+
+        from langchain_openai import ChatOpenAI
+        kwargs: dict[str, Any] = {
+            "model": model_name or ("openrouter/free" if prov == "openrouter" else "gpt-4o-mini"),
+            "temperature": temperature,
+            "api_key": key,
+            "request_timeout": agent_config.timeout_seconds,
+        }
+        if base_url:
+            kwargs["base_url"] = base_url
+        return ChatOpenAI(**kwargs)
 
     if prov == "mock":
         is_test = bool(
@@ -507,7 +534,7 @@ def create_raw_model(provider: str, model_name: str, temperature: float) -> Any:
         return MockChatModel()
 
     raise ValueError(
-        f"Unsupported LLM provider: {provider!r}. Use 'google_genai', 'groq', or 'openai'."
+        f"Unsupported LLM provider: {provider!r}. Use 'google_genai', 'groq', 'openai', or 'openrouter'."
     )
 
 

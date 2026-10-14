@@ -1,9 +1,11 @@
 """Agent node and Tool node execution logic for LangGraph."""
 
+import concurrent.futures
 import json
 import logging
 import os
 import re
+import threading
 from typing import Any
 import uuid
 
@@ -766,6 +768,35 @@ def agent_node(state: AgentState) -> dict[str, Any]:
         }
 
 
+_tool_executor: concurrent.futures.ThreadPoolExecutor | None = None
+_tool_executor_lock = threading.Lock()
+_timed_out_tool_executions: set[concurrent.futures.Future] = set()
+_timed_out_lock = threading.Lock()
+
+
+def get_tool_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Retrieve or initialize the bounded, managed ThreadPoolExecutor for agent tools."""
+    global _tool_executor
+    if _tool_executor is None:
+        with _tool_executor_lock:
+            if _tool_executor is None:
+                max_workers = int(os.getenv("DATT_AGENT_TOOL_MAX_WORKERS", "4"))
+                _tool_executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max_workers,
+                    thread_name_prefix="datt_agent_tool",
+                )
+    return _tool_executor
+
+
+def shutdown_tool_executor(wait: bool = False) -> None:
+    """Safely terminate the managed tool executor during app teardown or testing."""
+    global _tool_executor
+    with _tool_executor_lock:
+        if _tool_executor is not None:
+            _tool_executor.shutdown(wait=wait, cancel_futures=True)
+            _tool_executor = None
+
+
 def tool_node(state: AgentState) -> dict[str, Any]:
     """Safe execution of tool calls with argument validation, error handling, duplicate prevention, and execution budget."""
     messages = state.get("messages", [])
@@ -887,10 +918,12 @@ def tool_node(state: AgentState) -> dict[str, Any]:
             )
             continue
 
-        # Execute tool safely
+        # Execute tool safely with bounded timeout via managed executor
         total_calls += 1
+        executor = get_tool_executor()
+        future = executor.submit(target_tool.invoke, call_args)
         try:
-            res = target_tool.invoke(call_args)
+            res = future.result(timeout=agent_config.tool_timeout_sec)
             inv_ctx = InvestigationMemoryManager.update_from_tool_results(
                 context=inv_ctx,
                 tool_name=call_name,
@@ -906,6 +939,48 @@ def tool_node(state: AgentState) -> dict[str, Any]:
             tool_results.append(
                 ToolMessage(
                     content=content_str,
+                    tool_call_id=call_id,
+                    name=call_name,
+                )
+            )
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "Tool %s (call_id=%s) timed out after %.1fs; background thread continues until completion.",
+                call_name,
+                call_id,
+                agent_config.tool_timeout_sec,
+            )
+            with _timed_out_lock:
+                _timed_out_tool_executions.add(future)
+
+            def _on_timed_out_complete(fut: concurrent.futures.Future) -> None:
+                with _timed_out_lock:
+                    _timed_out_tool_executions.discard(fut)
+                try:
+                    fut.result()
+                    logger.info(
+                        "Timed-out tool %s (call_id=%s) background execution completed (discarded safely).",
+                        call_name,
+                        call_id,
+                    )
+                except Exception as ex:
+                    logger.debug(
+                        "Timed-out tool %s (call_id=%s) background execution raised %s (discarded safely).",
+                        call_name,
+                        call_id,
+                        type(ex).__name__,
+                    )
+
+            future.add_done_callback(_on_timed_out_complete)
+            tool_results.append(
+                ToolMessage(
+                    content=json.dumps(
+                        {
+                            "status": "timeout",
+                            "message": f"Công cụ '{call_name}' phản hồi quá thời gian quy định ({agent_config.tool_timeout_sec}s).",
+                        },
+                        ensure_ascii=False,
+                    ),
                     tool_call_id=call_id,
                     name=call_name,
                 )

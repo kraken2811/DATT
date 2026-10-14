@@ -29,7 +29,7 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Minus,
-  Sparkles,
+  Lightbulb,
   X,
   Layers,
 } from 'lucide-react';
@@ -288,7 +288,7 @@ export function AnalyticsPage() {
           onClick={() => setActiveTab('forecast')}
           id="tabForecast"
         >
-          <Sparkles size={18} />
+          <TrendingUp size={18} />
           <span>Dự báo Ngày mai</span>
         </button>
         <button
@@ -720,7 +720,7 @@ export function AnalyticsPage() {
                 </div>
               ) : (
                 <div className="quality-banner banner-ready">
-                  <Sparkles size={24} className="text-blue" />
+                  <TrendingUp size={24} className="text-blue" />
                   <div>
                     <h4>
                       Dự Báo Lưu Lượng Ngày Mai — {forecastData.weekday_name} ({forecastData.target_date})
@@ -743,7 +743,7 @@ export function AnalyticsPage() {
                     <div className="kpi-card highlight-card">
                       <div className="kpi-header">
                         <span className="kpi-title">Dự Báo Tổng Lưu Lượng</span>
-                        <Sparkles size={18} className="kpi-icon text-blue" />
+                        <TrendingUp size={18} className="kpi-icon text-blue" />
                       </div>
                       <div className="kpi-value text-blue">
                         {forecastData.total_forecast?.expected || 0}{' '}
@@ -930,7 +930,7 @@ export function AnalyticsPage() {
                       {al.recommendation && (
                         <div className="alert-recommendation-box">
                           <div className="rec-header">
-                            <Sparkles size={16} className="text-amber" />
+                            <Lightbulb size={16} className="text-amber" />
                             <span>Đề xuất vận hành:</span>
                           </div>
                           <p className="rec-content">{al.recommendation}</p>

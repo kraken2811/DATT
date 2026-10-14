@@ -95,6 +95,71 @@ class RenameConversationRequest(BaseModel):
     session_id: str | None = Field(default=None, description="Optional client session identifier")
 
 
+class ConversationExecution:
+    """Tracks active and queued execution state for a specific (user_id, thread_id)."""
+
+    def __init__(self, key: tuple[str, str]):
+        self.key = key
+        self.lock = asyncio.Lock()
+        self.active_task: asyncio.Task | None = None
+        self.queue_count: int = 0
+        self.last_active_at: float = time.time()
+
+
+_conversation_executions: dict[tuple[str, str], ConversationExecution] = {}
+_executions_lock = asyncio.Lock()
+
+
+async def _get_conversation_execution(key: tuple[str, str]) -> ConversationExecution:
+    async with _executions_lock:
+        if key not in _conversation_executions:
+            _conversation_executions[key] = ConversationExecution(key)
+        execution = _conversation_executions[key]
+        execution.queue_count += 1
+        execution.last_active_at = time.time()
+        return execution
+
+
+async def _release_conversation_execution(key: tuple[str, str], execution: ConversationExecution) -> None:
+    async with _executions_lock:
+        execution.queue_count -= 1
+        execution.last_active_at = time.time()
+        if execution.queue_count <= 0 and not execution.lock.locked():
+            _conversation_executions.pop(key, None)
+
+
+def _get_thread_lock(thread_id: str) -> asyncio.Lock:
+    """Backward compatibility helper for tests or external inspectors."""
+    key = ("default", thread_id)
+    if key not in _conversation_executions:
+        _conversation_executions[key] = ConversationExecution(key)
+    return _conversation_executions[key].lock
+
+
+def check_deployment_worker_configuration() -> None:
+    """Enforce or warn about single-worker deployment configuration.
+
+    In-memory execution registries coordinate per-conversation execution safely
+    within a single process. Running multiple Uvicorn worker processes without a
+    distributed lock manager (such as Redis or Postgres advisory locks) allows
+    requests for the same thread to hit different processes concurrently.
+    Therefore, single-worker configuration (workers=1) is enforced/recommended.
+    """
+    web_concurrency = os.getenv("WEB_CONCURRENCY")
+    uvicorn_workers = os.getenv("UVICORN_WORKERS")
+    if (web_concurrency and int(web_concurrency) > 1) or (uvicorn_workers and int(uvicorn_workers) > 1):
+        logger.warning(
+            "MULTIPLE WORKER PROCESSES DETECTED (WEB_CONCURRENCY=%s, UVICORN_WORKERS=%s). "
+            "DATT AI Agent requires single-worker deployment (workers=1) or sticky session routing "
+            "for strict per-conversation checkpoint serialization until distributed coordination is enabled.",
+            web_concurrency,
+            uvicorn_workers,
+        )
+
+
+check_deployment_worker_configuration()
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(payload: ChatRequest, request: Request) -> ChatResponse:
     """Send a message to the DATT AI Agent with persistent conversation continuity."""
@@ -153,32 +218,86 @@ async def chat_endpoint(payload: ChatRequest, request: Request) -> ChatResponse:
                 failover_level=0,
             )
 
-    # Offload blocking LangGraph execution to worker thread
+    # Serialize thread execution to prevent checkpoint race conditions on safe interruptions
+    key = (verified_user, thread_id)
+    execution = await _get_conversation_execution(key)
+    started_event = asyncio.Event()
+
+    async def _worker_coroutine() -> dict[str, Any]:
+        await execution.lock.acquire()
+        try:
+            started_event.set()
+            execution.last_active_at = time.time()
+            result = await asyncio.to_thread(
+                run_agent_message,
+                content=payload.message,
+                thread_id=thread_id,
+                user_id=verified_user,
+                is_authenticated=is_authenticated,
+            )
+            if result.get("status") != "error":
+                def _touch_record() -> None:
+                    db = database()
+                    try:
+                        with db.transaction() as session:
+                            touch_conversation(session, thread_id, verified_user, user_message=payload.message)
+                    finally:
+                        db.dispose()
+
+                try:
+                    await asyncio.to_thread(_touch_record)
+                except Exception as exc:
+                    logger.warning("Failed to touch conversation record (%s)", exc)
+            return result
+        finally:
+            execution.lock.release()
+            execution.last_active_at = time.time()
+            async with _executions_lock:
+                if execution.queue_count <= 0 and not execution.lock.locked():
+                    _conversation_executions.pop(key, None)
+
+    worker_task = asyncio.create_task(_worker_coroutine())
+    execution.active_task = worker_task
+
     try:
-        result = await asyncio.to_thread(
-            run_agent_message, content=payload.message, thread_id=thread_id,
-            user_id=verified_user, is_authenticated=is_authenticated,
+        result = await asyncio.wait_for(
+            asyncio.shield(worker_task),
+            timeout=agent_config.execution_timeout_sec,
         )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Agent execution timed out after %.1fs for %s:%s (underlying worker continues in background)",
+            agent_config.execution_timeout_sec,
+            verified_user,
+            thread_id,
+        )
+        if not started_event.is_set():
+            logger.info("Cancelling queued execution for %s:%s that never acquired lock", verified_user, thread_id)
+            worker_task.cancel()
+        return ChatResponse(
+            status="timeout",
+            thread_id=thread_id,
+            reply="Yêu cầu xử lý vượt quá thời gian tối đa cho phép (Timeout). Vui lòng thử lại với câu hỏi cụ thể hơn.",
+            tools_called=[],
+            sources=[],
+            provider=None,
+            model=None,
+            failover_occurred=False,
+            failover_level=0,
+        )
+    except asyncio.CancelledError:
+        logger.info("Agent HTTP request cancelled (client disconnect / Stop) for %s:%s", verified_user, thread_id)
+        if not started_event.is_set():
+            worker_task.cancel()
+        raise
     except Exception as exc:
         logger.error('Agent unavailable (%s)', type(exc).__name__)
         raise HTTPException(status_code=503, detail='Agent/history service is unavailable.') from None
+    finally:
+        await _release_conversation_execution(key, execution)
 
     if result.get('status') == 'error':
         raise HTTPException(status_code=503, detail='Agent/history service is unavailable.')
-
-    # Update conversation activity & title in background thread
-    def _touch_record() -> None:
-        db = database()
-        try:
-            with db.transaction() as session:
-                touch_conversation(session, thread_id, verified_user, user_message=payload.message)
-        finally:
-            db.dispose()
-
-    try:
-        await asyncio.to_thread(_touch_record)
-    except Exception as exc:
-        raise registry_unavailable(exc) from None
 
     status = result.get("status", "success")
     if status in ("error", "llm_unavailable"):

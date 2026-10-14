@@ -1946,7 +1946,12 @@ body {
   padding: 10px 22px;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
+}
+
+.btn-send.is-stopping {
+  padding: 10px 20px;
 }
 
 /* Voice & Multi-Model Fallback UI */
