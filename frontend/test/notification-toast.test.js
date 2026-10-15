@@ -29,7 +29,9 @@ test('fresh polling bypasses API cache', () => {
   assert.match(watcher, /forceRefresh: true/);
 });
 test('deduplication and historical baseline remain active', () => {
-  assert.match(watcher, /sessionStorage/);
+  assert.match(watcher, /localStorage/);
+  assert.match(watcher, /navigator.locks.request/);
+  assert.match(watcher, /evaluateWatchlistPopupBatch/);
   assert.match(watcher, /initializedRef/);
   assert.match(watcher, /seen\.has/);
   assert.match(watcher, /AbortController/);
