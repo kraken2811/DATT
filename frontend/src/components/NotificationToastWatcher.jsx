@@ -1,192 +1,89 @@
 import { useEffect, useRef } from 'react';
 import { useToast } from '../context/ToastContext';
-import { fetchAlerts } from '../api/alerts';
+import { fetchEvents } from '../api/events';
 
-const STORAGE_KEY = 'datt_notified_email_alerts';
-const POLLING_INTERVAL_MS = 7000; // 7 seconds (bounded between 5-10s)
+const STORAGE_KEY = 'datt_realtime_watchlist_event_ids';
+const POLLING_INTERVAL_MS = 2000;
+const MAX_SEEN = 500;
 
-function getStoredSignatures() {
-  try {
-    const raw = sessionStorage.getItem(STORAGE_KEY);
-    return raw ? new Set(JSON.parse(raw)) : new Set();
-  } catch {
-    return new Set();
-  }
+function readSeen() {
+  try { return new Set(JSON.parse(sessionStorage.getItem(STORAGE_KEY) || '[]')); }
+  catch { return new Set(); }
 }
-
-function persistSignature(signature) {
-  try {
-    const set = getStoredSignatures();
-    set.add(signature);
-    // Keep bounded to last 150 entries to prevent memory growth
-    const arr = Array.from(set);
-    if (arr.length > 150) arr.splice(0, arr.length - 150);
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
-  } catch {}
+function saveSeen(seen) {
+  try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify([...seen].slice(-MAX_SEEN))); }
+  catch { /* storage is optional */ }
+}
+function alertLabel(event) {
+  if (event.event_type === 'face') {
+    return event.target_name ? `Người: ${event.target_name}` : null;
+  }
+  if (event.event_type === 'plate') {
+    const plate = String(event.plate || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return plate ? `Xe: ${plate}` : null;
+  }
+  return null;
 }
 
 export function NotificationToastWatcher() {
   const { showToast } = useToast();
-  const knownAlertsRef = useRef(new Map());
-  const isInitializedRef = useRef(false);
+  const initializedRef = useRef(false);
+  const seenRef = useRef(readSeen());
   const inFlightRef = useRef(false);
-  const abortControllerRef = useRef(null);
-
   useEffect(() => {
-    let timerId = null;
-    let isMounted = true;
-
-    async function checkNotificationUpdates() {
-      if (inFlightRef.current || !isMounted) return;
-      if (document.hidden) return; // Pause polling when document tab is hidden
-
+    let active = true;
+    let timer;
+    let controller;
+    async function checkEvents() {
+      if (!active || inFlightRef.current || document.hidden) return;
       inFlightRef.current = true;
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
-
+      controller = new AbortController();
       try {
-        const resp = await fetchAlerts({ page: 1, page_size: 20 }, controller.signal, {
-          cacheTtlMs: 0,
-          forceRefresh: true,
-        });
-
-        if (!isMounted || !resp || !Array.isArray(resp.alerts)) {
+        const resp = await fetchEvents({
+          page: 1, page_size: 50, watchlist_match: 'true',
+          include_total: false, sort: 'desc',
+        }, controller.signal, { cacheTtlMs: 0, forceRefresh: true });
+        if (!active || !Array.isArray(resp?.events)) return;
+        const events = resp.events;
+        const seen = seenRef.current;
+        if (!initializedRef.current) {
+          events.forEach(evt => seen.add(evt.event_id));
+          initializedRef.current = true;
+          saveSeen(seen);
           return;
         }
-
-        const alerts = resp.alerts;
-
-        // Baseline initialization: Absorb all historical records without firing toasts
-        if (!isInitializedRef.current) {
-          isInitializedRef.current = true;
-          for (const alert of alerts) {
-            const status = (alert.status || '').toUpperCase();
-            const retryCount = alert.retry_count ?? 0;
-            const retryScheduled = Boolean(alert.retry_scheduled);
-            knownAlertsRef.current.set(alert.id, {
-              status,
-              retry_count: retryCount,
-              retry_scheduled: retryScheduled,
-            });
-
-            // Mark existing completed/failed states in session storage as already acknowledged
-            if (status === 'SENT') {
-              persistSignature(`${alert.id}:SENT`);
-            } else if (status === 'FAILED') {
-              if (retryScheduled) {
-                persistSignature(`${alert.id}:RETRY:${retryCount}`);
-              } else {
-                persistSignature(`${alert.id}:EXHAUSTED:${retryCount}`);
-              }
-            }
-          }
-          return;
+        const fresh = events.filter(evt => !seen.has(evt.event_id));
+        // All event ids are acknowledged once observed; never re-alert on missing labels.
+        for (const evt of fresh) seen.add(evt.event_id);
+        saveSeen(seen);
+        for (const evt of fresh.reverse()) {
+          const label = alertLabel(evt);
+          if (!label) continue;
+          const camera = evt.camera_id || 'Không xác định';
+          showToast(`Phát hiện Watchlist — ${label}, Camera: ${camera}`, 'warning');
         }
-
-        // Subsequent polls: Detect relevant status transitions
-        const notifiedSet = getStoredSignatures();
-
-        for (const alert of alerts) {
-          const currStatus = (alert.status || '').toUpperCase();
-          const currRetryCount = alert.retry_count ?? 0;
-          const currRetryScheduled = Boolean(alert.retry_scheduled);
-          const prev = knownAlertsRef.current.get(alert.id);
-
-          const objectName = alert.target_name || alert.plate_number || 'Không xác định';
-          const cameraName = alert.camera_name || alert.camera_id || 'Không xác định';
-
-          // 1. Transition to SENT (from PENDING, FAILED, or newly created in session)
-          if (currStatus === 'SENT') {
-            const signature = `${alert.id}:SENT`;
-            const isNewTransition = !prev || prev.status !== 'SENT';
-
-            if (isNewTransition && !notifiedSet.has(signature)) {
-              persistSignature(signature);
-              showToast(
-                `Email cảnh báo đã được gửi — Đối tượng: ${objectName}, Camera: ${cameraName}`,
-                'success'
-              );
-            }
-          }
-          // 2. Transition to FAILED with retry still scheduled -> Warning Toast
-          else if (currStatus === 'FAILED' && currRetryScheduled) {
-            const signature = `${alert.id}:RETRY:${currRetryCount}`;
-            const isNewTransition = !prev || prev.status === 'PENDING' || (prev.status === 'FAILED' && currRetryCount > prev.retry_count);
-
-            if (isNewTransition && !notifiedSet.has(signature)) {
-              persistSignature(signature);
-              const maxRetries = alert.max_retries || 3;
-              const retryLabel = currRetryCount > 0 ? `lần ${currRetryCount}/${maxRetries}` : 'hệ thống đang thử lại';
-              showToast(
-                `Gửi email cảnh báo thất bại, đang thử lại (${retryLabel}) — Đối tượng: ${objectName}, Camera: ${cameraName}`,
-                'warning'
-              );
-            }
-          }
-          // 3. Transition to FAILED with retries exhausted (or not retryable) -> Error Toast
-          else if (currStatus === 'FAILED' && !currRetryScheduled) {
-            const signature = `${alert.id}:EXHAUSTED:${currRetryCount}`;
-            const isNewTransition = !prev || prev.status === 'PENDING' || (prev.status === 'FAILED' && prev.retry_scheduled);
-
-            if (isNewTransition && !notifiedSet.has(signature)) {
-              persistSignature(signature);
-              showToast(
-                `Không thể gửi email cảnh báo (quá số lần thử) — Đối tượng: ${objectName}, Camera: ${cameraName}`,
-                'error'
-              );
-            }
-          }
-          // 4. PENDING or SUPPRESSED: Do not show toast (as required)
-
-          // Update tracking map
-          knownAlertsRef.current.set(alert.id, {
-            status: currStatus,
-            retry_count: currRetryCount,
-            retry_scheduled: currRetryScheduled,
-          });
-        }
-      } catch (err) {
-        // Silently handle 401, 403, 503, network errors without displaying false toasts
-        if (err.name !== 'AbortError') {
-          // Polling will safely retry on next cycle
+      } catch (error) {
+        if (error.name !== 'AbortError') {
+          // Preserve the last baseline and retry without false positives.
         }
       } finally {
         inFlightRef.current = false;
-        abortControllerRef.current = null;
+        controller = null;
       }
     }
-
-    // Schedule regular polling
-    function scheduleNext() {
-      timerId = setTimeout(async () => {
-        if (!isMounted) return;
-        await checkNotificationUpdates();
-        if (isMounted) scheduleNext();
-      }, POLLING_INTERVAL_MS);
+    async function tick() {
+      await checkEvents();
+      if (active) timer = setTimeout(tick, POLLING_INTERVAL_MS);
     }
-
-    // Run initial baseline check immediately on mount
-    checkNotificationUpdates().then(() => {
-      if (isMounted) scheduleNext();
-    });
-
-    // Re-check when document tab becomes visible
-    function handleVisibilityChange() {
-      if (!document.hidden && isMounted) {
-        checkNotificationUpdates();
-      }
-    }
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
+    tick();
+    const visible = () => { if (!document.hidden) checkEvents(); };
+    document.addEventListener('visibilitychange', visible);
     return () => {
-      isMounted = false;
-      if (timerId) clearTimeout(timerId);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
+      active = false;
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', visible);
+      controller?.abort();
     };
   }, [showToast]);
-
   return null;
 }
