@@ -3,7 +3,7 @@ from datetime import datetime,timezone
 from uuid import UUID
 import json
 from sqlalchemy import select,union_all,literal,cast,String,Float,Boolean,func,case,or_
-from src.db.models import FaceEvent,PlateEvent,VehicleEvent,VehiclePassage,BusinessEvent,DetectionEvent,Notification,VehicleWatchlistResult
+from src.db.models import FaceEvent,PlateEvent,VehicleEvent,VehiclePassage,BusinessEvent,DetectionEvent,Notification,VehicleWatchlistResult,Target
 from src.watchlists.vehicles import normalize_plate
 
 KINDS=('face','plate','vehicle','passage','business')
@@ -15,7 +15,7 @@ def projection():
     notification=lambda kind,eid: select(func.max(case((Notification.status=='failed',4),(Notification.status=='pending',3),
         (Notification.status=='sent',2),(Notification.status=='suppressed',1),else_=0))).where(
         (Notification.event_id==eid) if kind=='face' else (Notification.plate_event_id==eid)).correlate_except(Notification).scalar_subquery()
-    def columns(model,kind,ts,camera,obj,target=None,plate=None,confidence=None,matched=None,evidence=None,notice=None,semantic=None,metadata=None,color=None):
+    def columns(model,kind,ts,camera,obj,target=None,plate=None,confidence=None,matched=None,evidence=None,notice=None,semantic=None,metadata=None,color=None,target_name=None):
         return [string(model.id).label('id'),literal(kind).label('event_type'),ts.label('timestamp'),string(camera).label('camera_id'),
             literal(obj).label('object_type'),string(target).label('target_id') if target is not None else empty().label('target_id'),
             string(plate).label('plate').label('plate') if plate is not None else empty().label('plate'),
@@ -25,7 +25,8 @@ def projection():
             notice.label('notification_rank') if notice is not None else literal(0).label('notification_rank'),
             (semantic if semantic is not None else literal(kind)).label('semantic_type'),
             (string(metadata) if metadata is not None else literal('{}')).label('metadata'),
-            (string(color) if color is not None else empty()).label('detected_color')]
+            (string(color) if color is not None else empty()).label('detected_color'),
+            (string(target_name) if target_name is not None else empty()).label('target_name')]
     def marker(model, field):
         return select(field).where(BusinessEvent.id==model.id).correlate(model).scalar_subquery()
     def grouped(model):
@@ -33,11 +34,14 @@ def projection():
             BusinessEvent.event_type=='VEHICLE_WATCHLIST_MATCH').correlate(model).exists()
     old_camera=select(Notification.camera_id).where(Notification.event_id==FaceEvent.id).order_by(Notification.created_at).limit(1).correlate(FaceEvent).scalar_subquery()
     face=select(*columns(FaceEvent,'face',FaceEvent.created_at,func.coalesce(FaceEvent.camera_id,string(DetectionEvent.camera_id),old_camera),'person',
-        target=FaceEvent.target_id,confidence=FaceEvent.similarity,matched=FaceEvent.decision=='FACE_MATCH',evidence=FaceEvent.face_crop_path,notice=notification('face',FaceEvent.id),
+        target=FaceEvent.target_id,
+        target_name=select(Target.name).where(Target.id==FaceEvent.target_id).correlate(FaceEvent).scalar_subquery(),
+        confidence=FaceEvent.similarity,matched=FaceEvent.decision=='FACE_MATCH',evidence=FaceEvent.face_crop_path,notice=notification('face',FaceEvent.id),
         semantic=func.coalesce(marker(FaceEvent,BusinessEvent.event_type),literal('face')),
         metadata=marker(FaceEvent,BusinessEvent.event_metadata))).outerjoin(DetectionEvent,FaceEvent.detection_event_id==DetectionEvent.id)
     plate=select(*columns(PlateEvent,'plate',PlateEvent.created_at,func.coalesce(VehicleWatchlistResult.camera_id,string(DetectionEvent.camera_id)),'plate',
-        target=VehicleWatchlistResult.watchlist_id,plate=PlateEvent.plate_text,confidence=PlateEvent.confidence,
+        target=VehicleWatchlistResult.watchlist_id,
+        plate=func.coalesce(PlateEvent.normalized_plate,PlateEvent.plate_text),confidence=PlateEvent.confidence,
         matched=VehicleWatchlistResult.decision=='MATCH',evidence=func.coalesce(PlateEvent.plate_crop_path,VehicleEvent.vehicle_image_path),notice=notification('plate',PlateEvent.id),
         semantic=func.coalesce(marker(PlateEvent,BusinessEvent.event_type),literal('plate')),
         metadata=marker(PlateEvent,BusinessEvent.event_metadata),color=VehicleEvent.vehicle_color)).join(
@@ -75,7 +79,8 @@ def serialize(row):
         watchlist_vehicle_color=metadata.get('watchlist_vehicle_color'),
         vehicle_type=metadata.get('vehicle_type'), track_id=metadata.get('track_id'),
         match_type=metadata.get('match_type'),timestamp=row.timestamp.isoformat(),camera_id=row.camera_id,
-        object_type=row.object_type,target_id=str(UUID(row.target_id)) if row.target_id else None,plate=row.plate,confidence=row.confidence,
+        object_type=row.object_type,target_id=str(UUID(row.target_id)) if row.target_id else None,
+        target_name=row.target_name,plate=row.plate,confidence=row.confidence,
         similarity=row.confidence if row.event_type=='face' else None,watchlist_match=bool(row.watchlist_match),
         evidence={'key':row.evidence_key,'url':'/api/event_center/events/'+event_id+'/evidence'} if row.evidence_key else None,
         notification_status={4:'failed',3:'pending',2:'sent',1:'suppressed'}.get(row.notification_rank))
