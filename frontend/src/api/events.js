@@ -1,6 +1,6 @@
 import { apiRequest } from './client';
 
-export async function fetchEvents(params = {}, signal = null) {
+export async function fetchEvents(params = {}, signal = null, options = {}) {
   const query = new URLSearchParams();
   if (params.page) query.set('page', params.page);
   if (params.page_size) query.set('page_size', params.page_size);
@@ -24,8 +24,9 @@ export async function fetchEvents(params = {}, signal = null) {
   const qs = query.toString();
   return apiRequest(`/api/event_center/events${qs ? `?${qs}` : ''}`, {
     signal,
-    cacheTtlMs: 10000,
-    staleTtlMs: 300000,
+    cacheTtlMs: options.cacheTtlMs ?? 10000,
+    staleTtlMs: options.staleTtlMs ?? 300000,
+    forceRefresh: options.forceRefresh ?? false,
   });
 }
 
