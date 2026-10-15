@@ -616,8 +616,8 @@ class StreamRequestHandler(BaseHTTPRequestHandler):
                             te_repo.create(
                                 target_id=db_t.id,
                                 embedding=target.face_embedding,
-                                model_name="arcface",
-                                model_version="1.0",
+                                model_name=target.embedding_model,
+                                model_version="cvpr2022_ir50_ms1mv2",
                                 source_image_path=source_image_path,
                             )
                 except Exception as db_exc:
