@@ -286,11 +286,28 @@ class TargetManager:
         source_image_path: str | None = None,
         db_id: str | None = None,
         embedding_model: str = 'adaface_ir50_ms1mv2',
+        is_selected: bool = True,
     ) -> Target:
         """Add or restore an existing target loaded from database."""
+        # Convert embedding to clean float32 512-dim numpy array
+        if face_embedding is not None:
+            try:
+                face_embedding = np.asarray(face_embedding, dtype=np.float32).flatten()
+                if len(face_embedding) != 512 or not np.isfinite(face_embedding).all():
+                    logger.warning("[TARGET_RESTORE] Invalid embedding vector for target %s (len=%d)", target_id, len(face_embedding))
+                    face_embedding = None
+                else:
+                    norm = float(np.linalg.norm(face_embedding))
+                    if norm > 0:
+                        face_embedding = face_embedding / norm
+            except Exception as e:
+                logger.warning("[TARGET_RESTORE] Failed to parse embedding for %s: %s", target_id, e)
+                face_embedding = None
+
+        had_face = face_embedding is not None
+
         # Old ArcFace vectors cannot be compared to AdaFace. Convert once into the
         # in-memory target cache from the persisted original, without rewriting DB history.
-        had_face = face_embedding is not None
         if had_face and embedding_model != 'adaface_ir50_ms1mv2':
             face_embedding = None
             if source_image_path:
@@ -302,6 +319,22 @@ class TargetManager:
                 except Exception:
                     logger.warning('[FACE_ENROLLMENT] Legacy target requires re-enrollment: %s', target_id)
             embedding_model = 'adaface_ir50_ms1mv2' if face_embedding is not None else 'unavailable'
+        elif face_embedding is None and source_image_path:
+            # Reconstruct embedding from source image if missing from TargetEmbedding
+            try:
+                from src.storage import get_storage
+                with get_storage().open(source_image_path) as source:
+                    image = cv2.imdecode(np.frombuffer(source.read(), dtype=np.uint8), cv2.IMREAD_COLOR)
+                face_embedding = AdaptiveFacePipeline().enroll_original(image)
+                if face_embedding is not None:
+                    embedding_model = 'adaface_ir50_ms1mv2'
+            except Exception:
+                logger.debug('[FACE_ENROLLMENT] Re-enrollment from source image unavailable for %s', target_id)
+
+        has_face = face_embedding is not None
+        if not has_face and clothing_color is None:
+            embedding_model = 'unavailable'
+
         with self._lock:
             target = Target(
                 id=target_id,
@@ -309,10 +342,11 @@ class TargetManager:
                 face_embedding=face_embedding,
                 clothing_color=clothing_color,
                 face_threshold=face_threshold,
-                has_face=had_face,
+                has_face=has_face,
                 embedding_model=embedding_model,
                 source_image_path=source_image_path,
                 db_id=db_id or target_id,
+                is_selected=is_selected,
             )
             self._targets[target_id] = target
             return target
@@ -534,6 +568,14 @@ class TargetMatcher:
             return {}
 
         export_if_requested(frame, tracks, frame_id, native_frame, face_embedder)
+
+        if not self.manager.list_targets() and not getattr(self, '_initial_restore_attempted', False):
+            self._initial_restore_attempted = True
+            try:
+                from src.recognition.target_selection import restore_persisted_targets
+                restore_persisted_targets()
+            except Exception:
+                pass
 
         targets = [t for t in self.manager.list_targets() if getattr(t, "is_selected", True) and t.embedding_model != "unavailable"]
         if not targets or tracks is None:

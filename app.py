@@ -144,6 +144,14 @@ def run_pipeline(
 
     fps_meter = FPSMeter(window_seconds=1.0)
 
+    # Preload active Face Watchlist targets from database into recognition memory
+    try:
+        from src.recognition.target_selection import restore_persisted_targets
+        restored_count = restore_persisted_targets()
+        logger.info("[AI_PIPELINE] Initialized target memory: %d active target(s) loaded", restored_count)
+    except Exception as exc:
+        logger.warning("[AI_PIPELINE] Could not initialize targets from database: %s", exc)
+
     # Start MJPEG Video Stream Server if in UI mode
     server = None
     if ui_mode:

@@ -350,6 +350,7 @@ class EventManager:
                     if (bx2 - bx1) >= 20 and (face_y2 - by1) >= 20:
                         face_crop = frame[by1:face_y2, bx1:bx2].copy()
 
+            confirmed_iso = now.isoformat()
             dto = FaceEventDTO(
                 id=uuid4(),
                 track_id=int(tid),
@@ -360,6 +361,7 @@ class EventManager:
                 decision=decision,
                 video_source_id=v_src_uuid,
                 frame_id=frame_id,
+                metadata={"event_confirmed_at": confirmed_iso},
                 created_at=now,
             )
             self.db_worker.enqueue_face_event(dto, face_crop=face_crop, is_critical=True)
@@ -374,6 +376,7 @@ class EventManager:
                 "camera_id": camera_id,
                 "video_source_id": str(v_src_uuid) if v_src_uuid else None,
                 "timestamp": now.timestamp(),
+                "event_confirmed_at": confirmed_iso,
             }
             emitted.append(ev)
 

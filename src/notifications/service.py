@@ -28,13 +28,15 @@ class NotificationService:
         # A failed attempt awaiting retry still reserves the original cooldown.
         return or_(Notification.status.in_(('pending', 'sent')), self._retryable())
 
-    def enqueue_face(self, session, event, dto):
+    def enqueue_face(self, session, event, dto, event_persisted_at=None):
         if event.decision != 'FACE_MATCH' or not event.target_id:
             return
         # Serialize cooldown reservations across PostgreSQL producer processes.
         target = session.scalar(select(Target).where(Target.id == event.target_id).with_for_update())
         if target is None: return
         now = utc_now()
+        confirmed_at = getattr(dto, "metadata", {}).get('event_confirmed_at') or event.created_at.isoformat()
+        persisted_at = event_persisted_at or now.isoformat()
         for recipient in self.config.recipients or ('',):
             existing = session.scalar(select(Notification.id).where(
                 Notification.event_id == event.id, Notification.channel == 'email',
@@ -57,14 +59,17 @@ class NotificationService:
                     'event_id': str(event.id), 'target_id': str(event.target_id),
                     'target_name': dto.target_name or target.name, 'camera_id': dto.camera_id,
                     'event_time': timestamp.astimezone(timezone.utc).isoformat(),
+                    'event_confirmed_at': confirmed_at,
+                    'event_persisted_at': persisted_at,
                     'similarity': event.similarity, 'evidence_key': event.face_crop_path}))
             session.flush()
 
-    def enqueue_vehicle(self, session, event, match):
+    def enqueue_vehicle(self, session, event, match, event_persisted_at=None):
         if match.decision != 'MATCH' or not match.watchlist_id or match.plate_event_id != event.id: return
         target=session.scalar(select(VehicleWatchlist).where(VehicleWatchlist.id==match.watchlist_id).with_for_update())
         if target is None or target.status != 'active': return
         now=utc_now()
+        persisted_at = event_persisted_at or now.isoformat()
         for recipient in self.config.recipients or ('',):
             if session.scalar(select(Notification.id).where(Notification.plate_event_id==event.id,
                 Notification.channel=='email',Notification.recipient==recipient)): continue
@@ -79,6 +84,8 @@ class NotificationService:
                     'alert_type':'VEHICLE_WATCHLIST_MATCH','event_id':str(event.id),
                     'plate_number':match.normalized_plate,'display_name':match.display_name,
                     'camera_id':match.camera_id,'event_time':event.created_at.isoformat(),
+                    'event_confirmed_at':event.created_at.isoformat(),
+                    'event_persisted_at':persisted_at,
                     'confidence':event.confidence,'evidence_key':event.plate_crop_path}))
             session.flush()
 

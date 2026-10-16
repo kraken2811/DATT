@@ -145,6 +145,13 @@ def get_backend_http_client() -> httpx.AsyncClient:
 def startup_services() -> None:
     """Initialize background services on application startup."""
     try:
+        from src.recognition.target_selection import restore_persisted_targets
+        restored = restore_persisted_targets()
+        logger.info("[TARGET_RESTORE] Startup restored %d active target(s) into memory", restored)
+    except Exception as exc:
+        logger.warning("[TARGET_RESTORE] Could not auto-restore targets on startup: %s", exc)
+
+    try:
         if os.environ.get("DATT_DISABLE_SCHEDULER") != "1":
             from src.analytics.scheduler import daily_forecast_scheduler
             daily_forecast_scheduler.start()
@@ -1263,6 +1270,8 @@ async def register_target(request: Request) -> JSONResponse:
                             reference_metadata={
                                 "clothing_color": target.clothing_color,
                                 "threshold": target.face_threshold,
+                                "selected": True,
+                                "has_embedding": target.face_embedding is not None,
                             },
                             active=True,
                         )

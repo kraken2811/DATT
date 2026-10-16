@@ -472,19 +472,32 @@ class DatabaseWorker:
                             face_crop_path=f_path,
                             created_at=f_dto.created_at,
                         )
+                        persisted_now = datetime.now(timezone.utc)
+                        persisted_iso = persisted_now.isoformat()
+                        confirmed_iso = f_dto.metadata.get("event_confirmed_at") or f_dto.created_at.isoformat()
+                        confirm_to_persist_ms = max(0.0, (persisted_now - f_dto.created_at).total_seconds() * 1000.0)
+
                         event_repo.insert_idempotent(
                             id=f_dto.id, camera_id=f_dto.camera_id,
                             video_source_id=f_dto.video_source_id, track_id=f_dto.track_id,
                             event_type='FACE_WATCHLIST_MATCH', event_time=f_dto.created_at,
                             idempotency_key=f'{f_dto.id}:FACE_WATCHLIST_MATCH',
-                            metadata={'watchlist_target_id':str(f_dto.target_id),
-                                      'similarity':f_dto.similarity,'snapshot_path':f_path,
-                                      'location':f_dto.metadata.get('location')})
+                            metadata={'watchlist_target_id': str(f_dto.target_id),
+                                      'similarity': f_dto.similarity, 'snapshot_path': f_path,
+                                      'location': f_dto.metadata.get('location'),
+                                      'event_confirmed_at': confirmed_iso,
+                                      'event_persisted_at': persisted_iso})
+
+                        logger.info(
+                            "[LATENCY_PERSISTENCE] face_event_id=%s target_name='%s' camera_id=%s confirmed_at=%s persisted_at=%s latency_ms=%.1f",
+                            f_dto.id, f_dto.target_name, f_dto.camera_id, confirmed_iso, persisted_iso, confirm_to_persist_ms
+                        )
+
                         # Same commit as FaceEvent; delivery cannot observe rolled-back events.
                         # A notification schema/config problem must not lose the FaceEvent.
                         try:
                             with session.begin_nested():
-                                self.notifications.enqueue_face(session, face_event, f_dto)
+                                self.notifications.enqueue_face(session, face_event, f_dto, event_persisted_at=persisted_iso)
                         except Exception:
                             logger.warning("[NOTIFICATIONS] enqueue failed; check migration/configuration")
 

@@ -1,4 +1,5 @@
 """Read-only Alert Center projection of the existing transactional outbox."""
+from datetime import datetime, timezone
 from uuid import UUID
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -114,12 +115,19 @@ def query(session, params, ident=None):
             and item.error in RETRY_ERRORS
             and item.retry_count < email_cfg.max_retries
         )
+        payload = item.payload or {}
+        event_confirmed_at = payload.get('event_confirmed_at') or item.created_at.isoformat()
+        event_persisted_at = payload.get('event_persisted_at') or item.created_at.isoformat()
+        alert_available_at = datetime.now(timezone.utc).isoformat()
         alerts.append(dict(
             id=str(item.id), event_id=event_id, event_center_id=event_key,
             event_type=EVENT_TYPES[0 if is_face else 1], camera_id=item.camera_id,
             camera_name=names.get(item.camera_id), recipient_email=item.recipient,
             channel=item.channel.upper(), status=item.status.upper(),
             created_at=item.created_at.isoformat(), sent_at=item.sent_at.isoformat() if item.sent_at else None,
+            event_confirmed_at=event_confirmed_at,
+            event_persisted_at=event_persisted_at,
+            alert_available_at=alert_available_at,
             error_code=item.error if item.error in ERROR_MESSAGES else ('delivery_failed' if item.error else None),
             error_message=safe_error(item.error), retry_count=item.retry_count,
             retry_scheduled=can_retry, max_retries=email_cfg.max_retries,
