@@ -110,8 +110,9 @@ def set_crowd_threshold(threshold: int, db: Any | None = None) -> int:
                 for extra in extra_rows:
                     session.delete(extra)
             session.flush()
-    except Exception as exc:
-        logger.warning("Could not persist crowd threshold to database: %s", exc)
+    except Exception:
+        logger.exception("Could not persist crowd threshold to database")
+        raise
 
     with _settings_lock:
         _cached_crowd_threshold = threshold

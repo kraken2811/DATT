@@ -202,3 +202,83 @@ def test_deterministic_singleton_persistence():
     reset_settings_cache()
     assert get_crowd_threshold(db=db) == 44
 
+
+def test_persistence_failure_does_not_update_cache():
+    """Required Test Case A: Database transaction failure re-raises and preserves in-memory cache."""
+    from unittest.mock import MagicMock
+
+    set_crowd_threshold(50)
+    assert get_crowd_threshold() == 50
+
+    mock_db = MagicMock()
+    mock_db.transaction.side_effect = RuntimeError("Simulated DB connection failure")
+
+    with pytest.raises(RuntimeError, match="Simulated DB connection failure"):
+        set_crowd_threshold(20, db=mock_db)
+
+    # Invariant: Cache must NEVER represent a value that failed to persist
+    assert get_crowd_threshold() == 50
+
+
+def test_api_patch_db_failure_returns_error_and_preserves_state():
+    """Required Test Case B: DB write failure during PATCH /api/settings returns non-2xx and preserves state."""
+    from unittest.mock import patch
+    from sqlalchemy import select
+    from src.db.database import Database
+    from src.db.models import SystemSetting
+
+    # Initial persisted value: 50
+    set_crowd_threshold(50)
+    assert get_crowd_threshold() == 50
+
+    client = TestClient(app)
+
+    with patch("src.db.database.Database.transaction") as mock_transaction:
+        mock_transaction.side_effect = RuntimeError("Simulated DB write failure")
+
+        resp = client.patch("/api/settings", json={"crowd_threshold": 20})
+        # HTTP response is not 2xx (returns 500)
+        assert resp.status_code != 200
+        assert resp.status_code == 500
+        # API does not report crowd_threshold = 20 as successfully saved
+        assert resp.json().get("crowd_threshold") != 20
+
+    # In-memory cache remains unchanged (50)
+    assert get_crowd_threshold() == 50
+
+    # Persisted value remains unchanged in DB (50)
+    db = Database()
+    with db.transaction() as session:
+        setting = session.scalars(select(SystemSetting)).first()
+        assert setting is not None
+        assert setting.crowd_threshold == 50
+
+
+def test_successful_save_persists_to_db_and_cache():
+    """Required Test Case C: Successful save (50 -> 20) updates DB, cache, and returns 20."""
+    from sqlalchemy import select
+    from src.db.database import Database
+    from src.db.models import SystemSetting
+
+    # Initial persisted value: 50
+    set_crowd_threshold(50)
+    assert get_crowd_threshold() == 50
+
+    client = TestClient(app)
+    resp = client.patch("/api/settings", json={"crowd_threshold": 20})
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+    assert resp.json()["crowd_threshold"] == 20
+
+    # Cache is updated to 20
+    assert get_crowd_threshold() == 20
+
+    # DB is updated to 20
+    db = Database()
+    with db.transaction() as session:
+        setting = session.scalars(select(SystemSetting)).first()
+        assert setting is not None
+        assert setting.crowd_threshold == 20
+
+

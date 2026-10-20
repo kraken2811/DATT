@@ -127,7 +127,14 @@ async def update_settings(request: Request):
     if not isinstance(val, int) or isinstance(val, bool) or val < 1:
         raise HTTPException(status_code=422, detail="crowd_threshold must be an integer >= 1")
 
-    saved_val = set_crowd_threshold(val)
+    try:
+        saved_val = set_crowd_threshold(val)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Failed to persist settings: %s", exc)
+        raise HTTPException(status_code=500, detail="Could not persist settings") from exc
+
     return JSONResponse(content={"status": "ok", "crowd_threshold": saved_val})
 
 
