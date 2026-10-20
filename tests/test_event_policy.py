@@ -16,37 +16,37 @@ from src.event_center.service import query
 
 def test_crowd_boundaries_and_timestamp():
     s = ThresholdEpisodes()
-    assert s.people('a', 40, 0, 1000) is None
-    assert s.people('a', 40, 500, 1500) is None
-    assert s.people('a', 41, 600, 1600) is None
-    assert s.people('a', 41, 779, 1779) is None
-    event = s.people('a', 41, 785, 1785)
+    assert s.people('a', 40, 0, 1000, threshold=41) is None
+    assert s.people('a', 40, 500, 1500, threshold=41) is None
+    assert s.people('a', 41, 600, 1600, threshold=41) is None
+    assert s.people('a', 41, 779, 1779, threshold=41) is None
+    event = s.people('a', 41, 785, 1785, threshold=41)
     assert event['timestamp'] == 1780
     assert event['duration_seconds'] == 185
-    assert s.people('a', 50, 1000, 2000) is None
+    assert s.people('a', 50, 1000, 2000, threshold=41) is None
 
 
 def test_crowd_continuity_reset_and_future_episode():
     s = ThresholdEpisodes()
-    assert s.people('a', 41, 0, 1000) is None
-    assert s.people('a', 41, 170, 1170) is None
-    assert s.people('a', 40, 171, 1171) is None
-    assert s.people('a', 45, 172, 1172) is None
-    assert s.people('a', 45, 351, 1351) is None
-    first = s.people('a', 45, 352, 1352)
+    assert s.people('a', 41, 0, 1000, threshold=41) is None
+    assert s.people('a', 41, 170, 1170, threshold=41) is None
+    assert s.people('a', 40, 171, 1171, threshold=41) is None
+    assert s.people('a', 45, 172, 1172, threshold=41) is None
+    assert s.people('a', 45, 351, 1351, threshold=41) is None
+    first = s.people('a', 45, 352, 1352, threshold=41)
     assert first
-    assert s.people('a', 40, 353, 1353) is None
-    assert s.people('a', 41, 354, 1354) is None
-    second = s.people('a', 41, 534, 1534)
+    assert s.people('a', 40, 353, 1353, threshold=41) is None
+    assert s.people('a', 41, 354, 1354, threshold=41) is None
+    second = s.people('a', 41, 534, 1534, threshold=41)
     assert second and second['episode'] != first['episode']
 
 
 def test_camera_location_isolation_and_congestion_edges():
     s = ThresholdEpisodes()
-    s.people('a', 41, 0, 1000, 'zone1')
-    assert s.people('b', 41, 180, 1180, 'zone1') is None
-    assert s.people('a', 41, 180, 1180, 'zone2') is None
-    assert s.people('a', 41, 180, 1180, 'zone1')
+    s.people('a', 41, 0, 1000, 'zone1', threshold=41)
+    assert s.people('b', 41, 180, 1180, 'zone1', threshold=41) is None
+    assert s.people('a', 41, 180, 1180, 'zone2', threshold=41) is None
+    assert s.people('a', 41, 180, 1180, 'zone1', threshold=41)
     assert s.congestion('a', 40, 0, 1000) is None
     first = s.congestion('a', 41, 1, 1001)
     assert first and first['timestamp'] == 1001
@@ -54,6 +54,8 @@ def test_camera_location_isolation_and_congestion_edges():
     assert s.congestion('b', 18, 2, 1002) is None
     s.congestion('a', 40, 3, 1003)
     assert s.congestion('a', 41, 4, 1004)['episode'] != first['episode']
+
+
 
 
 @pytest.fixture

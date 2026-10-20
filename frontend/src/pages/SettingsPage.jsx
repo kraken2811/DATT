@@ -5,7 +5,7 @@ import { useToast } from '../context/ToastContext';
 import { apiRequest, getBackendBaseUrl } from '../api/client';
 import { setBackendBaseUrl, readConnection, clearAuthToken } from '../api/connection';
 import { verifyAndSaveAuthToken } from '../api/auth';
-import { Server, Palette, Cpu, Check, RefreshCw, Sun, Moon } from 'lucide-react';
+import { Server, Palette, Cpu, Check, RefreshCw, Sun, Moon, Users } from 'lucide-react';
 
 export function SettingsPage() {
   const { accentColor, setAccentColor, theme, setTheme } = useApp();
@@ -18,6 +18,9 @@ export function SettingsPage() {
   const [checkingAuth, setCheckingAuth] = useState(false);
   const [authMessage, setAuthMessage] = useState('');
   const [deviceError, setDeviceError] = useState('');
+  const [crowdThreshold, setCrowdThreshold] = useState(50);
+  const [savingCrowdThreshold, setSavingCrowdThreshold] = useState(false);
+
 
   const themes = [
     { id: 'blue', color: '#3b82f6', label: 'Electric Blue' },
@@ -68,9 +71,46 @@ export function SettingsPage() {
     }
   };
 
+  const loadSettings = async () => {
+    try {
+      const resp = await apiRequest('/api/settings');
+      if (resp && typeof resp.crowd_threshold === 'number') {
+        setCrowdThreshold(resp.crowd_threshold);
+      }
+    } catch (err) {
+      // Keep default 50 if settings endpoint is unreachable
+    }
+  };
+
+  const handleSaveCrowdThreshold = async (e) => {
+    e.preventDefault();
+    const val = parseInt(crowdThreshold, 10);
+    if (isNaN(val) || val < 1) {
+      showToast('Ngưỡng cảnh báo đám đông phải là số nguyên >= 1', 'error');
+      return;
+    }
+    setSavingCrowdThreshold(true);
+    try {
+      const resp = await apiRequest('/api/settings', {
+        method: 'PATCH',
+        body: { crowd_threshold: val },
+      });
+      if (resp && typeof resp.crowd_threshold === 'number') {
+        setCrowdThreshold(resp.crowd_threshold);
+      }
+      showToast('Đã lưu cấu hình ngưỡng cảnh báo đám đông!', 'success');
+    } catch (err) {
+      showToast(err.message || 'Không thể lưu cấu hình', 'error');
+    } finally {
+      setSavingCrowdThreshold(false);
+    }
+  };
+
   useEffect(() => {
     loadDevices();
+    loadSettings();
   }, []);
+
 
   return (
     <>
@@ -104,6 +144,50 @@ export function SettingsPage() {
                 <button type="submit" className="btn btn-primary btn-sm" id="btnSaveBackendUrl">
                   <Check size={14} />
                   <span>Lưu cấu hình</span>
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+
+        {/* Crowd Alert Threshold */}
+        <div className="card" style={{ marginBottom: '24px' }} id="settingCardCrowdThreshold">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px' }}>
+            <Users size={20} style={{ color: 'var(--accent)' }} />
+            <div>
+              <h3 style={{ fontSize: '1.05rem', fontWeight: 600 }}>Cấu hình Ngưỡng Cảnh báo Đám đông (Crowd Alert)</h3>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                Generate a crowd alert when the detected number of people reaches or exceeds this threshold.
+              </p>
+            </div>
+          </div>
+
+          <form onSubmit={handleSaveCrowdThreshold}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div>
+                <label htmlFor="inputCrowdThreshold" style={{ display: 'block', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                  Crowd Alert Threshold
+                </label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    className="input-field"
+                    style={{ maxWidth: '160px' }}
+                    value={crowdThreshold}
+                    onChange={(e) => setCrowdThreshold(e.target.value)}
+                    id="inputCrowdThreshold"
+                    required
+                  />
+                  <span style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>people</span>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button type="submit" className="btn btn-primary btn-sm" id="btnSaveCrowdThreshold" disabled={savingCrowdThreshold}>
+                  <Check size={14} />
+                  <span>{savingCrowdThreshold ? 'Đang lưu…' : 'Lưu cấu hình'}</span>
                 </button>
               </div>
             </div>

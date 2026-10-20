@@ -2,7 +2,9 @@
 from dataclasses import dataclass
 from uuid import uuid4
 
-PEOPLE_THRESHOLD = 40
+from src.config.settings import DEFAULT_CROWD_THRESHOLD, get_crowd_threshold
+
+PEOPLE_THRESHOLD = DEFAULT_CROWD_THRESHOLD
 PEOPLE_DURATION_THRESHOLD = 180.0
 VEHICLE_THRESHOLD = 40
 MEANINGFUL_EVENTS = frozenset({
@@ -24,9 +26,11 @@ class ThresholdEpisodes:
         self.crowds = {}
         self.vehicles = {}
 
-    def people(self, camera_id, count, now, wall, location=None):
+    def people(self, camera_id, count, now, wall, location=None, threshold: int | None = None):
+        if threshold is None:
+            threshold = get_crowd_threshold()
         key = (camera_id, location)
-        if count <= PEOPLE_THRESHOLD:
+        if count < threshold:
             self.crowds.pop(key, None)
             return None
         if key not in self.crowds:
@@ -36,7 +40,7 @@ class ThresholdEpisodes:
         if episode.active or elapsed < PEOPLE_DURATION_THRESHOLD:
             return None
         episode.active = True
-        return dict(event_type='CROWD_THRESHOLD', people_count=int(count), threshold=40,
+        return dict(event_type='CROWD_THRESHOLD', people_count=int(count), threshold=int(threshold),
                     duration_seconds=elapsed, location=location, episode=episode.token,
                     timestamp=episode.wall_started + PEOPLE_DURATION_THRESHOLD)
 

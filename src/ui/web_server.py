@@ -103,6 +103,34 @@ def runtime_devices(instrument: bool = False):
     from src.runtime.device_audit import snapshot
     return snapshot(instrument=instrument)
 
+
+@app.get('/api/settings')
+def get_settings():
+    from src.config.settings import get_crowd_threshold
+    return JSONResponse(content={"crowd_threshold": get_crowd_threshold()})
+
+
+@app.patch('/api/settings')
+@app.post('/api/settings')
+@app.patch('/settings')
+async def update_settings(request: Request):
+    from src.config.settings import set_crowd_threshold
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    if not isinstance(body, dict) or "crowd_threshold" not in body:
+        raise HTTPException(status_code=422, detail="crowd_threshold field is required")
+
+    val = body["crowd_threshold"]
+    if not isinstance(val, int) or isinstance(val, bool) or val < 1:
+        raise HTTPException(status_code=422, detail="crowd_threshold must be an integer >= 1")
+
+    saved_val = set_crowd_threshold(val)
+    return JSONResponse(content={"status": "ok", "crowd_threshold": saved_val})
+
+
 # Enable CORS for maximum flexibility
 app.add_middleware(
     CORSMiddleware,
@@ -216,7 +244,11 @@ async def serve_legacy() -> Response:
 @app.get("/cameras/{camera_id}", response_class=FileResponse)
 async def serve_index(request: Request) -> Response:
     """Serve the single-page monitoring dashboard (React SPA or fallback)."""
+    if request.url.path == "/settings" and "application/json" in request.headers.get("accept", ""):
+        from src.config.settings import get_crowd_threshold
+        return JSONResponse(content={"crowd_threshold": get_crowd_threshold()})
     return FileResponse(str(get_index_path()))
+
 
 
 # -----------------------------------------------------------------------------

@@ -488,3 +488,14 @@ class ForecastAlert(Identity, Base):
         Index("ix_forecast_alerts_cam_date", "camera_id", "target_date"),
         Index("ix_forecast_alerts_status", "delivery_status"),
     )
+
+
+class SystemSetting(Identity, Base):
+    """System-wide configuration settings."""
+    __tablename__ = "system_settings"
+
+    crowd_threshold: Mapped[int] = mapped_column(Integer, default=50, server_default="50")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+
+

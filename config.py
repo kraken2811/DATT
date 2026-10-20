@@ -93,6 +93,7 @@ TRACKER_FRAME_RATE: float = 30.0
 # ==============================================================================
 # Default counting zone mode: False = Full View, True = Selected Zone
 ZONE_ENABLED: bool = False
+CROWD_THRESHOLD: int = 50
 
 # Default zone polygon for 1280x720 ROI when counting zone is enabled
 DEFAULT_ZONE_POLYGON: list[tuple[int, int]] = [
