@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Header } from '../components/Header';
-import { fetchCameras, fetchPublicCameras, fetchVideoSources } from '../api/cameras';
+import { fetchCameras, fetchPublicCameras, fetchVideoSources, uploadVideo } from '../api/cameras';
 import { fetchEvents } from '../api/events';
+import { useToast } from '../context/ToastContext';
 import { LoadingSpinner, EmptyState, ErrorState } from '../components/StatusStates';
 import {
   Play,
@@ -16,6 +17,7 @@ import {
   CheckCircle2,
   AlertCircle,
   Film,
+  Upload,
 } from 'lucide-react';
 
 // In-memory module cache for instant (0ms) tab switching
@@ -25,6 +27,7 @@ let cachedDashboardRecentEvents = [];
 
 export function DashboardPage() {
   const navigate = useNavigate();
+  const { showToast } = useToast();
 
   // Tab state: 'registered' | 'cctv' | 'local' | 'custom'
   const [activeTab, setActiveTab] = useState('registered');
@@ -41,6 +44,12 @@ export function DashboardPage() {
   const [videoSources, setVideoSources] = useState(() => cachedDashboardVideoSources);
   const [isLoadingSources, setIsLoadingSources] = useState(() => cachedDashboardVideoSources.length === 0);
   const [sourcesError, setSourcesError] = useState(null);
+
+  // Local video upload state
+  const fileInputRef = useRef(null);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
 
   // Public CCTV cameras
   const [cctvCameras, setCctvCameras] = useState([]);
@@ -111,6 +120,54 @@ export function DashboardPage() {
       setIsLoadingSources(false);
     }
   }, []);
+
+  // Handle local video file selection and upload
+  const handleFileChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate extension matching backend ALLOWED_VIDEO_EXTENSIONS (.mp4, .mov, .mkv, .avi)
+    const ext = '.' + file.name.split('.').pop().toLowerCase();
+    const allowed = ['.mp4', '.mov', '.mkv', '.avi'];
+    if (!allowed.includes(ext)) {
+      const msg = `Định dạng video không được hỗ trợ (${ext}). Chỉ chấp nhận: ${allowed.join(', ')}`;
+      setUploadError(msg);
+      showToast(msg, 'error');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
+    // Validate size (500MB max)
+    const maxSize = 500 * 1024 * 1024;
+    if (file.size > maxSize) {
+      const msg = 'Dung lượng video vượt quá giới hạn cho phép (tối đa 500MB)';
+      setUploadError(msg);
+      showToast(msg, 'error');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
+    setSelectedFile(file);
+    setIsUploading(true);
+    setUploadError(null);
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      await uploadVideo(formData);
+      showToast('Đã tải lên video thành công!', 'success');
+      await loadVideoSources();
+    } catch (err) {
+      const msg = err.message || 'Lỗi khi tải video lên';
+      setUploadError(msg);
+      showToast(msg, 'error');
+    } finally {
+      setIsUploading(false);
+      setSelectedFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
 
   // 3. Fetch Recent Events independently (non-blocking if cached)
   const loadRecentEvents = useCallback(async (signal) => {
@@ -609,6 +666,55 @@ export function DashboardPage() {
           {/* TAB 3: Local Video Uploads */}
           {activeTab === 'local' && (
             <div>
+              {/* Upload Section Header */}
+              <div
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '12px',
+                  marginBottom: '16px',
+                  padding: '12px 16px',
+                  background: 'var(--bg-card)',
+                  borderRadius: 'var(--radius-md)',
+                  border: '1px solid var(--border-card)',
+                }}
+                id="localVideoUploadSection"
+              >
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: '0.88rem', color: 'var(--text-primary)' }}>
+                    Tải video từ máy lên hệ thống
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                    Định dạng hỗ trợ: <strong>.mp4, .mov, .mkv, .avi</strong> • Dung lượng tối đa: <strong>500MB</strong>
+                  </div>
+                </div>
+
+                <div>
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    accept=".mp4,.mov,.mkv,.avi"
+                    style={{ display: 'none' }}
+                    onChange={handleFileChange}
+                    id="localVideoFileInput"
+                    disabled={isUploading}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isUploading}
+                    id="btnUploadLocalVideo"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                  >
+                    <Upload size={14} />
+                    <span>{isUploading ? 'Đang tải lên...' : 'Tải video từ máy'}</span>
+                  </button>
+                </div>
+              </div>
+
               {isLoadingSources && videoSources.length === 0 ? (
                 <LoadingSpinner text="Đang tải danh sách video nội bộ..." />
               ) : sourcesError && videoSources.length === 0 ? (
@@ -618,6 +724,19 @@ export function DashboardPage() {
                   icon={Film}
                   title="Chưa có video nội bộ nào được tải lên"
                   message="Tải video lên từ máy để phát kiểm thử hoặc benchmark."
+                  action={
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isUploading}
+                      id="btnEmptyUploadLocalVideo"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                    >
+                      <Upload size={14} />
+                      <span>{isUploading ? 'Đang tải lên...' : 'Tải video từ máy'}</span>
+                    </button>
+                  }
                 />
               ) : (
                 <div
