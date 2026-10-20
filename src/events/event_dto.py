@@ -32,6 +32,9 @@ class VehiclePassageDTO:
     duration_ms: float = 0.0
     best_vehicle_image_path: str | None = None
     best_plate_image_path: str | None = None
+    plate_detected_at: datetime | None = None
+    ocr_first_candidate_at: datetime | None = None
+    plate_confirmed_at: datetime | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
     finalized_at: datetime | None = None

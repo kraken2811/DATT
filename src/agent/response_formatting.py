@@ -578,10 +578,17 @@ def format_result(name, data, args=None, user_question=None, detail_level=None):
                 intro += '\n\n' + label + ': ' + (f'{len(records)} bản ghi trong kết quả trả về.' if isinstance(records, list) else 'dữ liệu chưa khả dụng.')
                 if isinstance(records, list) and not records:
                     intro += ' Không tìm thấy bản ghi phù hợp trong danh sách trả về này.'
-        elif name == 'get_camera_status':
-            intro = f"Camera {text(data.get('camera_id'))} có trạng thái {text(data.get('operational_status'))} trong dữ liệu trả về."
-            if data.get('stream_reachability_verified') is not True:
-                intro += ' Kết nối trực tiếp tới nguồn chưa được xác minh; trạng thái này không chứng minh camera bị mất mạng.'
+        elif name in ('get_camera_status', 'list_cameras'):
+            if 'cameras' in data:
+                count = data.get('count', len(data.get('cameras', [])))
+                filt = data.get('filter', 'all')
+                intro = f"Hệ thống ghi nhận {count} camera phù hợp bộ lọc trạng thái '{filt}' trong CSDL."
+                if data.get('stream_reachability_verified') is not True:
+                    intro += ' Trạng thái dựa trên lease heartbeat của worker; không chứng minh camera vật lý bị mất kết nối mạng.'
+            else:
+                intro = f"Camera {text(data.get('camera_id'))} có trạng thái {text(data.get('operational_status'))} trong dữ liệu trả về."
+                if data.get('stream_reachability_verified') is not True:
+                    intro += ' Kết nối trực tiếp tới nguồn chưa được xác minh; trạng thái này không chứng minh camera bị mất mạng.'
         elif name == 'get_event_statistics':
             intro = 'Số liệu dưới đây là lịch sử tích lũy. Ngày dương lịch và khoảng 24 giờ trượt được trình bày riêng; lượt xe khác với biển số duy nhất.'
             for alias, canonical in (('busiest_cameras_by_traffic', 'busiest_cameras'), ('most_crowded_camera', 'highest_traffic_camera')):
@@ -648,7 +655,23 @@ def format_result(name, data, args=None, user_question=None, detail_level=None):
             return intro + '\n\n' + '\n'.join(facts(payload))
         return format_watchlist_result(payload, detail_level=resolved_detail, user_question=q_str)
 
-    if name == 'get_camera_status':
+    if name in ('get_camera_status', 'list_cameras'):
+        if 'cameras' in data:
+            cams = data.get('cameras', [])
+            filt = data.get('filter', 'all')
+            count = data.get('count', len(cams))
+            if not cams:
+                return f"Không tìm thấy camera nào có trạng thái **'{filt}'** trong CSDL."
+            msg = f"Hệ thống ghi nhận **{count}** camera với bộ lọc trạng thái **'{filt}'**:\n"
+            for c in cams:
+                c_name = c.get('name') or c.get('camera_id')
+                c_id = c.get('camera_id')
+                c_st = c.get('operational_status')
+                c_loc = c.get('location') or 'Chưa rõ vị trí'
+                msg += f"\n- **{c_name}** (`{c_id}`): Trạng thái **{c_st}** (Vị trí: {c_loc})"
+            msg += "\n\n**Lưu ý:** Trạng thái phản ánh lease heartbeat của worker trong CSDL, không chứng minh camera vật lý bị mất kết nối mạng."
+            return msg
+
         cam_id = data.get('camera_id') or 'chưa rõ'
         st = data.get('operational_status') or 'chưa rõ'
         last_act = utc_to_vietnam_time(data.get('last_active'))

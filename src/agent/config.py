@@ -72,6 +72,8 @@ class AgentConfig:
     prompt_guard_model: str = os.getenv("DATT_AGENT_PROMPT_GUARD_MODEL", "meta-llama/llama-prompt-guard-2-22m")
     prompt_guard_threshold: float = float(os.getenv("DATT_AGENT_PROMPT_GUARD_THRESHOLD", "0.85"))
     prompt_guard_block: bool = os.getenv("DATT_AGENT_PROMPT_GUARD_BLOCK", "true").lower() in ("true", "1", "yes")
+    prompt_guard_fail_open: bool = os.getenv("DATT_AGENT_PROMPT_GUARD_FAIL_OPEN", "true").lower() in ("true", "1", "yes")
+    prompt_guard_max_chunks: int = int(os.getenv("DATT_AGENT_PROMPT_GUARD_MAX_CHUNKS", "3"))
 
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
     gemini_api_key: str | None = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -104,6 +106,8 @@ class AgentConfig:
     rag_chunk_overlap: int = int(os.getenv("AGENT_RAG_CHUNK_OVERLAP", "100"))
     rag_top_k: int = int(os.getenv("AGENT_RAG_TOP_K", "4"))
     rag_score_threshold: float = float(os.getenv("AGENT_RAG_SCORE_THRESHOLD", "0.50"))
+    rag_cache_ttl_seconds: float = float(os.getenv("DATT_RAG_CACHE_TTL_SECONDS", "300.0"))
+    rag_cache_max_size: int = int(os.getenv("DATT_RAG_CACHE_MAX_SIZE", "256"))
 
     # Storage paths and Database connectivity
     docs_dir: Path = PROJECT_ROOT / "docs"

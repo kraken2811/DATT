@@ -286,4 +286,9 @@ class IngestionService:
                         error=str(exc),
                     )
                 )
+        try:
+            from src.agent.tools.knowledge import invalidate_knowledge_cache
+            invalidate_knowledge_cache()
+        except Exception:
+            pass
         return results

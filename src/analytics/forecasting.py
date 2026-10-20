@@ -96,7 +96,7 @@ class TomorrowForecastEngine:
                     h_expr,
                     CrossingEvent.object_type,
                     CrossingEvent.direction,
-                    func.count(CrossingEvent.id),
+                    func.count(CrossingEvent.id).label("count")
                 ).where(and_(*filters)).group_by(
                     h_expr, CrossingEvent.object_type, CrossingEvent.direction
                 )

@@ -18,7 +18,7 @@ import cv2
 from src.storage import save_image
 import numpy as np
 from sqlalchemy import select
-from src.db.models import Target, VehicleWatchlist, FaceEvent, VehicleEvent
+from src.db.models import Target, VehicleWatchlist, FaceEvent, VehicleEvent, Notification
 from src.watchlists.vehicles import normalize_plate
 
 from src.db.database import Database
@@ -390,6 +390,15 @@ class DatabaseWorker:
 
                                 from src.watchlists.vehicles import record_plate_result
                                 match = record_plate_result(session, plate_event, dto.camera_id)
+                                persisted_now = datetime.now(timezone.utc)
+                                persisted_iso = persisted_now.isoformat()
+                                dt_det = getattr(dto, 'plate_detected_at', None)
+                                dt_ocr1 = getattr(dto, 'ocr_first_candidate_at', None)
+                                dt_conf = getattr(dto, 'plate_confirmed_at', None)
+                                det_iso = dt_det.isoformat() if dt_det else None
+                                ocr1_iso = dt_ocr1.isoformat() if dt_ocr1 else None
+                                conf_iso = dt_conf.isoformat() if dt_conf else None
+
                                 event_repo.insert_idempotent(
                                     id=plate_event.id, passage_id=dto.id, camera_id=dto.camera_id,
                                     video_source_id=dto.video_source_id, zone_id=dto.zone_id,
@@ -404,12 +413,65 @@ class DatabaseWorker:
                                               'watchlist_vehicle_color':target.vehicle_color,
                                               'vehicle_type':dto.vehicle_type,'plate_number':dto.plate_text,
                                               'plate_confidence':dto.plate_confidence,'track_id':dto.track_id,
-                                              'vehicle_event_id':str(dto.id),'location':dto.zone_id})
+                                              'vehicle_event_id':str(dto.id),'location':dto.zone_id,
+                                              'plate_detected_at': det_iso,
+                                              'ocr_first_candidate_at': ocr1_iso,
+                                              'plate_confirmed_at': conf_iso,
+                                              'event_persisted_at': persisted_iso,
+                                              'alert_available_at': persisted_iso})
+                                logger.info(
+                                    "[PLATE_LATENCY_METRICS] track_id=%s plate=%s detected_at=%s ocr_first_at=%s confirmed_at=%s persisted_at=%s alert_at=%s",
+                                    dto.track_id,
+                                    dto.plate_text,
+                                    det_iso,
+                                    ocr1_iso,
+                                    conf_iso,
+                                    persisted_iso,
+                                    persisted_iso,
+                                )
                                 try:
                                     with session.begin_nested():
-                                        self.notifications.enqueue_vehicle(session, plate_event, match)
-                                except Exception:
-                                    logger.warning('[NOTIFICATIONS] vehicle enqueue failed; check migration/configuration')
+                                        self.notifications.enqueue_vehicle(session, plate_event, match, event_persisted_at=persisted_iso)
+                                except Exception as n_err:
+                                    logger.warning('[NOTIFICATIONS] vehicle enqueue failed (%s); creating in-app fallback alert', n_err)
+                                    try:
+                                        with session.begin_nested():
+                                            session.add(Notification(
+                                                plate_event_id=plate_event.id,
+                                                vehicle_watchlist_id=target.id,
+                                                camera_id=dto.camera_id or '',
+                                                channel='in_app',
+                                                recipient='',
+                                                status='pending',
+                                                error=None,
+                                                created_at=persisted_now,
+                                                next_attempt_at=persisted_now,
+                                                payload={
+                                                    'alert_type': 'VEHICLE_WATCHLIST_MATCH',
+                                                    'event_id': str(plate_event.id),
+                                                    'plate_number': match.normalized_plate,
+                                                    'display_name': match.display_name,
+                                                    'camera_id': match.camera_id,
+                                                    'event_time': plate_event.created_at.isoformat(),
+                                                    'event_confirmed_at': plate_event.created_at.isoformat(),
+                                                    'plate_detected_at': det_iso,
+                                                    'ocr_first_candidate_at': ocr1_iso,
+                                                    'plate_confirmed_at': conf_iso,
+                                                    'event_persisted_at': persisted_iso,
+                                                    'alert_available_at': persisted_iso,
+                                                    'confidence': plate_event.confidence,
+                                                    'evidence_key': plate_event.plate_crop_path,
+                                                }
+                                            ))
+                                            session.flush()
+                                    except Exception as fallback_err:
+                                        logger.warning(
+                                            "[NOTIFICATIONS] vehicle fallback in-app alert failed (event_type=VEHICLE_WATCHLIST_MATCH plate_event_id=%s watchlist_id=%s error=%s); event remains persisted",
+                                            plate_event.id,
+                                            target.id if target else getattr(match, "watchlist_id", None),
+                                            fallback_err,
+                                            exc_info=True,
+                                        )
 
                 # Persist business events idempotently
                 for ev_dto, snapshot in events:
@@ -498,8 +560,41 @@ class DatabaseWorker:
                         try:
                             with session.begin_nested():
                                 self.notifications.enqueue_face(session, face_event, f_dto, event_persisted_at=persisted_iso)
-                        except Exception:
-                            logger.warning("[NOTIFICATIONS] enqueue failed; check migration/configuration")
+                        except Exception as n_err:
+                            logger.warning("[NOTIFICATIONS] face enqueue failed (%s); creating in-app fallback alert", n_err)
+                            try:
+                                with session.begin_nested():
+                                    session.add(Notification(
+                                        event_id=face_event.id,
+                                        target_id=face_event.target_id,
+                                        camera_id=f_dto.camera_id,
+                                        channel="in_app",
+                                        recipient="",
+                                        status="pending",
+                                        error=None,
+                                        created_at=persisted_now,
+                                        next_attempt_at=persisted_now,
+                                        payload={
+                                            "event_id": str(face_event.id),
+                                            "target_id": str(face_event.target_id),
+                                            "target_name": f_dto.target_name or (target.name if target else None),
+                                            "camera_id": f_dto.camera_id,
+                                            "event_time": f_dto.created_at.isoformat(),
+                                            "event_confirmed_at": confirmed_iso,
+                                            "event_persisted_at": persisted_iso,
+                                            "similarity": face_event.similarity,
+                                            "evidence_key": face_event.face_crop_path,
+                                        },
+                                    ))
+                                    session.flush()
+                            except Exception as fallback_err:
+                                logger.warning(
+                                    "[NOTIFICATIONS] face fallback in-app alert failed (event_type=FACE_WATCHLIST_MATCH face_event_id=%s target_id=%s error=%s); event remains persisted",
+                                    face_event.id,
+                                    face_event.target_id,
+                                    fallback_err,
+                                    exc_info=True,
+                                )
 
 
 

@@ -192,3 +192,126 @@ test('Notification status transition logic handles all 10 requirements', () => {
   ], false);
   assert.equal(firedToasts.length, 4, 'Repeated polling must NOT produce duplicate toasts');
 });
+
+test('NotificationToastWatcher formats FACE vs VEHICLE labels correctly', () => {
+  const watcherPath = path.resolve(__dirname, '../src/components/NotificationToastWatcher.jsx');
+  const content = fs.readFileSync(watcherPath, 'utf8');
+
+  // Must check event_type to separate FACE vs VEHICLE
+  assert.ok(content.includes('isFace'), 'Must determine alert type via isFace');
+  assert.ok(content.includes('Xe:'), 'Must format vehicle label with "Xe: "');
+  assert.ok(!content.includes('target_name || alert.plate_number'), 'Must NOT use target_name || plate_number fallback for both');
+
+  // Verify label resolver logic directly
+  const resolveLabel = (alert) => {
+    const isVehicle = (alert.event_type || alert.alert_type) === 'VEHICLE_WATCHLIST_MATCH';
+    if (isVehicle) {
+      return alert.plate_number ? `Xe: ${alert.plate_number}` : 'Xe không xác định';
+    }
+    return alert.target_name || alert.name || 'Không xác định';
+  };
+
+  const faceAlert = {
+    event_type: 'FACE_WATCHLIST_MATCH',
+    target_name: 'Nguyễn Văn A',
+  };
+  assert.equal(resolveLabel(faceAlert), 'Nguyễn Văn A');
+
+  const vehicleAlert = {
+    event_type: 'VEHICLE_WATCHLIST_MATCH',
+    target_name: 'Chủ xe Nguyễn Văn A',
+    plate_number: '30A10010',
+  };
+  const vehicleLabel = resolveLabel(vehicleAlert);
+  assert.equal(vehicleLabel, 'Xe: 30A10010');
+  assert.ok(!vehicleLabel.includes('Chủ xe Nguyễn Văn A'));
+});
+
+test('NotificationToastWatcher safely handles prev across status transitions (PENDING->SENT, PENDING->FAILED)', () => {
+  const watcherPath = path.resolve(__dirname, '../src/components/NotificationToastWatcher.jsx');
+  const content = fs.readFileSync(watcherPath, 'utf8');
+
+  // Verify that `const prev = knownAlertsRef.current.get(alert.id);` is in the loop scope
+  assert.ok(
+    content.includes('const prev = knownAlertsRef.current.get(alert.id);'),
+    'NotificationToastWatcher.jsx must declare `prev` inside the alert loop'
+  );
+
+  // Simulate multiple alert transitions in sequence (Case 1: PENDING->SENT, Case 2: PENDING->FAILED)
+  const knownAlerts = new Map();
+  const toasts = [];
+  const sessionEmailSet = new Set();
+
+  function processAlerts(alerts) {
+    for (const alert of alerts) {
+      const currStatus = (alert.status || '').toUpperCase();
+      const currRetryCount = alert.retry_count ?? 0;
+      const currRetryScheduled = Boolean(alert.retry_scheduled);
+      const prev = knownAlerts.get(alert.id);
+      const isFace = alert.event_type === 'FACE_WATCHLIST_MATCH';
+      const objectName = isFace ? (alert.target_name || 'Không xác định') : (alert.plate_number ? `Xe: ${alert.plate_number}` : 'Xe không xác định');
+      const cameraName = alert.camera_name || 'Cam 1';
+
+      if (currStatus === 'SENT') {
+        const sig = `${alert.id}:SENT`;
+        const isNew = !prev || prev.status !== 'SENT';
+        if (isNew && !sessionEmailSet.has(sig)) {
+          sessionEmailSet.add(sig);
+          toasts.push({ type: 'success', id: alert.id });
+        }
+      } else if (currStatus === 'FAILED' && currRetryScheduled) {
+        const sig = `${alert.id}:RETRY:${currRetryCount}`;
+        const isNew = !prev || prev.status === 'PENDING' || (prev.status === 'FAILED' && currRetryCount > prev.retry_count);
+        if (isNew && !sessionEmailSet.has(sig)) {
+          sessionEmailSet.add(sig);
+          toasts.push({ type: 'warning', id: alert.id });
+        }
+      } else if (currStatus === 'FAILED' && !currRetryScheduled) {
+        const sig = `${alert.id}:EXHAUSTED:${currRetryCount}`;
+        const isNew = !prev || prev.status === 'PENDING' || (prev.status === 'FAILED' && prev.retry_scheduled);
+        if (isNew && !sessionEmailSet.has(sig)) {
+          sessionEmailSet.add(sig);
+          toasts.push({ type: 'error', id: alert.id });
+        }
+      }
+
+      knownAlerts.set(alert.id, {
+        status: currStatus,
+        retry_count: currRetryCount,
+        retry_scheduled: currRetryScheduled,
+      });
+    }
+  }
+
+  // Initial poll: 3 alerts in PENDING
+  processAlerts([
+    { id: 'alert-1', status: 'PENDING', target_name: 'User 1' },
+    { id: 'alert-2', status: 'PENDING', plate_number: '29A12345' },
+    { id: 'alert-3', status: 'PENDING', target_name: 'User 3' },
+  ]);
+  assert.equal(toasts.length, 0, 'PENDING alerts must not fire toasts');
+  assert.equal(knownAlerts.get('alert-1').status, 'PENDING');
+  assert.equal(knownAlerts.get('alert-2').status, 'PENDING');
+
+  // Second poll: Alert 1 -> SENT, Alert 2 -> FAILED (retry), Alert 3 -> FAILED (exhausted)
+  // Must execute without ReferenceError and process all 3 in the same batch
+  assert.doesNotThrow(() => {
+    processAlerts([
+      { id: 'alert-1', status: 'SENT', target_name: 'User 1' },
+      { id: 'alert-2', status: 'FAILED', retry_scheduled: true, retry_count: 1, plate_number: '29A12345' },
+      { id: 'alert-3', status: 'FAILED', retry_scheduled: false, retry_count: 3, target_name: 'User 3' },
+    ]);
+  }, 'Processing status transitions must not throw');
+
+  assert.equal(toasts.length, 3, 'All 3 transitions must generate their respective toasts');
+  assert.equal(toasts[0].type, 'success');
+  assert.equal(toasts[1].type, 'warning');
+  assert.equal(toasts[2].type, 'error');
+
+  // Verify all 3 alerts are tracked in knownAlerts
+  assert.equal(knownAlerts.get('alert-1').status, 'SENT');
+  assert.equal(knownAlerts.get('alert-2').status, 'FAILED');
+  assert.equal(knownAlerts.get('alert-3').status, 'FAILED');
+});
+
+

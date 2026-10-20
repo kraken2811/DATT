@@ -6,12 +6,29 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select, func, or_
 from sqlalchemy.exc import SQLAlchemyError
 from src.cameras.service import database
-from src.db.models import Notification, FaceEvent, PlateEvent, Target, VehicleWatchlist, Camera
+from src.db.models import Notification, FaceEvent, PlateEvent, Target, VehicleWatchlist, Camera, VehicleWatchlistResult
+import logging
+import threading
+import time
 from .config import EmailConfig
 from .errors import safe_error, ERROR_MESSAGES, RETRY_ERRORS
 
+logger = logging.getLogger("datt.notifications.alerts")
 router = APIRouter()
 EVENT_TYPES = ('FACE_WATCHLIST_MATCH', 'VEHICLE_WATCHLIST_MATCH')
+
+ALERT_FALLBACK_LOG_COOLDOWN = 60.0
+_FALLBACK_LOG_LOCK = threading.Lock()
+_FALLBACK_LAST_LOG_TIME = 0.0
+_FALLBACK_SUPPRESSED_COUNT = 0
+
+
+def _reset_fallback_log_throttle():
+    """Helper for testing or resetting cooldown state."""
+    global _FALLBACK_LAST_LOG_TIME, _FALLBACK_SUPPRESSED_COUNT
+    with _FALLBACK_LOG_LOCK:
+        _FALLBACK_LAST_LOG_TIME = 0.0
+        _FALLBACK_SUPPRESSED_COUNT = 0
 
 
 def camera_aliases(value):
@@ -119,6 +136,9 @@ def query(session, params, ident=None):
         event_confirmed_at = payload.get('event_confirmed_at') or item.created_at.isoformat()
         event_persisted_at = payload.get('event_persisted_at') or item.created_at.isoformat()
         alert_available_at = datetime.now(timezone.utc).isoformat()
+        plate_detected_at = payload.get('plate_detected_at')
+        ocr_first_candidate_at = payload.get('ocr_first_candidate_at')
+        plate_confirmed_at = payload.get('plate_confirmed_at') or event_confirmed_at
         alerts.append(dict(
             id=str(item.id), event_id=event_id, event_center_id=event_key,
             event_type=EVENT_TYPES[0 if is_face else 1], camera_id=item.camera_id,
@@ -128,18 +148,146 @@ def query(session, params, ident=None):
             event_confirmed_at=event_confirmed_at,
             event_persisted_at=event_persisted_at,
             alert_available_at=alert_available_at,
+            plate_detected_at=plate_detected_at,
+            ocr_first_candidate_at=ocr_first_candidate_at,
+            plate_confirmed_at=plate_confirmed_at,
             error_code=item.error if item.error in ERROR_MESSAGES else ('delivery_failed' if item.error else None),
             error_message=safe_error(item.error), retry_count=item.retry_count,
             retry_scheduled=can_retry, max_retries=email_cfg.max_retries,
             target_id=str(face.target_id) if face and face.target_id else
                       (str(item.vehicle_watchlist_id) if item.vehicle_watchlist_id else None),
             target_name=target.name if target else (vehicle.display_name if vehicle else None),
+            vehicle_display_name=vehicle.display_name if vehicle else None,
             plate_number=plate.normalized_plate or plate.plate_text if plate else None,
             event_url='/events?id=' + event_key,
         ))
     if ident:
         return dict(status='ok', alert=alerts[0])
-    return dict(status='ok', alerts=alerts, total=total, page=page, page_size=size)
+
+    # Fallback projection: if any confirmed Watchlist events exist without an email Notification record,
+    # include them immediately in Alert Center so frontend popup triggers without depending on email delivery.
+    if page == 1 and (not status or status in ('all', 'pending')):
+        seen_event_ids = {a['event_id'] for a in alerts}
+        try:
+            # 1. Unnotified Face Events
+            if not kind or kind in ('all', EVENT_TYPES[0]):
+                unnotified_faces = session.execute(
+                    select(FaceEvent, Target)
+                    .join(Target, FaceEvent.target_id == Target.id)
+                    .outerjoin(Notification, Notification.event_id == FaceEvent.id)
+                    .where(
+                        FaceEvent.decision == 'FACE_MATCH',
+                        FaceEvent.target_id.is_not(None),
+                        Notification.id.is_(None)
+                    )
+                    .order_by(FaceEvent.created_at.desc())
+                    .limit(size)
+                ).all()
+
+                for fe, tgt in unnotified_faces:
+                    eid = str(fe.id)
+                    if eid in seen_event_ids:
+                        continue
+                    if camera and camera != 'all' and fe.camera_id not in camera_aliases(camera):
+                        continue
+                    seen_event_ids.add(eid)
+                    event_key = 'face:' + eid
+                    cam_name = names.get(fe.camera_id) if names else fe.camera_id
+                    alerts.insert(0, dict(
+                        id=eid, event_id=eid, event_center_id=event_key,
+                        event_type=EVENT_TYPES[0], camera_id=fe.camera_id,
+                        camera_name=cam_name, recipient_email='',
+                        channel='IN_APP', status='PENDING',
+                        created_at=fe.created_at.isoformat(), sent_at=None,
+                        event_confirmed_at=fe.created_at.isoformat(),
+                        event_persisted_at=fe.created_at.isoformat(),
+                        alert_available_at=datetime.now(timezone.utc).isoformat(),
+                        plate_detected_at=None,
+                        ocr_first_candidate_at=None,
+                        plate_confirmed_at=fe.created_at.isoformat(),
+                        error_code=None, error_message=None, retry_count=0,
+                        retry_scheduled=False, max_retries=email_cfg.max_retries,
+                        target_id=str(fe.target_id),
+                        target_name=tgt.name if tgt else None,
+                        plate_number=None,
+                        event_url='/events?id=' + event_key,
+                    ))
+
+            # 2. Unnotified Plate Events
+            if not kind or kind in ('all', EVENT_TYPES[1]):
+                unnotified_plates = session.execute(
+                    select(PlateEvent, VehicleWatchlist, VehicleWatchlistResult)
+                    .join(VehicleWatchlistResult, VehicleWatchlistResult.plate_event_id == PlateEvent.id)
+                    .join(VehicleWatchlist, VehicleWatchlistResult.watchlist_id == VehicleWatchlist.id)
+                    .outerjoin(Notification, Notification.plate_event_id == PlateEvent.id)
+                    .where(
+                        VehicleWatchlistResult.decision == 'MATCH',
+                        Notification.id.is_(None)
+                    )
+                    .order_by(PlateEvent.created_at.desc())
+                    .limit(size)
+                ).all()
+
+                for pe, v_wl, v_res in unnotified_plates:
+                    eid = str(pe.id)
+                    if eid in seen_event_ids:
+                        continue
+                    cam_id = v_res.camera_id or ''
+                    if camera and camera != 'all' and cam_id not in camera_aliases(camera):
+                        continue
+                    seen_event_ids.add(eid)
+                    event_key = 'plate:' + eid
+                    cam_name = names.get(cam_id) if names else cam_id
+                    alerts.insert(0, dict(
+                        id=eid, event_id=eid, event_center_id=event_key,
+                        event_type=EVENT_TYPES[1], camera_id=cam_id,
+                        camera_name=cam_name, recipient_email='',
+                        channel='IN_APP', status='PENDING',
+                        created_at=pe.created_at.isoformat(), sent_at=None,
+                        event_confirmed_at=pe.created_at.isoformat(),
+                        event_persisted_at=pe.created_at.isoformat(),
+                        alert_available_at=datetime.now(timezone.utc).isoformat(),
+                        plate_detected_at=None,
+                        ocr_first_candidate_at=None,
+                        plate_confirmed_at=pe.created_at.isoformat(),
+                        error_code=None, error_message=None, retry_count=0,
+                        retry_scheduled=False, max_retries=email_cfg.max_retries,
+                        target_id=str(v_wl.id) if v_wl else None,
+                        target_name=v_wl.display_name if v_wl else None,
+                        vehicle_display_name=v_wl.display_name if v_wl else None,
+                        plate_number=pe.normalized_plate or pe.plate_text,
+                        event_url='/events?id=' + event_key,
+                    ))
+        except Exception as exc:
+            global _FALLBACK_LAST_LOG_TIME, _FALLBACK_SUPPRESSED_COUNT
+            now = time.monotonic()
+            should_log_full = False
+            suppressed = 0
+            with _FALLBACK_LOG_LOCK:
+                if now - _FALLBACK_LAST_LOG_TIME >= ALERT_FALLBACK_LOG_COOLDOWN:
+                    should_log_full = True
+                    suppressed = _FALLBACK_SUPPRESSED_COUNT
+                    _FALLBACK_SUPPRESSED_COUNT = 0
+                    _FALLBACK_LAST_LOG_TIME = now
+                else:
+                    _FALLBACK_SUPPRESSED_COUNT += 1
+
+            if should_log_full:
+                if suppressed > 0:
+                    logger.warning(
+                        "[ALERTS] Fallback unnotified events projection query failed: %s (repeated %d times during cooldown)",
+                        exc,
+                        suppressed,
+                        exc_info=True,
+                    )
+                else:
+                    logger.warning(
+                        "[ALERTS] Fallback unnotified events projection query failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+
+    return dict(status='ok', alerts=alerts, total=len(alerts) if total is not None and len(alerts) > total else total, page=page, page_size=size)
 
 
 def execute(params, ident=None):

@@ -124,16 +124,24 @@ export function NotificationToastWatcher() {
           const currRetryCount = alert.retry_count ?? 0;
           const currRetryScheduled = Boolean(alert.retry_scheduled);
           const prev = knownAlertsRef.current.get(alert.id);
-
-          const objectName = alert.target_name || alert.plate_number || 'Không xác định';
-          const cameraName = alert.camera_name || alert.camera_id || 'Không xác định';
           const isFace = alert.event_type === 'FACE_WATCHLIST_MATCH' || (alert.event_center_id && alert.event_center_id.startsWith('face:'));
+
+          // Yêu cầu nghiệp vụ:
+          // FACE: Hiển thị tên người (target_name)
+          // VEHICLE: KHÔNG được ưu tiên VehicleWatchlist.display_name, KHÔNG hiển thị tên chủ xe, format "Xe: <biển số>"
+          // Frontend quyết định label dựa trên event_type, không dùng chung target_name || plate_number
+          const objectName = isFace
+            ? (alert.target_name || 'Không xác định')
+            : (alert.plate_number ? `Xe: ${alert.plate_number}` : 'Xe không xác định');
+          const cameraName = alert.camera_name || alert.camera_id || 'Không xác định';
 
           // =========================================================================
           // LUỒNG B: IMMEDIATE WATCHLIST WARNING POPUP (Independent of email delivery)
           // =========================================================================
           if (alert.event_id && !notifiedEventsSet.has(alert.event_id)) {
-            const targetKey = alert.target_id || alert.plate_number || objectName;
+            const targetKey = isFace
+              ? (alert.target_id || alert.target_name || objectName)
+              : (alert.plate_number || alert.target_id || 'VEHICLE');
             const cooldownKey = `${alert.event_type || 'WATCHLIST'}:${targetKey}:${alert.camera_id}`;
             const lastCooldownTime = cooldownMap[cooldownKey] || 0;
 
@@ -143,17 +151,28 @@ export function NotificationToastWatcher() {
               const popupRenderedAt = Date.now();
 
               // Calculate milestone latencies
-              const confirmedTime = alert.event_confirmed_at
-                ? new Date(alert.event_confirmed_at).getTime()
-                : (alert.created_at ? new Date(alert.created_at).getTime() : frontendReceivedAt);
+              const detectTime = alert.plate_detected_at ? new Date(alert.plate_detected_at).getTime() : null;
+              const ocrTime = alert.ocr_first_candidate_at ? new Date(alert.ocr_first_candidate_at).getTime() : null;
+              const confirmedTime = alert.plate_confirmed_at
+                ? new Date(alert.plate_confirmed_at).getTime()
+                : (alert.event_confirmed_at
+                  ? new Date(alert.event_confirmed_at).getTime()
+                  : (alert.created_at ? new Date(alert.created_at).getTime() : frontendReceivedAt));
               const persistedTime = alert.event_persisted_at
                 ? new Date(alert.event_persisted_at).getTime()
                 : (alert.created_at ? new Date(alert.created_at).getTime() : frontendReceivedAt);
+              const alertAvailableTime = alert.alert_available_at
+                ? new Date(alert.alert_available_at).getTime()
+                : persistedTime;
 
+              const detectToOcrMs = (detectTime && ocrTime) ? Math.max(0, ocrTime - detectTime) : null;
+              const ocrToConfirmMs = (ocrTime && confirmedTime) ? Math.max(0, confirmedTime - ocrTime) : null;
               const confirmToPersistMs = Math.max(0, persistedTime - confirmedTime);
-              const persistToReceivedMs = Math.max(0, frontendReceivedAt - persistedTime);
+              const persistToAlertAvailableMs = Math.max(0, alertAvailableTime - persistedTime);
+              const alertAvailableToReceivedMs = Math.max(0, frontendReceivedAt - alertAvailableTime);
               const receivedToRenderedMs = Math.max(0, popupRenderedAt - frontendReceivedAt);
-              const totalLatencyMs = Math.max(0, popupRenderedAt - confirmedTime);
+              const originTime = detectTime || confirmedTime;
+              const totalLatencyMs = Math.max(0, popupRenderedAt - originTime);
 
               // Structured latency measurement log
               console.info('[LATENCY_MEASUREMENT]', {
@@ -162,14 +181,20 @@ export function NotificationToastWatcher() {
                 target_name: objectName,
                 camera_id: alert.camera_id,
                 camera_name: cameraName,
+                plate_detected_at: alert.plate_detected_at || null,
+                ocr_first_candidate_at: alert.ocr_first_candidate_at || null,
+                plate_confirmed_at: alert.plate_confirmed_at || null,
                 event_confirmed_at: alert.event_confirmed_at || alert.created_at,
                 event_persisted_at: alert.event_persisted_at || alert.created_at,
                 alert_available_at: alert.alert_available_at || new Date().toISOString(),
                 frontend_received_at: new Date(frontendReceivedAt).toISOString(),
                 popup_rendered_at: new Date(popupRenderedAt).toISOString(),
                 latencies: {
+                  detect_to_ocr_ms: detectToOcrMs !== null ? Math.round(detectToOcrMs) : null,
+                  ocr_to_confirm_ms: ocrToConfirmMs !== null ? Math.round(ocrToConfirmMs) : null,
                   confirm_to_persist_ms: Math.round(confirmToPersistMs),
-                  persist_to_received_ms: Math.round(persistToReceivedMs),
+                  persist_to_alert_available_ms: Math.round(persistToAlertAvailableMs),
+                  alert_available_to_received_ms: Math.round(alertAvailableToReceivedMs),
                   received_to_rendered_ms: Math.round(receivedToRenderedMs),
                   total_latency_ms: Math.round(totalLatencyMs),
                 },

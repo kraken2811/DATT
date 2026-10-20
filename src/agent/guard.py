@@ -40,10 +40,39 @@ def _chunk_text(text: str, max_chars: int = CHUNK_MAX_CHARS, overlap: int = CHUN
     return chunks
 
 
+def _sample_chunks(chunks: list[str], max_samples: int = 3) -> list[str]:
+    """Sample chunks to represent beginning, middle, and end without exceeding max_samples.
+
+    Guarantees coverage of the first chunk, the last chunk, and evenly distributed middle chunks
+    to prevent injections placed at the end or middle from escaping scanning.
+    """
+    if len(chunks) <= max_samples:
+        return chunks
+    if max_samples <= 1:
+        return [chunks[0]]
+    if max_samples == 2:
+        return [chunks[0], chunks[-1]]
+
+    first = chunks[0]
+    last = chunks[-1]
+    num_middle = max_samples - 2
+    step = (len(chunks) - 1) / (num_middle + 1)
+    middle_indices = [int(round((i + 1) * step)) for i in range(num_middle)]
+
+    sampled = [first]
+    for idx in middle_indices:
+        if 0 < idx < len(chunks) - 1 and chunks[idx] not in sampled:
+            sampled.append(chunks[idx])
+    if last not in sampled:
+        sampled.append(last)
+    return sampled
+
+
 def check_prompt_safety(
     text: str,
     threshold: float | None = None,
     client: Any | None = None,
+    fail_open: bool | None = None,
 ) -> dict[str, Any]:
     """Evaluate text prompt for prompt injection and jailbreak risks using Groq Prompt Guard.
 
@@ -54,12 +83,13 @@ def check_prompt_safety(
             is_injection (bool): True if score >= threshold.
             chunks_scanned (int): Number of text segments evaluated.
             latency_sec (float): Processing duration in seconds.
-            error (str | None): Error detail if service call encountered an issue (fail-open).
+            error (str | None): Error detail if service call encountered an issue.
             model (str): Name of prompt guard model used.
     """
     start_time = time.time()
     thresh = threshold if threshold is not None else agent_config.prompt_guard_threshold
     model_name = agent_config.prompt_guard_model
+    effective_fail_open = fail_open if fail_open is not None else agent_config.prompt_guard_fail_open
 
     # Check if disabled by configuration
     if not agent_config.prompt_guard_enabled:
@@ -119,24 +149,30 @@ def check_prompt_safety(
             from groq import Groq
             client = Groq(api_key=key, timeout=10.0)
         except Exception as exc:
-            logger.warning("Prompt Guard client initialization failed (%s); failing open.", exc)
+            logger.warning("Prompt Guard client initialization failed (%s); fail_open=%s", exc, effective_fail_open)
             return {
-                "safe": True,
-                "score": 0.0,
-                "is_injection": False,
+                "safe": bool(effective_fail_open),
+                "is_safe": bool(effective_fail_open),
+                "score": 0.0 if effective_fail_open else 1.0,
+                "max_score": 0.0 if effective_fail_open else 1.0,
+                "is_injection": not effective_fail_open,
                 "chunks_scanned": 0,
+                "flagged_chunks": 0 if effective_fail_open else 1,
                 "latency_sec": round(time.time() - start_time, 3),
                 "error": f"client_init_error: {exc}",
+                "reason": "client_init_fail_open" if effective_fail_open else "client_init_fail_closed",
                 "model": model_name,
-                "status": "fail_open",
+                "status": "fail_open" if effective_fail_open else "fail_closed",
             }
 
     max_score = 0.0
     scanned_count = 0
+    flagged_count = 0
 
     try:
-        # Scan each chunk (limit to at most 3 chunks for cost/latency bounding)
-        for chunk in chunks[:3]:
+        # Sample chunks across beginning, middle, and end within max chunk budget
+        sampled_chunks = _sample_chunks(chunks, max_samples=agent_config.prompt_guard_max_chunks)
+        for chunk in sampled_chunks:
             resp = client.chat.completions.create(
                 model=model_name,
                 messages=[{"role": "user", "content": chunk}],
@@ -152,6 +188,8 @@ def check_prompt_safety(
 
             if score > max_score:
                 max_score = score
+            if score >= thresh:
+                flagged_count += 1
 
             # Fast-exit if already beyond threshold
             if max_score >= thresh:
@@ -160,24 +198,25 @@ def check_prompt_safety(
     except Exception as exc:
         duration = round(time.time() - start_time, 3)
         logger.warning(
-            "Prompt Guard service error after %.2fs (%s: %s); failing open for availability.",
+            "Prompt Guard service error after %.2fs (%s: %s); fail_open=%s",
             duration,
             type(exc).__name__,
             exc,
+            effective_fail_open,
         )
         return {
-            "safe": True,
-            "is_safe": True,
-            "score": 0.0,
-            "max_score": 0.0,
-            "is_injection": False,
+            "safe": bool(effective_fail_open),
+            "is_safe": bool(effective_fail_open),
+            "score": 0.0 if effective_fail_open else 1.0,
+            "max_score": 0.0 if effective_fail_open else 1.0,
+            "is_injection": not effective_fail_open,
             "chunks_scanned": scanned_count,
-            "flagged_chunks": 0,
+            "flagged_chunks": 0 if effective_fail_open else 1,
             "latency_sec": duration,
             "error": f"service_error: {type(exc).__name__}",
-            "reason": "scan_error_fail_open",
+            "reason": "scan_error_fail_open" if effective_fail_open else "scan_error_fail_closed",
             "model": model_name,
-            "status": "fail_open",
+            "status": "fail_open" if effective_fail_open else "fail_closed",
         }
 
     duration = round(time.time() - start_time, 3)

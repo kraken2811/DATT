@@ -1,11 +1,13 @@
-"""Camera inspection and status tools for DATT AI Agent."""
-
+import logging
 from typing import Any
 from langchain_core.tools import tool
+from sqlalchemy import select
 
 from src.cameras.service import database, find, serialize
 from src.config.camera_config import load_cameras
 from src.db.models import Camera, utc_now
+
+logger = logging.getLogger("datt.agent.tools.camera")
 
 
 @tool
@@ -123,25 +125,87 @@ def mask_source_url(source: str | None) -> str | None:
 
 
 @tool
-def get_camera_status(camera_id: str | None = None, camera: str | None = None) -> dict[str, Any]:
-    """Retrieve the real-time operational status (online/offline/disabled) of a camera.
+def get_camera_status(
+    camera_id: str | None = None,
+    camera: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """Retrieve the real-time operational status of a camera, or list cameras filtered by status.
 
     Grounding distinctions:
     - Status in database reflects the ingestion worker's heartbeat lease (`active_until`),
       NOT a live network probe of the physical stream URL.
+    - If camera_id is omitted, returns a list of cameras matching the status filter ('online', 'offline', 'disabled', 'all').
     - Troubleshooting advice is strictly adapted to source_type (local file, RTSP, HLS, YouTube).
 
     Args:
-        camera_id: Camera identifier or registry key (e.g. 'camera_01').
+        camera_id: Optional camera identifier or registry key (e.g. 'camera_01'). If omitted, lists cameras.
         camera: Optional alias for camera_id.
+        status: Status filter when listing cameras ('online', 'offline', 'disabled', 'all').
 
     Returns:
-        Current status ('online', 'offline', 'disabled'), status basis, reachability flag,
-        source type, and tailored troubleshooting guidance.
+        Single camera status dict if camera_id provided, or structured camera list if camera_id is omitted.
     """
     clean_id = (camera_id or camera or "").strip()
     if not clean_id:
-        return {"status": "error", "message": "camera_id is required"}
+        filter_status = (status or "all").strip().lower()
+        cameras_list: list[dict[str, Any]] = []
+        now = utc_now()
+        seen_keys: set[str] = set()
+
+        try:
+            with database() as db, db.transaction() as session:
+                db_cameras = list(session.scalars(select(Camera)).all())
+                for cam in db_cameras:
+                    active = bool(cam.active_until and cam.active_until > now)
+                    op_status = "disabled" if not cam.enabled else ("online" if active else "offline")
+                    if filter_status == "all" or op_status == filter_status:
+                        cameras_list.append({
+                            "camera_id": str(cam.id),
+                            "name": cam.name,
+                            "operational_status": op_status,
+                            "last_active": cam.last_active.isoformat() if cam.last_active else None,
+                            "source_type": cam.source_type,
+                            "location": cam.location,
+                        })
+                    for k in (cam.registry_key, str(cam.id), cam.id.hex if hasattr(cam.id, "hex") else str(cam.id)):
+                        if k:
+                            seen_keys.add(k.lower())
+        except Exception as exc:
+            logger.debug("Failed querying cameras from DB for status list: %s", exc)
+
+        try:
+            yaml_cams = load_cameras()
+            for k, c in yaml_cams.items():
+                if k.lower() not in seen_keys and c.name.lower() not in seen_keys:
+                    c_status = getattr(c, "status", "offline")
+                    if not getattr(c, "enabled", True):
+                        c_status = "disabled"
+                    if filter_status == "all" or c_status == filter_status:
+                        cameras_list.append({
+                            "camera_id": c.id,
+                            "name": c.name,
+                            "operational_status": c_status,
+                            "last_active": None,
+                            "source_type": c.type,
+                            "location": c.location,
+                        })
+        except Exception as exc:
+            logger.debug("Failed loading YAML cameras: %s", exc)
+
+        return {
+            "status": "success",
+            "filter": filter_status,
+            "count": len(cameras_list),
+            "cameras": cameras_list,
+            "status_basis": "database_heartbeat_lease",
+            "status_basis_description": (
+                "Trạng thái dựa trên lease gia hạn 'active_until' của ingestion worker trong CSDL. "
+                "Trạng thái 'offline' cho thấy worker chưa/không còn giữ lease hợp lệ; "
+                "hệ thống chưa thực hiện probe kết nối mạng trực tiếp tới URL stream."
+            ),
+            "stream_reachability_verified": False,
+        }
 
     # Check database status
     try:
@@ -149,13 +213,13 @@ def get_camera_status(camera_id: str | None = None, camera: str | None = None) -
             cam = find(session, clean_id)
             if cam is not None:
                 active = bool(cam.active_until and cam.active_until > utc_now())
-                status = "disabled" if not cam.enabled else ("online" if active else "offline")
+                status_val = "disabled" if not cam.enabled else ("online" if active else "offline")
                 guidance = get_troubleshooting_guidance(cam.source_type, cam.source)
                 return {
                     "status": "success",
                     "camera_id": str(cam.id),
                     "name": cam.name,
-                    "operational_status": status,
+                    "operational_status": status_val,
                     "is_active": active,
                     "enabled": cam.enabled,
                     "last_active": cam.last_active.isoformat() if cam.last_active else None,
@@ -203,3 +267,21 @@ def get_camera_status(camera_id: str | None = None, camera: str | None = None) -
         "status": "not_found",
         "message": f"Camera '{clean_id}' was not found.",
     }
+
+
+@tool
+def list_cameras(status: str | None = None) -> dict[str, Any]:
+    """List operational cameras filtered by heartbeat status ('online', 'offline', 'disabled', or 'all').
+
+    Use this tool to answer questions like:
+    - 'Camera nào đang offline?'
+    - 'Liệt kê danh sách camera đang online'
+    - 'Có bao nhiêu camera bị offline?'
+
+    Args:
+        status: Filter by status ('online', 'offline', 'disabled', or 'all'). Default is 'all'.
+
+    Returns:
+        Structured list of cameras with operational_status, name, camera_id, last_active, source_type, and location.
+    """
+    return get_camera_status.invoke({"camera_id": None, "status": status})

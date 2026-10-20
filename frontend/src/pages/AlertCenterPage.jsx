@@ -255,8 +255,12 @@ export function AlertCenterPage() {
                         </span>
                       </td>
                       <td>
-                        <div style={{ fontWeight: 600 }}>{item.target_name || item.plate_number || 'Đối tượng theo dõi'}</div>
-                        {item.plate_number && (
+                        <div style={{ fontWeight: 600 }}>
+                          {item.event_type === 'FACE_WATCHLIST_MATCH'
+                            ? (item.target_name || 'Đối tượng theo dõi')
+                            : (item.plate_number ? `Xe: ${item.plate_number}` : 'Xe không xác định')}
+                        </div>
+                        {item.plate_number && item.event_type !== 'VEHICLE_WATCHLIST_MATCH' && (
                           <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                             Biển số: {item.plate_number}
                           </span>
@@ -361,7 +365,11 @@ export function AlertCenterPage() {
                       </div>
                       <div>
                         <span style={{ color: 'var(--text-muted)' }}>Đối tượng:</span>
-                        <div style={{ fontWeight: 600 }}>{alertDetail.target_name || alertDetail.plate_number || 'N/A'}</div>
+                        <div style={{ fontWeight: 600 }}>
+                          {alertDetail.event_type === 'FACE_WATCHLIST_MATCH'
+                            ? (alertDetail.target_name || 'N/A')
+                            : (alertDetail.plate_number ? `Xe: ${alertDetail.plate_number}` : 'Xe không xác định')}
+                        </div>
                       </div>
                       <div>
                         <span style={{ color: 'var(--text-muted)' }}>Camera:</span>

@@ -24,6 +24,11 @@ def seed_knowledge_base(docs_dir: Path | str | None = None, force_update: bool =
         )
 
     ingested = sum(1 for r in results if r.status in ("created", "updated", "skipped"))
+    try:
+        from src.agent.tools.knowledge import invalidate_knowledge_cache
+        invalidate_knowledge_cache()
+    except Exception:
+        pass
     logger.info("Knowledge base seeding completed: %d files processed", ingested)
     return ingested
 

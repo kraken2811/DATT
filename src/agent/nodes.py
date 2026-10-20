@@ -184,7 +184,6 @@ class MockChatModel:
 
         # 4. Short-term memory recall (e.g. secret markers or shift codes)
         if "marker" in lower_q or "secret" in lower_q or "bí mật" in lower_q or "mã ca trực" in lower_q or "mã trực" in lower_q or "mã của tôi" in lower_q:
-            import re
             for m in messages[:-1]:
                 m_txt = str(m.content)
                 if "ALPHA-" in m_txt:
@@ -220,6 +219,35 @@ class MockChatModel:
                     content=content_str,
                     additional_kwargs={"latest_event_id": eid, "latest_event_data": edata},
                 )
+
+        # Multi-tool query (traffic + alerts + emails)
+        is_multi_tool = (
+            ("lượt xe" in lower_q or "lưu lượng" in lower_q or "xe" in lower_q)
+            and ("cảnh báo" in lower_q or "alert" in lower_q)
+            and ("email" in lower_q or "mail" in lower_q or "gửi" in lower_q or "thông báo" in lower_q)
+        )
+        if is_multi_tool:
+            cam_id = op_filters.get("camera_id")
+            tr = "today" if ("hôm nay" in lower_q or "hom nay" in lower_q) else ("yesterday" if "hôm qua" in lower_q else None)
+            calls = []
+            if "get_traffic_analytics" in self.tools:
+                args = dict(op_filters)
+                if tr:
+                    args["time_range"] = tr
+                calls.append({"name": "get_traffic_analytics", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"})
+            elif "get_event_statistics" in self.tools:
+                calls.append({"name": "get_event_statistics", "args": {"camera_id": cam_id}, "id": f"call_{uuid.uuid4().hex[:8]}"})
+
+            if "get_alerts" in self.tools:
+                args = dict(op_filters)
+                calls.append({"name": "get_alerts", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"})
+
+            if "get_notifications_status" in self.tools:
+                args = dict(op_filters)
+                calls.append({"name": "get_notifications_status", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"})
+
+            if calls:
+                return AIMessage(content="", tool_calls=calls)
 
         # Shift Handover Report generation
         if any(w in lower_q for w in ("ca trực", "bàn giao ca", "ca sáng", "ca chiều", "ca tối", "ca đêm")):
@@ -319,34 +347,6 @@ class MockChatModel:
                     ],
                 )
 
-        # Multi-tool query (traffic + alerts + emails)
-        is_multi_tool = (
-            ("lượt xe" in lower_q or "lưu lượng" in lower_q or "xe" in lower_q)
-            and ("cảnh báo" in lower_q or "alert" in lower_q)
-            and ("email" in lower_q or "mail" in lower_q or "gửi" in lower_q or "thông báo" in lower_q)
-        )
-        if is_multi_tool:
-            cam_id = op_filters.get("camera_id")
-            tr = "today" if ("hôm nay" in lower_q or "hom nay" in lower_q) else ("yesterday" if "hôm qua" in lower_q else None)
-            calls = []
-            if "get_traffic_analytics" in self.tools:
-                args = dict(op_filters)
-                if tr:
-                    args["time_range"] = tr
-                calls.append({"name": "get_traffic_analytics", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"})
-            elif "get_event_statistics" in self.tools:
-                calls.append({"name": "get_event_statistics", "args": {"camera_id": cam_id}, "id": f"call_{uuid.uuid4().hex[:8]}"})
-
-            if "get_alerts" in self.tools:
-                args = dict(op_filters)
-                calls.append({"name": "get_alerts", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"})
-
-            if "get_notifications_status" in self.tools:
-                args = dict(op_filters)
-                calls.append({"name": "get_notifications_status", "args": args, "id": f"call_{uuid.uuid4().hex[:8]}"})
-
-            if calls:
-                return AIMessage(content="", tool_calls=calls)
 
         # Combined Vehicle History + Watchlist Alert
         plate_in_q = extract_plate(content)
@@ -434,20 +434,37 @@ class MockChatModel:
             )
 
         # 6. Intent-based tool routing
-        # A. Camera status query
-        if ("camera" in lower_q or "cam" in lower_q) and ("online" in lower_q or "offline" in lower_q or "trạng thái" in lower_q or "status" in lower_q):
-            cam_id = "camera_01"
+        # A. Camera status query & camera listing
+        if ("camera" in lower_q or "cam" in lower_q) and ("online" in lower_q or "offline" in lower_q or "trạng thái" in lower_q or "status" in lower_q or "danh sách" in lower_q or "liệt kê" in lower_q):
+            explicit_cam = None
             for word in content.split():
                 clean_w = word.strip(".,:;!?\"'")
-                if clean_w.upper().startswith("CAM") or clean_w.lower().startswith("camera"):
-                    cam_id = clean_w
+                if clean_w.lower() in ("camera", "cam", "camera nào", "cam nào"):
+                    continue
+                if clean_w.upper().startswith("CAM_") or clean_w.lower().startswith("camera_") or clean_w.lower().startswith("camera-") or (clean_w.upper().startswith("CAM") and len(clean_w) > 3):
+                    explicit_cam = clean_w
                     break
+
+            if explicit_cam:
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "get_camera_status",
+                            "args": {"camera_id": explicit_cam},
+                            "id": f"call_{uuid.uuid4().hex[:8]}",
+                        }
+                    ],
+                )
+
+            # Query list of cameras by status filter
+            status_filter = "offline" if "offline" in lower_q else ("online" if "online" in lower_q else ("disabled" if "disabled" in lower_q else "all"))
             return AIMessage(
                 content="",
                 tool_calls=[
                     {
                         "name": "get_camera_status",
-                        "args": {"camera_id": cam_id},
+                        "args": {"camera_id": None, "status": status_filter},
                         "id": f"call_{uuid.uuid4().hex[:8]}",
                     }
                 ],
@@ -628,7 +645,6 @@ class MockChatModel:
         if "watchlist" in lower_q or "danh sách theo dõi" in lower_q:
             target = None
             if "biển số" in lower_q or "30a-" in lower_q:
-                import re
                 match = re.search(r"[0-9]{2}[A-Za-z]-[0-9]{4,5}", content)
                 target = match.group(0) if match else None
             args = {"target": target, "limit": 10} if target else {"limit": 10}
@@ -669,7 +685,6 @@ class MockChatModel:
             )
 
         # Only greetings receive the welcome; operational questions ask for detail.
-        import re
         if content.strip() and not re.fullmatch(r"(?:xin chào|chào(?: bạn)?|hello|hi|hey)[\s.!?]*", lower_q.strip()):
             return AIMessage(content="Bạn có thể nêu rõ tên hoặc ID người, camera, biển số hay khoảng thời gian cần tra cứu để tôi kiểm tra dữ liệu chính xác hơn.")
         return AIMessage(
@@ -782,6 +797,12 @@ _tool_executor: concurrent.futures.ThreadPoolExecutor | None = None
 _tool_executor_lock = threading.Lock()
 _timed_out_tool_executions: set[concurrent.futures.Future] = set()
 _timed_out_lock = threading.Lock()
+
+
+def get_timed_out_task_count() -> int:
+    """Return the number of currently active timed-out tool tasks."""
+    with _timed_out_lock:
+        return len(_timed_out_tool_executions)
 
 
 def get_tool_executor() -> concurrent.futures.ThreadPoolExecutor:
@@ -928,6 +949,32 @@ def tool_node(state: AgentState) -> dict[str, Any]:
             )
             continue
 
+        # Backpressure check: shed load if worker pool is saturated by running timed-out tasks
+        max_tool_workers = int(os.getenv("DATT_AGENT_TOOL_MAX_WORKERS", "4"))
+        with _timed_out_lock:
+            active_timed_out = len(_timed_out_tool_executions)
+        if active_timed_out >= max_tool_workers:
+            logger.warning(
+                "[TOOL_BACKPRESSURE] Executor saturated (%d/%d timed-out tasks still running). Shedding tool '%s'",
+                active_timed_out,
+                max_tool_workers,
+                call_name,
+            )
+            tool_results.append(
+                ToolMessage(
+                    content=json.dumps(
+                        {
+                            "status": "tool_executor_busy",
+                            "message": f"Hệ thống đang bận xử lý các tác vụ trước đó ({active_timed_out} tác vụ nền đang chạy). Vui lòng thử lại sau.",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    tool_call_id=call_id,
+                    name=call_name,
+                )
+            )
+            continue
+
         # Execute tool safely with bounded timeout via managed executor
         total_calls += 1
         executor = get_tool_executor()
@@ -954,14 +1001,16 @@ def tool_node(state: AgentState) -> dict[str, Any]:
                 )
             )
         except concurrent.futures.TimeoutError:
+            with _timed_out_lock:
+                _timed_out_tool_executions.add(future)
+                running_timed_out = len(_timed_out_tool_executions)
             logger.warning(
-                "Tool %s (call_id=%s) timed out after %.1fs; background thread continues until completion.",
+                "Tool %s (call_id=%s) timed out after %.1fs; background thread continues (active timed-out tasks: %d).",
                 call_name,
                 call_id,
                 agent_config.tool_timeout_sec,
+                running_timed_out,
             )
-            with _timed_out_lock:
-                _timed_out_tool_executions.add(future)
 
             def _on_timed_out_complete(fut: concurrent.futures.Future) -> None:
                 with _timed_out_lock:

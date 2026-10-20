@@ -10,7 +10,7 @@ from .analytics import (
     get_predictive_alerts,
 )
 from .anomalies import detect_traffic_anomalies
-from .camera import get_camera, get_camera_status
+from .camera import get_camera, get_camera_status, list_cameras
 from .events import get_event, search_events
 from .investigation import investigate_vehicle, investigate_face
 from .knowledge import get_knowledge
@@ -22,6 +22,7 @@ from .watchlist import search_watchlist
 ALL_AGENT_TOOLS = [
     get_camera,
     get_camera_status,
+    list_cameras,
     get_event,
     search_events,
     search_watchlist,
@@ -46,6 +47,7 @@ __all__ = [
     "ALL_AGENT_TOOLS",
     "get_camera",
     "get_camera_status",
+    "list_cameras",
     "get_event",
     "search_events",
     "search_watchlist",

@@ -110,8 +110,12 @@ class TestVehicleEventPersistence:
                 except Exception:
                     pass
         self.db.dispose()
+        Database.dispose_shared()
         self._database_env.stop()
-        self._db_temp.cleanup()
+        try:
+            self._db_temp.cleanup()
+        except Exception:
+            pass
 
     def test_single_vehicle_event_per_track_and_plate_linkage(self) -> None:
         """Requirement:

@@ -1,4 +1,5 @@
 from datetime import timedelta
+import logging
 from types import SimpleNamespace
 from uuid import uuid4
 import io
@@ -223,6 +224,206 @@ def test_missing_notification_schema_does_not_lose_face_event(setup,tmp_path):
         assert worker._persist_batch([('FACE_EVENT',dto,None)])
         with setup[0].transaction() as s: assert s.get(FaceEvent,dto.id) is not None
     finally: worker.stop()
+
+
+def test_missing_notification_schema_does_not_lose_plate_event(setup, tmp_path):
+    from src.events.db_worker import DatabaseWorker
+    from src.events.event_dto import VehiclePassageDTO
+    from src.db.models import PlateEvent, VehicleWatchlist, VehicleWatchlistResult
+
+    # Add active vehicle watchlist target
+    with setup[0].transaction() as s:
+        s.add(VehicleWatchlist(id=uuid4(), plate_number='30A10010', display_name='Xe test', status='active'))
+
+    # Drop notifications table to simulate missing/broken schema
+    Notification.__table__.drop(setup[0].engine)
+
+    worker = DatabaseWorker(str(setup[0].engine.url), snapshot_dir=tmp_path / 'evidence')
+    now = utc_now()
+    dto = VehiclePassageDTO(
+        id=uuid4(),
+        session_key='session-plate-fail',
+        camera_id='gate',
+        track_id=88,
+        first_seen_at=now,
+        last_seen_at=now,
+        plate_text='30A10010',
+        vehicle_type='car',
+        is_final=True,
+        created_at=now,
+        updated_at=now,
+        finalized_at=now,
+        plate_status='CONFIRMED',
+    )
+    try:
+        assert worker._persist_batch([('PASSAGE', dto, None)])
+        with setup[0].transaction() as s:
+            results = list(s.scalars(select(VehicleWatchlistResult)))
+            assert len(results) >= 1
+            plate = s.get(PlateEvent, results[0].plate_event_id)
+            assert plate is not None
+            assert plate.plate_text == '30A10010'
+    finally:
+        worker.stop()
+
+
+def test_notification_insert_failure_does_not_rollback_face_or_plate(setup, tmp_path):
+    from src.events.db_worker import DatabaseWorker
+    from src.events.event_dto import FaceEventDTO, VehiclePassageDTO
+    from src.db.models import PlateEvent, VehicleWatchlist, VehicleWatchlistResult
+
+    with setup[0].transaction() as s:
+        s.add(VehicleWatchlist(id=uuid4(), plate_number='29A99999', display_name='Xe test 2', status='active'))
+
+    worker = DatabaseWorker(str(setup[0].engine.url), snapshot_dir=tmp_path / 'evidence')
+    # Mock notifications to fail during enqueue (simulating unexpected runtime / insert failure)
+    worker.notifications.enqueue_face = Mock(side_effect=RuntimeError("Simulated face notification failure"))
+    worker.notifications.enqueue_vehicle = Mock(side_effect=RuntimeError("Simulated vehicle notification failure"))
+
+    now = utc_now()
+    face_dto = FaceEventDTO(id=uuid4(), track_id=2, camera_id='gate', target_id=setup[1], created_at=now)
+    passage_dto = VehiclePassageDTO(
+        id=uuid4(),
+        session_key='session-fail-2',
+        camera_id='gate',
+        track_id=89,
+        first_seen_at=now,
+        last_seen_at=now,
+        plate_text='29A99999',
+        vehicle_type='car',
+        is_final=True,
+        created_at=now,
+        updated_at=now,
+        finalized_at=now,
+        plate_status='CONFIRMED',
+    )
+    try:
+        # Persist face event despite notification failure
+        assert worker._persist_batch([('FACE_EVENT', face_dto, None)])
+        with setup[0].transaction() as s:
+            assert s.get(FaceEvent, face_dto.id) is not None
+
+        # Persist vehicle passage despite notification failure
+        assert worker._persist_batch([('PASSAGE', passage_dto, None)])
+        with setup[0].transaction() as s:
+            results = list(s.scalars(select(VehicleWatchlistResult).where(VehicleWatchlistResult.normalized_plate == '29A99999')))
+            assert len(results) == 1
+            assert s.get(PlateEvent, results[0].plate_event_id) is not None
+    finally:
+        worker.stop()
+
+
+def test_fallback_notification_failure_logs_warning_and_preserves_events(setup, tmp_path, caplog):
+    from unittest.mock import patch
+    from src.events.db_worker import DatabaseWorker
+    from src.events.event_dto import FaceEventDTO, VehiclePassageDTO
+    from src.db.models import PlateEvent, VehicleWatchlist, VehicleWatchlistResult
+    import logging
+
+    with setup[0].transaction() as s:
+        s.add(VehicleWatchlist(id=uuid4(), plate_number='51G12345', display_name='Xe test 3', status='active'))
+
+    worker = DatabaseWorker(str(setup[0].engine.url), snapshot_dir=tmp_path / 'evidence')
+    # 1. Enqueue fails
+    worker.notifications.enqueue_face = Mock(side_effect=RuntimeError("Primary face enqueue failed"))
+    worker.notifications.enqueue_vehicle = Mock(side_effect=RuntimeError("Primary vehicle enqueue failed"))
+
+    now = utc_now()
+    face_dto = FaceEventDTO(id=uuid4(), track_id=12, camera_id='cam_gate_face', target_id=setup[1], created_at=now)
+    passage_dto = VehiclePassageDTO(
+        id=uuid4(),
+        session_key='session-fail-3',
+        camera_id='cam_gate_plate',
+        track_id=90,
+        first_seen_at=now,
+        last_seen_at=now,
+        plate_text='51G12345',
+        vehicle_type='car',
+        is_final=True,
+        created_at=now,
+        updated_at=now,
+        finalized_at=now,
+        plate_status='CONFIRMED',
+    )
+
+    caplog.set_level(logging.WARNING, logger="datt.events.db_worker")
+
+    # 2. Fallback Notification instantiation also fails (simulating table / constraint / model failure)
+    with patch("src.events.db_worker.Notification", side_effect=RuntimeError("Simulated fallback model/schema crash")):
+        try:
+            # Face event must persist and log warning
+            assert worker._persist_batch([('FACE_EVENT', face_dto, None)])
+            with setup[0].transaction() as s:
+                assert s.get(FaceEvent, face_dto.id) is not None
+
+            # Plate event must persist and log warning
+            assert worker._persist_batch([('PASSAGE', passage_dto, None)])
+            with setup[0].transaction() as s:
+                results = list(s.scalars(select(VehicleWatchlistResult).where(VehicleWatchlistResult.normalized_plate == '51G12345')))
+                assert len(results) == 1
+                assert s.get(PlateEvent, results[0].plate_event_id) is not None
+        finally:
+            worker.stop()
+
+    # Verify structured logs were generated without exception propagation
+    assert "face fallback in-app alert failed" in caplog.text
+    assert "vehicle fallback in-app alert failed" in caplog.text
+    assert "FACE_WATCHLIST_MATCH" in caplog.text
+    assert "VEHICLE_WATCHLIST_MATCH" in caplog.text
+    assert "Simulated fallback model/schema crash" in caplog.text
+    assert str(face_dto.id) in caplog.text
+    assert str(face_dto.target_id) in caplog.text
+    # Data minimization: target_name and plate text must NOT be exposed in fallback warning logs
+    assert "target_name=" not in caplog.text
+    assert "plate=" not in caplog.text
+
+
+def test_alert_fallback_projection_log_rate_limiting(caplog):
+    """Case A: Fallback unnotified events projection query errors are rate-limited to prevent log spam."""
+    from src.notifications.alerts import query as query_alerts, _reset_fallback_log_throttle
+    from unittest.mock import MagicMock, patch
+
+    _reset_fallback_log_throttle()
+    mock_session = MagicMock()
+    mock_session.scalar.return_value = 0
+    res_mock = MagicMock()
+    res_mock.all.return_value = []
+
+    is_main_query = True
+
+    def fake_execute(*args, **kwargs):
+        nonlocal is_main_query
+        if is_main_query:
+            is_main_query = False
+            return res_mock
+        is_main_query = True
+        raise RuntimeError("DB connection timeout during fallback projection")
+
+    mock_session.execute.side_effect = fake_execute
+
+    caplog.clear()
+    caplog.set_level(logging.WARNING, logger="datt.notifications.alerts")
+
+    # 1. First call -> Logs WARNING with full traceback
+    res1 = query_alerts(mock_session, {'page': 1, 'page_size': 20})
+    assert res1['status'] == 'ok'
+    assert len(caplog.records) == 1
+    assert "Fallback unnotified events projection query failed" in caplog.text
+    assert caplog.records[0].exc_info is not None
+
+    # 2. Second call immediately within cooldown -> Throttled (no additional warning log)
+    res2 = query_alerts(mock_session, {'page': 1, 'page_size': 20})
+    assert res2['status'] == 'ok'
+    assert len(caplog.records) == 1
+
+    # 3. Third call after cooldown expires -> Logs WARNING with repeated count
+    with patch("src.notifications.alerts.time.monotonic", return_value=time.monotonic() + 100.0):
+        res3 = query_alerts(mock_session, {'page': 1, 'page_size': 20})
+        assert res3['status'] == 'ok'
+        assert len(caplog.records) == 2
+        assert "repeated 1 times during cooldown" in caplog.records[1].message
+
+
 
 
 def test_gmail_defaults_with_three_secrets(monkeypatch):

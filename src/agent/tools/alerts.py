@@ -95,7 +95,8 @@ def get_alerts(
             for item, face, plate, target, vehicle in rows:
                 is_face = item.event_id is not None
                 e_type = "FACE_WATCHLIST_MATCH" if is_face else "VEHICLE_WATCHLIST_MATCH"
-                target_label = target.name if target else (vehicle.display_name if vehicle else None)
+                target_label = target.name if (is_face and target) else (target.name if target else None)
+                vehicle_owner = vehicle.display_name if (not is_face and vehicle) else None
                 plate_label = (plate.normalized_plate or plate.plate_text) if plate else None
                 camera_name = names.get(item.camera_id) or item.camera_id
 
@@ -107,6 +108,7 @@ def get_alerts(
                     "camera_name": camera_name,
                     "camera_location": locations.get(item.camera_id),
                     "target_name": target_label,
+                    "vehicle_display_name": vehicle_owner,
                     "plate_number": plate_label,
                     "created_at": item.created_at.isoformat() if item.created_at else None,
                     "sent_at": item.sent_at.isoformat() if item.sent_at else None,

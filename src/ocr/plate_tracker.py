@@ -5,6 +5,7 @@ CHECKING until confidence, quality, agreement and distinct-frame thresholds pass
 """
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import logging
 from collections import OrderedDict, Counter
 from dataclasses import replace
@@ -60,6 +61,9 @@ class PlateTrackState:
     plate_history: list[Any] = None  # type: ignore  # stores past candidates for multi-frame voting
     vote_scores: dict[str, float] = None  # type: ignore
     candidate_crops: list[Any] = None  # type: ignore  # stores real observed crops for multi-frame fusion
+    plate_detected_at: datetime | None = None
+    ocr_first_candidate_at: datetime | None = None
+    plate_confirmed_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.plate_history is None:
@@ -89,6 +93,9 @@ class PlateTrackState:
             "consensus_count": self.consensus_count,
             "frame_id": self.frame_id,
             "candidate_crops_count": len(self.candidate_crops) if self.candidate_crops else 0,
+            "plate_detected_at": self.plate_detected_at.isoformat() if self.plate_detected_at else None,
+            "ocr_first_candidate_at": self.ocr_first_candidate_at.isoformat() if self.ocr_first_candidate_at else None,
+            "plate_confirmed_at": self.plate_confirmed_at.isoformat() if self.plate_confirmed_at else None,
         }
 
 
@@ -369,6 +376,12 @@ class VehiclePlateManager:
             if cand is None:
                 return
 
+            now_dt = datetime.now(timezone.utc)
+            if state.plate_detected_at is None:
+                state.plate_detected_at = now_dt
+            if getattr(cand, "plate_text", "") and state.ocr_first_candidate_at is None:
+                state.ocr_first_candidate_at = now_dt
+
             if getattr(cand, "raw_crop", None) is not None and isinstance(cand.raw_crop, np.ndarray) and cand.raw_crop.size > 0:
                 state.candidate_crops.append(cand.raw_crop)
                 if len(state.candidate_crops) > 6:
@@ -450,6 +463,7 @@ class VehiclePlateManager:
                 state.status = 'CONFIRMED'
                 state.confirmed_plate = winner
                 state.confirmed_frame_id = job.frame_id
+                state.plate_confirmed_at = now_dt
                 if self._worker is not None:
                     self._worker.discard(job.track_id)
                 logger.info('[PLATE_CONFIRM] track_id=%s first_frame=%s confirm_frame=%s plate=%s observations=%s',

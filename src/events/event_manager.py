@@ -80,6 +80,9 @@ class VehiclePassage:
     best_vehicle_area: float = 0.0
     plate_confirmed_emitted: bool = False
     confirmed_plate: str = ""
+    plate_detected_at: datetime | None = None
+    ocr_first_candidate_at: datetime | None = None
+    plate_confirmed_at: datetime | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     finalized_at: datetime | None = None
 
@@ -121,6 +124,9 @@ class VehiclePassage:
             duration_ms=self.duration * 1000.0,
             best_vehicle_image_path=self.best_vehicle_image_path,
             best_plate_image_path=self.best_plate_image_path,
+            plate_detected_at=self.plate_detected_at,
+            ocr_first_candidate_at=self.ocr_first_candidate_at,
+            plate_confirmed_at=self.plate_confirmed_at,
             created_at=self.created_at,
             updated_at=datetime.now(timezone.utc),
             finalized_at=fin_dt,
@@ -257,6 +263,15 @@ class EventManager:
                 if state is not None:
                     passage.plate_state = state  # Collect a late worker result at finalization.
                 self._collect_confirmed_plate(passage)
+
+        if plate_results:
+            for (cam, tid), passage in list(self._active_passages.items()):
+                if cam == camera_id and tid in plate_results and not passage.plate_confirmed_emitted:
+                    st = plate_results[tid]
+                    if st is not None:
+                        passage.plate_state = st
+                        self._collect_confirmed_plate(passage)
+
         threshold = self._episodes.congestion(camera_id, vehicle_count, time.monotonic(), now, zone_id)
         if threshold:
             self._persist_threshold(camera_id, threshold, frame, video_source_id)
@@ -268,8 +283,7 @@ class EventManager:
         self.last_event_build_ms = (time.perf_counter()-start)*1000.0
         return emitted
 
-    @staticmethod
-    def _collect_confirmed_plate(passage):
+    def _collect_confirmed_plate(self, passage):
         state = passage.plate_state
         if state is None or getattr(state, 'status', '') != 'CONFIRMED':
             return
@@ -281,16 +295,49 @@ class EventManager:
         passage.plate_confidence = state.confidence
         passage.best_plate_image = state.plate_crop
         passage.confirmed_plate = plate
-        passage.plate_confirmed_emitted = True
+        passage.plate_detected_at = getattr(state, 'plate_detected_at', None)
+        passage.ocr_first_candidate_at = getattr(state, 'ocr_first_candidate_at', None)
+        passage.plate_confirmed_at = getattr(state, 'plate_confirmed_at', None) or datetime.now(timezone.utc)
+        if not passage.plate_confirmed_emitted:
+            passage.plate_confirmed_emitted = True
+            if self.db_worker is not None:
+                self.db_worker.enqueue_passage(
+                    passage.to_dto(is_final=True),
+                    vehicle_crop=passage.best_vehicle_image,
+                    plate_crop=passage.best_plate_image,
+                    is_critical=True,
+                )
 
     def _finalize_vehicle(self, passage):
         passage.exited = True
         passage.duration = max(0.0, passage.last_seen-passage.first_seen)
         self._collect_confirmed_plate(passage)
         if not passage.confirmed_plate:
+            # Fallback for fast-exiting tracks before consensus quorum: use consensus candidate if available
+            state = passage.plate_state
+            if state is not None:
+                candidate = getattr(state, 'candidate_text', '') or getattr(state, 'provisional_plate', '')
+                if candidate and not passage.plate_text:
+                    passage.plate_text = candidate
+                    passage.confirmed_plate = candidate
+                    passage.plate_status = 'CONFIRMED'
+                    passage.plate_confidence = getattr(state, 'confidence', 0.5)
+                    if passage.best_plate_image is None and getattr(state, 'plate_crop', None) is not None:
+                        passage.best_plate_image = state.plate_crop
+                    passage.plate_detected_at = getattr(state, 'plate_detected_at', None)
+                    passage.ocr_first_candidate_at = getattr(state, 'ocr_first_candidate_at', None)
+                    passage.plate_confirmed_at = getattr(state, 'plate_confirmed_at', None) or datetime.now(timezone.utc)
+        if not passage.confirmed_plate:
             return
-        self.db_worker.enqueue_passage(passage.to_dto(is_final=True),
-            vehicle_crop=passage.best_vehicle_image, plate_crop=passage.best_plate_image, is_critical=True)
+        if not passage.plate_confirmed_emitted:
+            passage.plate_confirmed_emitted = True
+            if self.db_worker is not None:
+                self.db_worker.enqueue_passage(
+                    passage.to_dto(is_final=True),
+                    vehicle_crop=passage.best_vehicle_image,
+                    plate_crop=passage.best_plate_image,
+                    is_critical=True,
+                )
 
 
     def process_face_matches(
