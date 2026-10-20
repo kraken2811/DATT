@@ -1,13 +1,20 @@
 """Local contract tests; simulated remote storage is NOT cloud E2E evidence."""
 import io
+import os
 from pathlib import Path
 import subprocess
 import sys
 from unittest.mock import patch
 
+import cv2
+from fastapi.testclient import TestClient
+import numpy as np
 import pytest
 
+from src.db.database import Database
+from src.db.models import Base
 from src.storage import LocalStorageBackend, ExternalStorageBackend, get_storage
+from src.ui import web_server
 
 
 @pytest.mark.parametrize("key", ["../private", "/etc/passwd", "data/events/../../secret", "data/events\\secret", "https://host/token", "data/events/./x"])
@@ -253,3 +260,154 @@ def test_target_image_materializes_after_cache_reset(tmp_path, monkeypatch):
         assert response.status_code == 200
         assert response.content == encoded.tobytes()
         fresh.delete(key)
+
+
+def test_upload_success_does_not_leak_server_path(tmp_path, monkeypatch):
+    """Required Test A: Upload success response must NOT expose server_path or absolute paths."""
+    monkeypatch.delenv("DATT_REQUIRE_PERSISTENCE", raising=False)
+    monkeypatch.setenv("DATT_DATABASE_URL", "sqlite:///" + (tmp_path / "leak-test.db").as_posix())
+    monkeypatch.setenv("DATT_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("DATT_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setattr(web_server, "UPLOAD_VIDEO_DIR", tmp_path)
+
+    db = Database()
+    Base.metadata.create_all(db.engine)
+    clip = tmp_path / "valid.mp4"
+    writer = cv2.VideoWriter(str(clip), cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 64))
+    for _ in range(5):
+        writer.write(np.zeros((64, 64, 3), dtype=np.uint8))
+    writer.release()
+
+    client = TestClient(web_server.app)
+    response = client.post("/api/upload_video", files={"file": ("valid.mp4", clip.read_bytes(), "video/mp4")})
+    assert response.status_code == 200
+    data = response.json()
+
+    # Required fields must exist
+    assert data["status"] == "ok"
+    assert "video_source_id" in data
+    assert "id" in data
+    assert "filename" in data
+    assert "storage_path" in data
+    assert "size" in data
+
+    # server_path MUST NOT exist in response
+    assert "server_path" not in data
+
+    # No value in the JSON response should contain an absolute filesystem path
+    tmp_root_str = str(tmp_path).replace("\\", "/")
+    for k, v in data.items():
+        if isinstance(v, str):
+            assert not os.path.isabs(v), f"Field '{k}' exposed absolute path: {v}"
+            assert tmp_root_str.lower() not in v.replace("\\", "/").lower(), f"Field '{k}' leaked host root: {v}"
+    db.dispose()
+
+
+def test_upload_storage_rollback_on_db_metadata_failure(tmp_path, monkeypatch):
+    """Required Test B: If DB metadata write fails after storage.save, storage is rolled back."""
+    monkeypatch.delenv("DATT_REQUIRE_PERSISTENCE", raising=False)
+    monkeypatch.setenv("DATT_DATABASE_URL", "sqlite:///" + (tmp_path / "rollback-test.db").as_posix())
+    monkeypatch.setenv("DATT_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("DATT_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setattr(web_server, "UPLOAD_VIDEO_DIR", tmp_path)
+
+    db = Database()
+    Base.metadata.create_all(db.engine)
+    clip = tmp_path / "rollback.mp4"
+    writer = cv2.VideoWriter(str(clip), cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 64))
+    for _ in range(5):
+        writer.write(np.zeros((64, 64, 3), dtype=np.uint8))
+    writer.release()
+
+    client = TestClient(web_server.app)
+
+    # Patch VideoSourceRepository.create to simulate DB failure
+    with patch("src.db.repositories.VideoSourceRepository.create", side_effect=RuntimeError("Simulated DB failure")):
+        response = client.post("/api/upload_video", files={"file": ("rollback.mp4", clip.read_bytes(), "video/mp4")})
+
+    # Returns 503 metadata persistence failure
+    assert response.status_code == 503
+    assert response.json() == {"status": "error", "message": "Video metadata could not be persisted"}
+    assert "server_path" not in response.json()
+
+    # DB record is not created
+    with db.transaction() as session:
+        from src.db.models import VideoSource
+        from sqlalchemy import select
+        records = session.scalars(select(VideoSource)).all()
+        assert len(records) == 0
+
+    # Storage object was deleted / does not exist
+    video_files = [f for f in (tmp_path / "data" / "uploads" / "videos").glob("*") if f.is_file()] + [
+        f for f in tmp_path.glob("*.mp4") if f != clip
+    ]
+    assert len(video_files) == 0, f"Orphan storage files remained: {video_files}"
+    db.dispose()
+
+
+def test_upload_cleanup_failure_does_not_mask_root_error(tmp_path, monkeypatch, caplog):
+    """Required Test C: If storage rollback also fails, root 503 error is returned and logged safely."""
+    monkeypatch.delenv("DATT_REQUIRE_PERSISTENCE", raising=False)
+    monkeypatch.setenv("DATT_DATABASE_URL", "sqlite:///" + (tmp_path / "cleanup-fail-test.db").as_posix())
+    monkeypatch.setenv("DATT_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("DATT_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setattr(web_server, "UPLOAD_VIDEO_DIR", tmp_path)
+
+    db = Database()
+    Base.metadata.create_all(db.engine)
+    clip = tmp_path / "cleanup_fail.mp4"
+    writer = cv2.VideoWriter(str(clip), cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 64))
+    for _ in range(5):
+        writer.write(np.zeros((64, 64, 3), dtype=np.uint8))
+    writer.release()
+
+    client = TestClient(web_server.app)
+
+    # Patch LocalStorageBackend.delete so rollback fails
+    with patch.object(LocalStorageBackend, "delete", side_effect=OSError("Storage connection lost during rollback")):
+        with patch("src.db.repositories.VideoSourceRepository.create", side_effect=RuntimeError("Simulated DB failure")):
+            response = client.post("/api/upload_video", files={"file": ("cleanup_fail.mp4", clip.read_bytes(), "video/mp4")})
+
+    # Must still return safe 503 metadata error, NOT a success and NOT the raw storage exception
+    assert response.status_code == 503
+    assert response.json() == {"status": "error", "message": "Video metadata could not be persisted"}
+    assert "Storage connection lost during rollback" not in response.text
+
+    # Cleanup error must be logged with [VIDEO_UPLOAD_ROLLBACK_ERROR]
+    assert any("[VIDEO_UPLOAD_ROLLBACK_ERROR]" in record.message for record in caplog.records)
+    db.dispose()
+
+
+def test_successful_upload_regression(tmp_path, monkeypatch):
+    """Required Test D: Normal upload succeeds, registers DB record, and lists in /api/video_sources."""
+    monkeypatch.delenv("DATT_REQUIRE_PERSISTENCE", raising=False)
+    monkeypatch.setenv("DATT_DATABASE_URL", "sqlite:///" + (tmp_path / "success-test.db").as_posix())
+    monkeypatch.setenv("DATT_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("DATT_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setattr(web_server, "UPLOAD_VIDEO_DIR", tmp_path)
+
+    db = Database()
+    Base.metadata.create_all(db.engine)
+    clip = tmp_path / "normal.mp4"
+    writer = cv2.VideoWriter(str(clip), cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 64))
+    for _ in range(5):
+        writer.write(np.zeros((64, 64, 3), dtype=np.uint8))
+    writer.release()
+
+    client = TestClient(web_server.app)
+    response = client.post("/api/upload_video", files={"file": ("normal.mp4", clip.read_bytes(), "video/mp4")})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "video_source_id" in data
+    assert data["filename"] == "normal.mp4"
+    assert data["storage_path"].startswith("data/uploads/videos/")
+    assert get_storage().exists(data["storage_path"])
+
+    # Appears in /video_sources
+    list_resp = client.get("/api/video_sources")
+    assert list_resp.status_code == 200
+    sources = list_resp.json().get("sources", [])
+    assert any(s["id"] == data["video_source_id"] and s["original_filename"] == "normal.mp4" for s in sources)
+    db.dispose()

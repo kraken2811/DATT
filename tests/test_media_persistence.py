@@ -83,6 +83,7 @@ class TestMediaPersistence(unittest.TestCase):
                 except Exception:
                     pass
         self.db_env.stop()
+        Database.dispose_shared()
         gc.collect()
         self.db_temp.cleanup()
 
@@ -109,10 +110,11 @@ class TestMediaPersistence(unittest.TestCase):
         # Verify response fields
         self.assertIn("video_source_id", data)
         self.assertIn("storage_path", data)
-        self.assertIn("server_path", data)
+        self.assertNotIn("server_path", data)
         self.assertTrue(data["storage_path"].startswith("data/uploads/videos/"))
 
-        uploaded_disk_file = Path(data["server_path"])
+        from src.storage import get_storage
+        uploaded_disk_file = get_storage().materialize(data["storage_path"])
         self.created_files.append(uploaded_disk_file)
         self.assertTrue(uploaded_disk_file.is_file(), "Uploaded MP4 file must exist on disk")
         self.assertGreater(uploaded_disk_file.stat().st_size, 0)

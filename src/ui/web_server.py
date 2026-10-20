@@ -890,14 +890,16 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
 
     # Persist the object before committing its metadata; local file is staging only.
     try:
+        storage = get_storage()
         with target_path.open("rb") as source:
-            get_storage().save(rel_storage_path, source)
+            storage.save(rel_storage_path, source)
     except StorageUploadTooLarge:
         target_path.unlink(missing_ok=True)
         return JSONResponse(content={"status": "error", "code": "VIDEO_TOO_LARGE_FOR_STORAGE",
             "message": "Video vượt giới hạn dung lượng Storage. Hãy chọn video nhỏ hơn hoặc tăng giới hạn Storage; video chưa được lưu."}, status_code=413)
     except Exception:
         logger.error("[VIDEO_STORAGE_ERROR] Persistent storage write failed")
+        target_path.unlink(missing_ok=True)
         return JSONResponse(content={"status": "error", "message": "Video storage unavailable"}, status_code=503)
 
     video_source_id = None
@@ -925,6 +927,15 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
             )
     except Exception as db_exc:
         logger.warning("[VIDEO_UPLOAD_DB_ERROR] Could not persist video metadata (%s)", type(db_exc).__name__)
+        try:
+            get_storage().delete(rel_storage_path)
+            logger.info("[VIDEO_UPLOAD_ROLLBACK] Removed storage object after DB metadata failure: %s", rel_storage_path)
+        except Exception as cleanup_exc:
+            logger.error(
+                "[VIDEO_UPLOAD_ROLLBACK_ERROR] Failed to rollback storage object %s (%s): %s",
+                rel_storage_path, type(cleanup_exc).__name__, cleanup_exc,
+            )
+        target_path.unlink(missing_ok=True)
         return JSONResponse(content={"status": "error", "message": "Video metadata could not be persisted"}, status_code=503)
 
     return JSONResponse(
@@ -934,7 +945,6 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
             "video_source_id": video_source_id,
             "filename": original_filename,
             "storage_path": rel_storage_path,
-            "server_path": str(target_path.resolve()),
             "size": total_size,
         },
         status_code=200,

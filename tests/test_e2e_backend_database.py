@@ -91,6 +91,7 @@ class TestEndToEndBackendDatabase:
                 except Exception:
                     pass
         db_env.stop()
+        Database.dispose_shared()
         gc.collect()
         self.db_temp.cleanup()
 
@@ -113,12 +114,14 @@ class TestEndToEndBackendDatabase:
         assert upload_resp.status_code == 200
         data = upload_resp.json()
         assert data["status"] == "ok"
+        assert "server_path" not in data
         source_id = data["video_source_id"]
         rel_storage_path = data["storage_path"]
-        server_path = Path(data["server_path"])
-        self.cleanup_files.append(server_path)
+        from src.storage import get_storage
+        storage_file = get_storage().materialize(rel_storage_path)
+        self.cleanup_files.append(storage_file)
 
-        assert server_path.is_file()
+        assert storage_file.is_file()
         assert rel_storage_path.startswith("data/uploads/videos/")
 
         # 3. Verify PostgreSQL record in video_sources
@@ -165,7 +168,7 @@ class TestEndToEndBackendDatabase:
         with db.transaction() as session:
             repo = VideoSourceRepository(session)
             assert repo.get(src_uuid) is None
-        assert not server_path.exists()
+        assert not storage_file.exists()
 
     def test_02_target_person_e2e_flow(self) -> None:
         """Requirement 2 & 7: Target Person Registration, 512D AdaFace, Selection, and DB Persistence."""

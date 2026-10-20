@@ -238,19 +238,22 @@ class TestRuntimeStabilization(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             data = response.json()
             self.assertEqual(data["status"], "ok")
-            self.assertIn("server_path", data)
-            self.assertTrue(Path(data["server_path"]).exists())
+            self.assertNotIn("server_path", data)
+            self.assertIn("storage_path", data)
+            from src.storage import get_storage
+            uploaded_path = get_storage().materialize(data["storage_path"])
+            self.assertTrue(uploaded_path.exists())
             self.assertGreater(data["size"], 0)
 
             # Verify it can be loaded by LocalVideoReader
-            reader = LocalVideoReader(data["server_path"])
+            reader = LocalVideoReader(str(uploaded_path))
             reader.start()
             frame = reader.read(timeout=2.0)
             self.assertIsNotNone(frame)
             reader.stop()
 
             # Clean up uploaded file
-            Path(data["server_path"]).unlink(missing_ok=True)
+            uploaded_path.unlink(missing_ok=True)
         finally:
             dummy_mp4_path.unlink(missing_ok=True)
 
